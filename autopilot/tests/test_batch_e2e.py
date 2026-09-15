@@ -29,9 +29,23 @@ def test_three_job_deterministic_batch_production(tmp_path):
         "priority": "normal",
         "auto_publish": False,
         "items": [
-            {"topic": "The Discovery of Penicillin", "priority": "high"},
-            {"topic": "The History of Aviation", "priority": "normal"},
-            {"topic": "The Origin of Printing Press", "priority": "low"},
+            {
+                "topic": "The Discovery of Penicillin",
+                "priority": "high",
+                # Pin the mock policy so the worker keeps deterministic mock providers
+                # instead of resolving local_only -> live LLM/research/TTS services.
+                "payload": {"policy": "mock"},
+            },
+            {
+                "topic": "The History of Aviation",
+                "priority": "normal",
+                "payload": {"policy": "mock"},
+            },
+            {
+                "topic": "The Origin of Printing Press",
+                "priority": "low",
+                "payload": {"policy": "mock"},
+            },
         ],
     }
     manifest_path = tmp_path / "test_batch.json"
