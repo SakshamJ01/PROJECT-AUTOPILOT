@@ -1,0 +1,762 @@
+{
+  "$defs": {
+    "AssetRequest": {
+      "properties": {
+        "asset_request_id": {
+          "minLength": 1,
+          "title": "Asset Request Id",
+          "type": "string"
+        },
+        "scene_id": {
+          "minLength": 1,
+          "title": "Scene Id",
+          "type": "string"
+        },
+        "query": {
+          "minLength": 1,
+          "title": "Query",
+          "type": "string"
+        },
+        "asset_type": {
+          "default": "image",
+          "title": "Asset Type",
+          "type": "string"
+        },
+        "duration_target": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duration Target"
+        },
+        "aspect_ratio": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "9:16",
+          "title": "Aspect Ratio"
+        },
+        "required_visual_properties": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Required Visual Properties",
+          "type": "array"
+        },
+        "rights_license_metadata": {
+          "additionalProperties": true,
+          "title": "Rights License Metadata",
+          "type": "object"
+        },
+        "provider_metadata": {
+          "additionalProperties": true,
+          "title": "Provider Metadata",
+          "type": "object"
+        }
+      },
+      "required": [
+        "asset_request_id",
+        "scene_id",
+        "query"
+      ],
+      "title": "AssetRequest",
+      "type": "object"
+    },
+    "ContentItem": {
+      "properties": {
+        "content_id": {
+          "description": "Deterministic content identifier",
+          "title": "Content Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": "v1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "topic": {
+          "minLength": 1,
+          "title": "Topic",
+          "type": "string"
+        },
+        "language": {
+          "default": "en",
+          "title": "Language",
+          "type": "string"
+        },
+        "format": {
+          "default": "9:16_video",
+          "title": "Format",
+          "type": "string"
+        },
+        "platform_targets": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Platform Targets",
+          "type": "array"
+        },
+        "created_at": {
+          "title": "Created At",
+          "type": "string"
+        },
+        "updated_at": {
+          "title": "Updated At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "content_id",
+        "topic"
+      ],
+      "title": "ContentItem",
+      "type": "object"
+    },
+    "ProvenanceRecord": {
+      "properties": {
+        "provider": {
+          "default": "local",
+          "title": "Provider",
+          "type": "string"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "generation_timestamp": {
+          "title": "Generation Timestamp",
+          "type": "string"
+        },
+        "input_reference_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Input Reference Ids",
+          "type": "array"
+        },
+        "source_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Source Ids",
+          "type": "array"
+        },
+        "artifact_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Artifact Ids",
+          "type": "array"
+        },
+        "deterministic_idempotency_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Deterministic Idempotency Key"
+        },
+        "checksum_sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Checksum Sha256"
+        }
+      },
+      "title": "ProvenanceRecord",
+      "type": "object"
+    },
+    "PublicationMetadata": {
+      "properties": {
+        "title": {
+          "default": "Untitled",
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "hashtags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Hashtags",
+          "type": "array"
+        },
+        "category": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Category"
+        },
+        "privacy_status": {
+          "default": "private",
+          "title": "Privacy Status",
+          "type": "string"
+        },
+        "scheduled_publish_time": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Scheduled Publish Time"
+        },
+        "target_platforms": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Target Platforms",
+          "type": "array"
+        }
+      },
+      "title": "PublicationMetadata",
+      "type": "object"
+    },
+    "ResearchSource": {
+      "properties": {
+        "source_id": {
+          "minLength": 1,
+          "title": "Source Id",
+          "type": "string"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Url"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title"
+        },
+        "publisher": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Publisher"
+        },
+        "published_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Published At"
+        },
+        "accessed_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Accessed At"
+        },
+        "source_type": {
+          "default": "article",
+          "description": "article|video|social|database|other",
+          "title": "Source Type",
+          "type": "string"
+        },
+        "credibility": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Credibility"
+        },
+        "notes": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Notes"
+        }
+      },
+      "required": [
+        "source_id"
+      ],
+      "title": "ResearchSource",
+      "type": "object"
+    },
+    "ScriptDocument": {
+      "properties": {
+        "contract_version": {
+          "default": "v1.0.0",
+          "title": "Contract Version",
+          "type": "string"
+        },
+        "content_id": {
+          "minLength": 1,
+          "title": "Content Id",
+          "type": "string"
+        },
+        "topic": {
+          "minLength": 1,
+          "title": "Topic",
+          "type": "string"
+        },
+        "working_title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Working Title"
+        },
+        "title_candidates": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Title Candidates",
+          "type": "array"
+        },
+        "hook": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Hook"
+        },
+        "introduction": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Introduction"
+        },
+        "scenes": {
+          "items": {
+            "$ref": "#/$defs/ScriptScene"
+          },
+          "title": "Scenes",
+          "type": "array"
+        },
+        "cta": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cta"
+        },
+        "total_estimated_duration": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Total Estimated Duration"
+        },
+        "target_platform": {
+          "default": "youtube",
+          "title": "Target Platform",
+          "type": "string"
+        },
+        "language": {
+          "default": "en",
+          "title": "Language",
+          "type": "string"
+        },
+        "tone_persona": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tone Persona"
+        },
+        "source_references": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Source References",
+          "type": "array"
+        },
+        "generation_metadata": {
+          "additionalProperties": true,
+          "title": "Generation Metadata",
+          "type": "object"
+        }
+      },
+      "required": [
+        "content_id",
+        "topic"
+      ],
+      "title": "ScriptDocument",
+      "type": "object"
+    },
+    "ScriptScene": {
+      "properties": {
+        "scene_id": {
+          "minLength": 1,
+          "title": "Scene Id",
+          "type": "string"
+        },
+        "order": {
+          "description": "Deterministic scene order",
+          "minimum": 1,
+          "title": "Order",
+          "type": "integer"
+        },
+        "narration": {
+          "default": "",
+          "title": "Narration",
+          "type": "string"
+        },
+        "visual_intent": {
+          "minLength": 1,
+          "title": "Visual Intent",
+          "type": "string"
+        },
+        "asset_query": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Asset Query"
+        },
+        "on_screen_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "On Screen Text"
+        },
+        "emphasis_words": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Emphasis Words"
+        },
+        "estimated_duration_seconds": {
+          "default": 5.0,
+          "description": "Must be positive",
+          "exclusiveMinimum": 0,
+          "title": "Estimated Duration Seconds",
+          "type": "number"
+        },
+        "transition_hint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Transition Hint"
+        },
+        "scene_type": {
+          "default": "talking_head",
+          "description": "Extensible: talking_head|broll|image|text|screen|generated_visual|montage",
+          "title": "Scene Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "scene_id",
+        "order",
+        "visual_intent"
+      ],
+      "title": "ScriptScene",
+      "type": "object"
+    },
+    "VoiceSegment": {
+      "properties": {
+        "segment_id": {
+          "minLength": 1,
+          "title": "Segment Id",
+          "type": "string"
+        },
+        "scene_id": {
+          "minLength": 1,
+          "title": "Scene Id",
+          "type": "string"
+        },
+        "text": {
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        },
+        "estimated_duration": {
+          "default": 5.0,
+          "exclusiveMinimum": 0,
+          "title": "Estimated Duration",
+          "type": "number"
+        },
+        "voice_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Voice Id"
+        },
+        "provider_metadata": {
+          "additionalProperties": true,
+          "title": "Provider Metadata",
+          "type": "object"
+        },
+        "pronunciation_hints": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Pronunciation Hints"
+        },
+        "emphasis_metadata": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Emphasis Metadata"
+        }
+      },
+      "required": [
+        "segment_id",
+        "scene_id",
+        "text"
+      ],
+      "title": "VoiceSegment",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "package_version": {
+      "default": "v1.0.0",
+      "title": "Package Version",
+      "type": "string"
+    },
+    "content_item": {
+      "$ref": "#/$defs/ContentItem"
+    },
+    "research_sources": {
+      "items": {
+        "$ref": "#/$defs/ResearchSource"
+      },
+      "title": "Research Sources",
+      "type": "array"
+    },
+    "script": {
+      "$ref": "#/$defs/ScriptDocument"
+    },
+    "voice_segments": {
+      "items": {
+        "$ref": "#/$defs/VoiceSegment"
+      },
+      "title": "Voice Segments",
+      "type": "array"
+    },
+    "asset_requests": {
+      "items": {
+        "$ref": "#/$defs/AssetRequest"
+      },
+      "title": "Asset Requests",
+      "type": "array"
+    },
+    "publication": {
+      "$ref": "#/$defs/PublicationMetadata"
+    },
+    "provenance": {
+      "$ref": "#/$defs/ProvenanceRecord"
+    },
+    "qa_status": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": "pending",
+      "title": "Qa Status"
+    },
+    "qa_score": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Qa Score"
+    },
+    "voice_artifacts": {
+      "description": "Artifact paths / refs for generated audio segments",
+      "items": {
+        "type": "string"
+      },
+      "title": "Voice Artifacts",
+      "type": "array"
+    },
+    "measured_duration_sec": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Measured Duration Sec"
+    }
+  },
+  "required": [
+    "content_item",
+    "script"
+  ],
+  "title": "ContentPackage",
+  "type": "object"
+}

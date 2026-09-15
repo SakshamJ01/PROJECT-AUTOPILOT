@@ -1,0 +1,33 @@
+# Secrets and credentials — never commit these
+credentials/
+*.pem
+*.key
+*.secrets.json
+*client_secret*.json
+*youtube_token*.json
+
+# Local databases
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Runtime artifacts
+artifacts/
+scratch/
+*.mp4
+*.wav
+*.mp3
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+build/
+dist/
+
+# Throwaway inspection scripts
+check_db.py

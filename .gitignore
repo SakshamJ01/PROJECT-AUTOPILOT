@@ -1,0 +1,50 @@
+# ===== Secrets and credentials — never commit =====
+credentials/
+*.pem
+*.key
+*.secrets.json
+*client_secret*.json
+*youtube_token*.json
+*.env
+.env.*
+
+# ===== Databases (runtime state; archive separately) =====
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite*
+archive/
+
+# ===== Runtime artifacts =====
+artifacts/
+scratch/
+*.mp4
+*.webm
+*.mov
+*.wav
+*.mp3
+*.m4a
+*.ass
+*.srt
+
+# ===== Starter blueprint is preserved separately, not part of the repo =====
+PROJECT_AUTOPILOT_STARTER_BLUEPRINT/
+
+# ===== Transient root-level diagnostics / throwaway scripts =====
+inspection_report.txt
+FINAL_PRODUCTION_REPORT.txt
+FINAL_REPORT.txt
+RENDER_DIAGNOSIS.txt
+inspect_db.py
+read_openverse.py
+
+# ===== Python =====
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+build/
+dist/

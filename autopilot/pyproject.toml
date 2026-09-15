@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autopilot"
+version = "0.1.0"
+description = "PROJECT AUTOPILOT Phase 0 / M0 — local-first autonomous content production skeleton"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.0",
+    "google-auth>=2.0.0",
+    "google-auth-oauthlib>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["autopilot*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-v --tb=short -m 'not live'"
+markers = [
+    "live: opt-in live network integration tests (excluded by default)",
+]
