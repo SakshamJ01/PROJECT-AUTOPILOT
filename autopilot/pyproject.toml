@@ -19,6 +19,9 @@ dev = [
     "pytest>=7.0",
 ]
 
+[project.scripts]
+autopilot = "autopilot.cli.main:main"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["autopilot*"]
