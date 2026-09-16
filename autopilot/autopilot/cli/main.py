@@ -144,6 +144,29 @@ def check_sqlite() -> dict:
         return {"available": False, "error": str(exc)}
 
 
+def get_schedule_status_summary(db) -> dict:
+    """Summarize schedule state for health reporting (graceful if empty/pre-v8 DB)."""
+    try:
+        schedules = db.list_schedules()
+        enabled = db.list_schedules(enabled=True)
+        total_runs = sum(int(s.get("total_runs") or 0) for s in schedules)
+        failing = sum(1 for s in schedules if int(s.get("consecutive_failures") or 0) > 0)
+        last_run_at = max(
+            (s["last_run_at"] for s in schedules if s.get("last_run_at")), default=None
+        )
+        return {
+            "status": "AVAILABLE",
+            "total_schedules": len(schedules),
+            "enabled_schedules": len(enabled),
+            "due_now": db.count_due_schedules(),
+            "total_runs": total_runs,
+            "schedules_failing": failing,
+            "last_run_at": last_run_at,
+        }
+    except Exception as exc:
+        return {"status": "DEGRADED", "error": str(exc)}
+
+
 def run_health() -> int:
     import json
     from autopilot.db.manager import DBManager
@@ -198,7 +221,7 @@ def run_health() -> int:
             "summary": db.get_queue_status_summary(),
         },
         "worker": {"status": "AVAILABLE"},
-        "scheduler": {"status": "AVAILABLE"},
+        "scheduler": get_schedule_status_summary(db),
         "analytics_engine": {
             "status": "AVAILABLE",
             "default_provider": CONFIG.analytics_default_provider,
@@ -236,7 +259,8 @@ def run_health() -> int:
     q_sum = report["queue_engine"]["summary"]
     print(f"Queue Engine: AVAILABLE ({q_sum['total']} total, {q_sum['queued']} queued, {q_sum['running']} running, {q_sum['succeeded']} succeeded)")
     print(f"Worker: AVAILABLE")
-    print(f"Scheduler: AVAILABLE (Local / OS Task Scheduler)")
+    sched = report["scheduler"]
+    print(f"Scheduler: AVAILABLE ({sched['total_schedules']} schedules, {sched['enabled_schedules']} enabled, {sched['due_now']} due now, {sched['total_runs']} runs)")
     print(f"Analytics Engine: AVAILABLE (default={CONFIG.analytics_default_provider})")
     print(f"Autonomy Engine: AVAILABLE (level={CONFIG.autonomy_level}, daily_limit={CONFIG.autonomy_max_daily_jobs})")
     print(f"Channel Engine: AVAILABLE ({len(all_channels)} profiles, {len(enabled_channels)} enabled)")
@@ -1986,6 +2010,219 @@ def run_autonomy_strategy(activate_id: str | None = None, output_json: bool = Fa
     return 0
 
 
+# =====================================================================
+# Phase 3: Schedule Orchestration CLI
+# =====================================================================
+
+def _schedule_engine():
+    from autopilot.core.scheduler import ScheduleEngine
+
+    return ScheduleEngine()
+
+
+def run_schedule_list(channel_id: str | None = None, output_json: bool = False) -> int:
+    import json
+
+    engine = _schedule_engine()
+    schedules = engine.list_schedules(channel_id=channel_id)
+    if output_json:
+        print(json.dumps([s.model_dump(mode="json") for s in schedules], indent=2))
+    else:
+        print("=== SCHEDULES ===")
+        if not schedules:
+            print("(no schedules)")
+        for s in schedules:
+            state = "ENABLED" if s.enabled else "DISABLED"
+            print(f"[{s.schedule_id}] {s.cadence.value:<8} L{s.autonomy_level} {state:<8} channel={s.channel_id} next_run_at={s.next_run_at} runs={s.total_runs} failures={s.consecutive_failures}")
+    return 0
+
+
+def run_schedule_create(
+    channel_id: str = "default",
+    level: int = 3,
+    cadence: str = "daily",
+    days: list[str] | None = None,
+    timezone: str = "UTC",
+    limit: int = 10,
+    dry_run: bool = False,
+    policy: str = "local_only",
+    output_json: bool = False,
+) -> int:
+    import json
+
+    engine = _schedule_engine()
+    try:
+        schedule = engine.create_schedule(
+            channel_id=channel_id,
+            autonomy_level=level,
+            cadence=cadence,
+            days_of_week=days,
+            timezone=timezone,
+            max_items_per_run=limit,
+            dry_run=dry_run,
+            policy=policy,
+        )
+    except ValueError as exc:
+        if output_json:
+            print(json.dumps({"error": str(exc)}))
+        else:
+            print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    if output_json:
+        print(schedule.model_dump_json(indent=2))
+    else:
+        print(f"=== SCHEDULE CREATED [{schedule.schedule_id}] ===")
+        print(f"Channel ID:       {schedule.channel_id}")
+        print(f"Autonomy Level:   {schedule.autonomy_level}")
+        print(f"Cadence:          {schedule.cadence.value} {schedule.days_of_week or ''}")
+        print(f"Timezone:         {schedule.timezone}")
+        print(f"Max Items / Run:  {schedule.max_items_per_run}")
+        print(f"Dry Run:          {schedule.dry_run}")
+        print(f"Policy Tier:      {schedule.policy}")
+        print(f"Enabled:          {schedule.enabled}")
+        print(f"Next Run At:      {schedule.next_run_at}")
+    return 0
+
+
+def run_schedule_enable(schedule_id: str, output_json: bool = False) -> int:
+    import json
+
+    engine = _schedule_engine()
+    try:
+        schedule = engine.enable_schedule(schedule_id)
+    except ValueError as exc:
+        if output_json:
+            print(json.dumps({"error": str(exc)}))
+        else:
+            print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    if output_json:
+        print(json.dumps({"schedule_id": schedule.schedule_id, "enabled": schedule.enabled, "next_run_at": schedule.next_run_at}))
+    else:
+        print(f"Schedule '{schedule.schedule_id}' enabled. Next run at {schedule.next_run_at}")
+    return 0
+
+
+def run_schedule_disable(schedule_id: str, output_json: bool = False) -> int:
+    import json
+
+    engine = _schedule_engine()
+    try:
+        schedule = engine.disable_schedule(schedule_id)
+    except ValueError as exc:
+        if output_json:
+            print(json.dumps({"error": str(exc)}))
+        else:
+            print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    if output_json:
+        print(json.dumps({"schedule_id": schedule.schedule_id, "enabled": schedule.enabled}))
+    else:
+        print(f"Schedule '{schedule.schedule_id}' disabled.")
+    return 0
+
+
+def run_schedule_delete(schedule_id: str, output_json: bool = False) -> int:
+    import json
+
+    engine = _schedule_engine()
+    try:
+        engine.delete_schedule(schedule_id)
+    except ValueError as exc:
+        if output_json:
+            print(json.dumps({"error": str(exc)}))
+        else:
+            print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    if output_json:
+        print(json.dumps({"schedule_id": schedule_id, "deleted": True}))
+    else:
+        print(f"Schedule '{schedule_id}' deleted.")
+    return 0
+
+
+def run_schedule_inspect(schedule_id: str, limit: int = 20, output_json: bool = False) -> int:
+    import json
+
+    engine = _schedule_engine()
+    try:
+        data = engine.inspect_schedule(schedule_id, limit=limit)
+    except ValueError as exc:
+        if output_json:
+            print(json.dumps({"error": str(exc)}))
+        else:
+            print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    if output_json:
+        print(json.dumps(data, indent=2, default=str))
+    else:
+        s = data["schedule"]
+        print(f"=== SCHEDULE [{s['schedule_id']}] ===")
+        print(f"Channel ID:        {s['channel_id']}")
+        print(f"Autonomy Level:    {s['autonomy_level']}")
+        print(f"Cadence:           {s['cadence']} {s['days_of_week'] or ''}")
+        print(f"Timezone:          {s['timezone']}")
+        print(f"Enabled:           {s['enabled']}")
+        print(f"Dry Run:           {s['dry_run']}")
+        print(f"Policy Tier:       {s['policy']}")
+        print(f"Max Items / Run:   {s['max_items_per_run']}")
+        print(f"Next Run At:       {s['next_run_at']}")
+        print(f"Last Run At:       {s['last_run_at']}")
+        print(f"Last Run ID:       {s['last_run_id']}")
+        print(f"Last Run Status:   {s['last_run_status']}")
+        print(f"Total Runs:        {s['total_runs']}")
+        print(f"Failures:          {s['consecutive_failures']}")
+        print(f"\nRecent Runs ({len(data['runs'])}):")
+        for r in data["runs"]:
+            print(f"  [{r['run_id']}] {r['status']:<9} cycle={r['cycle_run_id'] or '-'} publish_calls={r['publish_calls']} completed_at={r['completed_at']}")
+    return 0
+
+
+def run_schedule_run_now(schedule_id: str, output_json: bool = False) -> int:
+    import json
+
+    engine = _schedule_engine()
+    try:
+        result = engine.run_now(schedule_id)
+    except ValueError as exc:
+        if output_json:
+            print(json.dumps({"error": str(exc)}))
+        else:
+            print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    if output_json:
+        print(result.model_dump_json(indent=2))
+    else:
+        print("=== SCHEDULE RUN-NOW ===")
+        print(f"Schedule:       {result.schedule_id}")
+        print(f"Channel ID:     {result.channel_id}")
+        print(f"Autonomy Level: {result.autonomy_level}")
+        print(f"Status:         {result.status}")
+        print(f"Cycle Run ID:   {result.cycle_run_id or '-'}")
+        print(f"Cycle Status:   {result.cycle_status or '-'}")
+        print(f"Next Run At:    {result.next_run_at or '-'}")
+        print(f"Publish Calls:  {result.publish_calls}")
+        if result.error_message:
+            print(f"Error:          {result.error_message}")
+    return 0 if result.status in ("completed", "blocked") else 1
+
+
+def run_schedule_run_due(limit: int = 10, output_json: bool = False) -> int:
+    import json
+
+    engine = _schedule_engine()
+    results = engine.run_due(max_runs=limit)
+    if output_json:
+        print(json.dumps([r.model_dump(mode="json") for r in results], indent=2))
+    else:
+        print("=== SCHEDULE RUN-DUE ===")
+        if not results:
+            print("(no due schedules)")
+        for r in results:
+            print(f"[{r.schedule_id}] L{r.autonomy_level} {r.status}: cycle={r.cycle_run_id or '-'} ({r.cycle_status or '-'}) PublishCalls={r.publish_calls} next_run_at={r.next_run_at}")
+    return 0 if all(r.status in ("completed", "blocked") for r in results) else 1
+
+
 def run_channel_list(output_json: bool = False) -> int:
     import json
     from autopilot.core.channel import ChannelManager
@@ -2474,6 +2711,50 @@ def build_parser():
     sub_autonomy_strategy.add_argument("--activate", default=None, help="Strategy Version ID to activate")
     sub_autonomy_strategy.add_argument("--json", action="store_true", help="Output machine-readable JSON")
 
+    # Phase 3 — Recurring Schedule Orchestration subparsers
+    sub_parser_schedule = sub.add_parser("schedule", help="Recurring schedule orchestration (Phase 3)")
+    sub_schedule = sub_parser_schedule.add_subparsers(dest="schedule_action")
+
+    sub_schedule_list = sub_schedule.add_parser("list", help="List schedules")
+    sub_schedule_list.add_argument("--channel", default=None, help="Filter by channel ID")
+    sub_schedule_list.add_argument("--json", action="store_true", help="Output machine-readable JSON")
+
+    sub_schedule_create = sub_schedule.add_parser("create", help="Create a recurring schedule")
+    sub_schedule_create.add_argument("--channel", default="default", help="Target channel ID")
+    sub_schedule_create.add_argument("--level", type=int, default=3, choices=[3, 4], help="Autonomy level (3=Guarded Auto-Queue, 4=Guarded Auto-Produce)")
+    sub_schedule_create.add_argument("--cadence", default="daily", choices=["hourly", "daily", "weekly", "weekdays"], help="Recurrence cadence")
+    sub_schedule_create.add_argument("--days", default=None, help="Comma-separated days of week (mon,tue,...) for weekly cadence")
+    sub_schedule_create.add_argument("--timezone", default="UTC", help="IANA timezone name (default: UTC)")
+    sub_schedule_create.add_argument("--limit", type=int, default=10, help="Maximum items processed per run")
+    sub_schedule_create.add_argument("--dry-run", action="store_true", help="Run cycles in dry-run (simulation) mode")
+    sub_schedule_create.add_argument("--policy", default="local_only", help="Level 4 production provider policy tier (default: local_only)")
+    sub_schedule_create.add_argument("--json", action="store_true", help="Output machine-readable JSON")
+
+    sub_schedule_enable = sub_schedule.add_parser("enable", help="Enable a schedule")
+    sub_schedule_enable.add_argument("--id", required=True, help="Schedule ID")
+    sub_schedule_enable.add_argument("--json", action="store_true", help="Output machine-readable JSON")
+
+    sub_schedule_disable = sub_schedule.add_parser("disable", help="Disable a schedule")
+    sub_schedule_disable.add_argument("--id", required=True, help="Schedule ID")
+    sub_schedule_disable.add_argument("--json", action="store_true", help="Output machine-readable JSON")
+
+    sub_schedule_delete = sub_schedule.add_parser("delete", help="Delete a schedule and its run history")
+    sub_schedule_delete.add_argument("--id", required=True, help="Schedule ID")
+    sub_schedule_delete.add_argument("--json", action="store_true", help="Output machine-readable JSON")
+
+    sub_schedule_run_now = sub_schedule.add_parser("run-now", help="Execute a schedule immediately (manual trigger)")
+    sub_schedule_run_now.add_argument("--id", required=True, help="Schedule ID")
+    sub_schedule_run_now.add_argument("--json", action="store_true", help="Output machine-readable JSON")
+
+    sub_schedule_run_due = sub_schedule.add_parser("run-due", help="Execute all due schedules exactly once each (bounded catch-up)")
+    sub_schedule_run_due.add_argument("--limit", type=int, default=10, help="Maximum number of schedules to execute in this pass")
+    sub_schedule_run_due.add_argument("--json", action="store_true", help="Output machine-readable JSON")
+
+    sub_schedule_inspect = sub_schedule.add_parser("inspect", help="Show schedule config and recent run history")
+    sub_schedule_inspect.add_argument("--id", required=True, help="Schedule ID")
+    sub_schedule_inspect.add_argument("--limit", type=int, default=20, help="Number of recent runs to show")
+    sub_schedule_inspect.add_argument("--json", action="store_true", help="Output machine-readable JSON")
+
     # Milestone 10 / M10 — Multi-Channel Scaling & Channel Profiles subparsers
     sub_parser_channel = sub.add_parser("channel", help="Multi-Channel Profile Management (Milestone 10)")
     sub_channel = sub_parser_channel.add_subparsers(dest="channel_action")
@@ -2763,6 +3044,37 @@ def main() -> int:
             return run_channel_compare(platform=args.platform, output_json=args.json)
         else:
             sub_parser_channel.print_help()
+            return 1
+    elif args.command == "schedule":
+        if args.schedule_action == "list":
+            return run_schedule_list(channel_id=getattr(args, "channel", None), output_json=args.json)
+        elif args.schedule_action == "create":
+            days = [d.strip().lower() for d in args.days.split(",")] if args.days else None
+            return run_schedule_create(
+                channel_id=args.channel,
+                level=args.level,
+                cadence=args.cadence,
+                days=days,
+                timezone=args.timezone,
+                limit=args.limit,
+                dry_run=args.dry_run,
+                policy=args.policy,
+                output_json=args.json,
+            )
+        elif args.schedule_action == "enable":
+            return run_schedule_enable(schedule_id=args.id, output_json=args.json)
+        elif args.schedule_action == "disable":
+            return run_schedule_disable(schedule_id=args.id, output_json=args.json)
+        elif args.schedule_action == "delete":
+            return run_schedule_delete(schedule_id=args.id, output_json=args.json)
+        elif args.schedule_action == "run-now":
+            return run_schedule_run_now(schedule_id=args.id, output_json=args.json)
+        elif args.schedule_action == "run-due":
+            return run_schedule_run_due(limit=args.limit, output_json=args.json)
+        elif args.schedule_action == "inspect":
+            return run_schedule_inspect(schedule_id=args.id, limit=args.limit, output_json=args.json)
+        else:
+            sub_parser_schedule.print_help()
             return 1
     else:
         parser.print_help()
