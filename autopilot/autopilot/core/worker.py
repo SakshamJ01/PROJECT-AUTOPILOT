@@ -72,7 +72,27 @@ class LocalWorker:
         if not item_dict:
             return None
 
-        queue_id = item_dict["queue_id"]
+        return self.process_claimed_item(item_dict)
+
+    def process_claimed_item(
+        self,
+        item_dict: Dict[str, Any],
+        provider_overrides: Optional[Dict[str, str]] = None,
+        force_auto_publish: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        """Processes an already-claimed queue item through the pipeline.
+
+        ``process_next_job`` delegates here after its atomic claim.  The Level 4
+        guarded auto-produce cycle also calls this method directly after an
+        atomic ``claim_queue_item`` so pre-validated autonomous jobs reuse the
+        exact same production execution path.
+
+        ``provider_overrides`` lets an orchestrator pin deterministic/test
+        providers without mutating the persisted payload (test isolation).
+        ``force_auto_publish`` overrides publish intent (Level 4 always passes
+        ``False`` to preserve the public-publishing boundary).
+        """
+        profile = item_dict.get("profile")
         job_id = item_dict["job_id"]
         payload_raw = item_dict.get("payload_json") or "{}"
         try:
@@ -81,7 +101,7 @@ class LocalWorker:
             payload = {}
 
         topic = payload.get("topic") or item_dict.get("topic") or f"Topic for {job_id}"
-        profile = payload.get("profile", "short_vertical")
+        profile = profile or payload.get("profile", "short_vertical")
         channel_id = item_dict.get("channel_id") or payload.get("channel_id", "default")
         auto_publish = payload.get("auto_publish", False) or payload.get("publish", False)
         publish_visibility = payload.get("publish_visibility", "private")
@@ -91,6 +111,23 @@ class LocalWorker:
         llm_provider = payload.get("llm_provider", "mock")
         research_provider = payload.get("research_provider", "mock_search")
         production_engine = payload.get("production_engine") or self.config.default_production_engine
+
+        if provider_overrides:
+            if provider_overrides.get("policy") is not None:
+                payload["policy"] = provider_overrides["policy"]
+            for key, val in (provider_overrides or {}).items():
+                if key == "llm":
+                    llm_provider = val
+                elif key == "research":
+                    research_provider = val
+                elif key == "tts":
+                    tts_provider = val
+                elif key == "asset":
+                    asset_provider = val
+                elif key == "production_engine":
+                    production_engine = val
+        if force_auto_publish is not None:
+            auto_publish = force_auto_publish
 
         # Apply policy-based provider resolution to prevent silent mock usage.
         # The CLI path runs resolve_providers_for_policy; the queue/worker path must too.
@@ -117,8 +154,8 @@ class LocalWorker:
         channel = cm.get_channel(channel_id)
         if channel:
             if channel.status == ChannelStatus.DISABLED:
-                self.db.block_queue_item(queue_id, f"Channel '{channel_id}' is disabled.")
-                return {"queue_id": queue_id, "job_id": job_id, "status": "blocked", "error": f"Channel '{channel_id}' is disabled."}
+                self.db.block_queue_item(item_dict["queue_id"], f"Channel '{channel_id}' is disabled.")
+                return {"queue_id": item_dict["queue_id"], "job_id": job_id, "status": "blocked", "error": f"Channel '{channel_id}' is disabled."}
             if channel.voice:
                 v_prov = getattr(channel.voice, "provider", None) or (channel.voice.get("provider") if isinstance(channel.voice, dict) else None)
                 if v_prov and v_prov != "mock":
@@ -127,9 +164,10 @@ class LocalWorker:
                 publish_platform = channel.target_platforms[0]
             if publish_platform.lower() not in ("youtube",):
                 err_msg = f"Unsupported publishing platform target '{publish_platform}'."
-                self.db.fail_queue_item(queue_id=queue_id, error_message=err_msg, retryable=False)
-                return {"queue_id": queue_id, "job_id": job_id, "status": "failed", "error": err_msg}
+                self.db.fail_queue_item(queue_id=item_dict["queue_id"], error_message=err_msg, retryable=False)
+                return {"queue_id": item_dict["queue_id"], "job_id": job_id, "status": "failed", "error": err_msg}
 
+        queue_id = item_dict["queue_id"]
         self.logger.info("job_claimed", details={
             "queue_id": queue_id,
             "job_id": job_id,

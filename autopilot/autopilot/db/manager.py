@@ -1155,6 +1155,88 @@ class DBManager:
             conn.commit()
             return cur.rowcount > 0
 
+    def claim_queue_item(
+        self,
+        queue_id: str,
+        worker_id: str,
+        lease_duration_sec: float = 300.0,
+    ) -> dict | None:
+        """Atomically claims a specific queue item if it is still eligible.
+
+        Only items in ``queued`` (or ``retry_wait`` whose retry window has
+        opened) are claimable.  Used by the Level 4 guarded auto-produce cycle
+        so a pre-validated job cannot be claimed twice concurrently.
+        """
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT queue_id FROM queue_items
+                WHERE queue_id = ?
+                  AND (status = 'queued'
+                       OR (status = 'retry_wait' AND (next_retry_at IS NULL OR datetime(next_retry_at) <= datetime('now'))))
+                  AND (scheduled_at IS NULL OR datetime(scheduled_at) <= datetime('now'))
+                """,
+                (queue_id,),
+            ).fetchone()
+            if not row:
+                conn.commit()
+                return None
+            conn.execute(
+                """
+                UPDATE queue_items
+                SET status = 'running',
+                    worker_id = ?,
+                    started_at = CURRENT_TIMESTAMP,
+                    lease_expires_at = datetime('now', '+' || ? || ' seconds'),
+                    attempt_count = attempt_count + 1
+                WHERE queue_id = ?
+                """,
+                (worker_id, int(lease_duration_sec), queue_id),
+            )
+            conn.commit()
+            item_row = conn.execute("SELECT * FROM queue_items WHERE queue_id = ?", (queue_id,)).fetchone()
+            return dict(item_row) if item_row else None
+
+    def list_eligible_queue_items(
+        self,
+        channel_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """Lists claimable queue items: queued, or retry_wait whose backoff has elapsed.
+
+        ``running``/``succeeded``/``blocked``/``cancelled``/``dead_letter`` items
+        are never returned so a finished job cannot be re-produced by a Level 4
+        cycle (idempotency + duplicate-output protection).
+        """
+        with self._connect() as conn:
+            if channel_id:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM queue_items
+                    WHERE channel_id = ?
+                      AND (status = 'queued'
+                           OR (status = 'retry_wait' AND (next_retry_at IS NULL OR datetime(next_retry_at) <= datetime('now'))))
+                      AND (scheduled_at IS NULL OR datetime(scheduled_at) <= datetime('now'))
+                    ORDER BY priority DESC, created_at ASC
+                    LIMIT ?
+                    """,
+                    (channel_id, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM queue_items
+                    WHERE (status = 'queued'
+                           OR (status = 'retry_wait' AND (next_retry_at IS NULL OR datetime(next_retry_at) <= datetime('now'))))
+                      AND (scheduled_at IS NULL OR datetime(scheduled_at) <= datetime('now'))
+                    ORDER BY priority DESC, created_at ASC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+            return [dict(r) for r in rows]
+
     def update_queue_stage(self, queue_id: str, stage: str, status: str = "running") -> None:
         with self._connect() as conn:
             conn.execute(
@@ -2266,6 +2348,34 @@ class DBManager:
                            OR payload_json LIKE '%"origin": "autonomous%')
                       AND status NOT IN ('cancelled', 'dead_letter', 'succeeded')
                       AND date(created_at) = date('now')
+                    """
+                ).fetchone()
+            return row["cnt"] if row else 0
+
+    def count_daily_produced_jobs(self, channel_id: str | None = None) -> int:
+        """Counts distinct jobs whose queue item succeeded today.
+
+        Used by the Level 4 guarded auto-produce cycle to enforce a strict daily
+        production budget (max_jobs_per_day) that covers both in-flight and
+        already-completed autonomous jobs.
+        """
+        with self._connect() as conn:
+            if channel_id:
+                row = conn.execute(
+                    """
+                    SELECT count(DISTINCT job_id) as cnt FROM queue_items
+                    WHERE status = 'succeeded'
+                      AND channel_id = ?
+                      AND date(completed_at) = date('now')
+                    """,
+                    (channel_id,),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """
+                    SELECT count(DISTINCT job_id) as cnt FROM queue_items
+                    WHERE status = 'succeeded'
+                      AND date(completed_at) = date('now')
                     """
                 ).fetchone()
             return row["cnt"] if row else 0

@@ -1686,6 +1686,7 @@ def run_autonomy_run(
     category: str | None = None,
     limit: int = 10,
     output_json: bool = False,
+    policy: str | None = None,
 ) -> int:
     import json
     from autopilot.core.contracts import AutonomyLevel
@@ -1693,6 +1694,39 @@ def run_autonomy_run(
 
     autonomy_level = AutonomyLevel(level) if level is not None else None
     engine = AutonomyEngine()
+    if autonomy_level == AutonomyLevel.LEVEL_4_AUTO_PRODUCE:
+        summary = engine.run_auto_produce_cycle(
+            channel_id=channel_id,
+            limit=limit,
+            dry_run=dry_run,
+            policy=policy or "local_only",
+        )
+        if output_json:
+            print(summary.model_dump_json(indent=2))
+        else:
+            print(f"=== AUTO-PRODUCE CYCLE SUMMARY [{summary.run_id}] ===")
+            print(f"Channel ID:          {summary.channel_id or 'all / default'}")
+            print(f"Autonomy Level:      4 (GUARDED AUTO-PRODUCE)")
+            print(f"Policy Tier:         {summary.policy}")
+            print(f"Strategy Version:    {summary.active_strategy_version}")
+            print(f"Status:              {summary.status}")
+            print(f"Dry Run:             {summary.dry_run}")
+            print(f"\nDiscovered:          {summary.queued_jobs_discovered} queued item(s)")
+            print(f"Eligible:            {summary.jobs_eligible}")
+            print(f"Blocked (pre-flight):{summary.jobs_blocked}")
+            print(f"Producing:           {summary.jobs_producing}")
+            print(f"Completed:           {summary.jobs_completed}")
+            print(f"READY_TO_PUBLISH:    {summary.jobs_ready_to_publish}")
+            print(f"QA Failed:           {summary.jobs_qa_failed}")
+            print(f"Retry Wait:          {summary.jobs_retry_wait}")
+            print(f"Skipped (dup):       {summary.jobs_skipped_duplicate}")
+            print(f"Limit-blocked:       {summary.jobs_cycle_limit_blocked}")
+            print(f"Daily-blocked:       {summary.jobs_daily_limit_blocked}")
+            print(f"Concurrency-blocked: {summary.jobs_concurrency_blocked}")
+            if summary.error_message:
+                print(f"\nError: {summary.error_message}")
+        return 0 if summary.status in ("completed", "completed_manual_mode") else 1
+
     summary = engine.run_cycle(
         autonomy_level=autonomy_level.value if autonomy_level is not None else None,
         channel_id=channel_id,
@@ -2411,6 +2445,7 @@ def build_parser():
     sub_autonomy_run.add_argument("--dry-run", action="store_true", help="Simulate ideation, scoring, and policy evaluation without DB or Queue mutations")
     sub_autonomy_run.add_argument("--category", default=None, help="Target niche/category filter")
     sub_autonomy_run.add_argument("--limit", type=int, default=10, help="Maximum trend signals / candidates per cycle")
+    sub_autonomy_run.add_argument("--policy", default=None, help="Production provider policy tier for Level 4 auto-produce (e.g. local_only)")
     sub_autonomy_run.add_argument("--json", action="store_true", help="Output machine-readable JSON summary")
 
     sub_autonomy_proposals = sub_autonomy.add_parser("proposals", help="List reviewable idea proposals")
@@ -2674,6 +2709,7 @@ def main() -> int:
                 category=getattr(args, "category", None),
                 limit=getattr(args, "limit", 10),
                 output_json=getattr(args, "json", False),
+                policy=getattr(args, "policy", None),
             )
         elif args.autonomy_action == "proposals":
             return run_autonomy_proposals(

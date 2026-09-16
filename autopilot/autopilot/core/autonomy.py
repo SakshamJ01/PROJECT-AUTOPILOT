@@ -24,6 +24,7 @@ from autopilot.core.contracts import (
     FeedbackSignal,
     StrategyVersion,
     AutonomyCycleSummary,
+    AutoProduceSummary,
     ChannelProfile,
     ChannelStatus,
 )
@@ -426,6 +427,284 @@ class AutonomyEngine:
                 error_message=str(exc),
                 active_strategy_version=active_strategy.version_id,
             )
+
+    def run_auto_produce_cycle(
+        self,
+        channel_id: Optional[str] = None,
+        limit: int = 10,
+        dry_run: bool = False,
+        policy: str = "local_only",
+        provider_overrides: Optional[Dict[str, str]] = None,
+        orchestrator: Any = None,
+    ) -> AutoProduceSummary:
+        """Level 4 GUARDED AUTO-PRODUCE cycle.
+
+        Consumes eligible queue items (auto-queued by Level 3 or manually
+        enqueued) through the existing real worker/pipeline up to the terminal
+        pre-publish ``APPROVED`` (READY_TO_PUBLISH) state.  It never invokes a
+        public publisher: each claimed job is processed with
+        ``force_auto_publish=False``.
+
+        Guardrail boundaries:
+        * No autonomous publishing (public boundary preserved).
+        * No scheduling, posting-window logic, or analytics learning here.
+        * Each item is re-validated against the *current* channel policy before
+          production (prohibited topics, malformed topic, required evidence,
+          allowed content profiles, niche categories, active channel).
+          Cooldown/duplicate-risk and minimum-score are NOT re-applied — those
+          were decided when the item was queued (Level 3).
+        * Daily/concurrency/cycle production budgets are enforced via
+          ``max_jobs_per_day`` / ``max_concurrent_jobs`` and ``limit``.
+        """
+        cid = channel_id or "default"
+        now_dt = datetime.now(timezone.utc)
+        run_id = f"ap-{now_dt.strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6]}"
+        logger = StructuredLogger(job_id=run_id, stage="auto_produce")
+
+        summary = AutoProduceSummary(
+            run_id=run_id,
+            channel_id=cid,
+            autonomy_level=4,
+            dry_run=dry_run,
+            policy=policy,
+        )
+
+        channel = self.channel_manager.get_channel(cid)
+        if channel and channel.status == ChannelStatus.DISABLED:
+            summary.status = "blocked"
+            summary.error_message = f"Channel '{cid}' is disabled."
+            logger.warning("level4_channel_disabled", details={"run_id": run_id, "channel_id": cid})
+            return summary
+
+        active_policy = channel.autonomy_policy if channel else self.policy
+        active_strategy = self.strategy_manager.get_active_strategy(channel_id=cid)
+        summary.active_strategy_version = active_strategy.version_id
+
+        from autopilot.core.worker import LocalWorker
+        worker = LocalWorker(
+            config=self.config,
+            db=self.db,
+            orchestrator=orchestrator,
+        )
+
+        if not dry_run:
+            self.db.record_autonomy_run(
+                run_id=run_id,
+                autonomy_level=4,
+                strategy_version=active_strategy.version_id,
+                config_json=json.dumps({
+                    "dry_run": dry_run, "limit": limit, "policy": policy, "channel_id": cid,
+                }),
+                channel_id=cid,
+            )
+
+        logger.info(
+            "level4_cycle_started",
+            details={"run_id": run_id, "channel_id": cid, "limit": limit, "dry_run": dry_run, "policy": policy},
+        )
+
+        try:
+            # Enumerate claimable/eligible items once for this cycle.
+            discovered = self.db.list_eligible_queue_items(
+                channel_id=cid,
+                limit=max(limit * 2, 200),
+            )
+            summary.queued_jobs_discovered = len(discovered)
+
+            in_flight_today = self.db.count_autonomous_jobs_queued_today(channel_id=cid)
+            produced_today = self.db.count_daily_produced_jobs(channel_id=cid)
+            running_now = int(self.db.get_queue_status_summary(channel_id=cid).get("running", 0) or 0)
+
+            for item in discovered:
+                # --- Cycle budget ---
+                if summary.jobs_producing + summary.jobs_completed >= limit:
+                    summary.jobs_cycle_limit_blocked += 1
+                    summary.decision_reasons.append(
+                        {"queue_id": item["queue_id"], "reason": f"Per-cycle production limit ({limit}) reached"}
+                    )
+                    continue
+
+                # --- Daily budget ---
+                if produced_today + summary.jobs_completed + in_flight_today >= active_policy.max_jobs_per_day:
+                    summary.jobs_daily_limit_blocked += 1
+                    summary.decision_reasons.append(
+                        {"queue_id": item["queue_id"], "reason": f"Daily production limit ({active_policy.max_jobs_per_day}) reached"}
+                    )
+                    continue
+
+                # --- Concurrency budget (includes other daemon workers) ---
+                in_cycle_running = summary.jobs_producing - summary.jobs_completed - summary.jobs_qa_failed - summary.jobs_retry_wait
+                if running_now + in_cycle_running >= active_policy.max_concurrent_jobs:
+                    summary.jobs_concurrency_blocked += 1
+                    summary.decision_reasons.append(
+                        {"queue_id": item["queue_id"], "reason": f"Concurrency limit ({active_policy.max_concurrent_jobs}) reached"}
+                    )
+                    continue
+
+                # --- Pre-flight policy recheck (current policy, fail-closed) ---
+                validation = self._validate_item_for_production(item, channel, active_policy)
+                if not validation["ok"]:
+                    summary.jobs_blocked += 1
+                    summary.decision_reasons.append(
+                        {"queue_id": item["queue_id"], "reason": validation["reason"]}
+                    )
+                    if not dry_run:
+                        try:
+                            self.db.block_queue_item(item["queue_id"], f"Level 4 pre-flight: {validation['reason']}")
+                        except Exception as block_exc:
+                            logger.error("level4_block_failed", error=str(block_exc), details={"queue_id": item["queue_id"]})
+                    continue
+
+                summary.jobs_eligible += 1
+                if dry_run:
+                    summary.decision_reasons.append(
+                        {"queue_id": item["queue_id"], "reason": "Dry-run: eligible, would produce (no publish)"}
+                    )
+                    continue
+
+                # --- Atomic claim (race-safe vs. daemon worker / concurrent cycles) ---
+                claimed = self.db.claim_queue_item(
+                    queue_id=item["queue_id"],
+                    worker_id=worker.worker_id,
+                    lease_duration_sec=self.config.queue_lease_duration_seconds,
+                )
+                if not claimed:
+                    summary.jobs_skipped_duplicate += 1
+                    summary.decision_reasons.append(
+                        {"queue_id": item["queue_id"], "reason": "Already claimed/processed by another worker"}
+                    )
+                    continue
+
+                summary.jobs_producing += 1
+                try:
+                    effective_overrides = dict(provider_overrides or {})
+                    if policy != "mock" and "policy" not in effective_overrides:
+                        # Fail-closed: a non-mock operator policy must never let a
+                        # queued item silently fall back to mock providers.
+                        effective_overrides["policy"] = policy
+                    result = worker.process_claimed_item(
+                        claimed,
+                        provider_overrides=(effective_overrides or None),
+                        force_auto_publish=False,
+                    )
+                except Exception as proc_exc:
+                    logger.error("level4_process_error", error=str(proc_exc), details={"queue_id": item["queue_id"]})
+                    result = {"queue_id": item["queue_id"], "job_id": item["job_id"], "status": "failed", "error": str(proc_exc)}
+                    try:
+                        self.db.fail_queue_item(
+                            queue_id=item["queue_id"],
+                            error_message=str(proc_exc),
+                            retryable=True,
+                            backoff_base_sec=self.config.queue_retry_backoff_base_seconds,
+                        )
+                    except Exception:
+                        pass
+
+                result_status = result.get("status", "failed")
+                decision = {"queue_id": item["queue_id"], "job_id": item.get("job_id"), "status": result_status}
+                if result.get("error"):
+                    decision["error"] = str(result["error"])
+                summary.decision_reasons.append(decision)
+
+                if result_status == "succeeded":
+                    summary.jobs_completed += 1
+                    qa_status = str(result.get("qa_status") or "").upper()
+                    published = bool(result.get("published"))
+                    if published:
+                        # Guard breach detection: Level 4 must never publish.
+                        summary.jobs_qa_failed += 1
+                        summary.decision_reasons.append(
+                            {"queue_id": item["queue_id"], "reason": "Publish guard breached (autonomous publish detected)"}
+                        )
+                    elif qa_status in ("PASS", "WARN", "APPROVED", "READY", "SUCCESS"):
+                        summary.jobs_ready_to_publish += 1
+                elif result_status == "retry_wait":
+                    summary.jobs_retry_wait += 1
+                else:
+                    summary.jobs_qa_failed += 1
+
+                self.db.update_autonomy_run(
+                    run_id=run_id,
+                    jobs_queued=summary.jobs_completed + summary.jobs_qa_failed + summary.jobs_retry_wait,
+                )
+
+            self.db.update_autonomy_run(run_id=run_id, status="completed")
+            summary.status = "completed"
+            logger.info("level4_cycle_completed", details=summary.model_dump())
+
+        except Exception as exc:
+            logger.error("level4_cycle_failed", error=str(exc), details={"run_id": run_id})
+            summary.status = "failed"
+            summary.error_message = str(exc)[:500]
+            if not dry_run:
+                try:
+                    self.db.update_autonomy_run(run_id=run_id, status="failed", error_message=str(exc)[:500])
+                except Exception:
+                    pass
+
+        return summary
+
+    def _validate_item_for_production(
+        self,
+        item: Dict[str, Any],
+        channel: Any,
+        active_policy: AutonomyPolicy,
+    ) -> Dict[str, Any]:
+        """Pre-flight policy recheck for a Level 4 candidate queue item.
+
+        Focused on *current* policy/safety constraints that gate production:
+        active channel, well-formed topic, prohibited content, required evidence
+        (autonomous-origin items), allowed content profiles and niche category
+        fit.  Deliberately does NOT re-apply cooldown/duplicate-risk or
+        minimum-score — those decisions were made at queue time (Level 3).
+        """
+        cid = item.get("channel_id") or "default"
+        if channel and channel.status == ChannelStatus.DISABLED:
+            return {"ok": False, "reason": f"Channel '{cid}' is disabled."}
+
+        try:
+            payload = json.loads(item.get("payload_json") or "{}") if isinstance(item.get("payload_json"), str) else (item.get("payload_json") or {})
+        except Exception:
+            payload = {}
+
+        topic = str(payload.get("topic") or item.get("topic") or "").strip()
+        hook = str(payload.get("hook") or payload.get("hook_hypothesis") or "").strip()
+        angle = str(payload.get("angle") or "").strip()
+        content_format = payload.get("profile") or payload.get("content_format") or "short_vertical"
+        origin = payload.get("origin", "manual")
+        category = payload.get("category") or getattr(channel.niche, "niche_name", "general") if channel else payload.get("category", "general")
+
+        if not topic:
+            return {"ok": False, "reason": "Queue item has no topic text."}
+        words = topic.split()
+        if len(words) > 25:
+            return {"ok": False, "reason": f"Malformed topic length ({len(words)} words); rejected by current policy."}
+
+        combined_lower = f"{topic} {hook} {angle}".lower()
+        for bad_word in active_policy.prohibited_topics:
+            if bad_word and bad_word.lower() in combined_lower:
+                return {"ok": False, "reason": f"Prohibited content keyword detected: '{bad_word}'."}
+
+        if active_policy.require_evidence and origin in ("autonomous", "autonomous_manual_approved"):
+            evidence_ids = payload.get("parent_signal_ids") or payload.get("supporting_signal_ids") or []
+            if not evidence_ids:
+                return {"ok": False, "reason": "Missing verifiable supporting trend signal evidence for autonomous job."}
+
+        if active_policy.allowed_profiles:
+            allowed = [p.lower() for p in active_policy.allowed_profiles]
+            if content_format.lower() not in allowed:
+                return {"ok": False, "reason": f"Content profile '{content_format}' not allowed by current policy."}
+
+        if channel:
+            niche = getattr(channel, "niche", None)
+            if niche and getattr(niche, "allowed_categories", None):
+                if category and str(category).lower() not in {c.lower() for c in niche.allowed_categories}:
+                    return {"ok": False, "reason": f"Category '{category}' not in allowed niche categories."}
+            if niche and getattr(niche, "excluded_categories", None):
+                if category and str(category).lower() in {c.lower() for c in niche.excluded_categories}:
+                    return {"ok": False, "reason": f"Category '{category}' is excluded by niche policy."}
+
+        return {"ok": True, "reason": "Passed Level 4 pre-flight policy recheck."}
 
     def approve_proposal(self, proposal_id: str) -> dict:
         """Manually approves a proposal and enqueues it into the M7 queue."""

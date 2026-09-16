@@ -1301,6 +1301,39 @@ class AutonomyCycleSummary(BaseModel):
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
+class AutoProduceSummary(BaseModel):
+    """Structured result of a Level 4 guarded auto-produce cycle.
+
+    Level 4 consumes eligible auto-queued jobs through the existing real worker
+    and pipeline, stopping at the terminal pre-publish state (APPROVED, i.e.
+    READY_TO_PUBLISH). It never invokes a public publisher.
+    """
+
+    run_id: str
+    channel_id: str = "default"
+    autonomy_level: int = 4
+    dry_run: bool = False
+    policy: str = "local_only"
+    queued_jobs_discovered: int = 0
+    jobs_eligible: int = 0
+    jobs_blocked: int = 0
+    jobs_producing: int = 0
+    jobs_completed: int = 0
+    jobs_ready_to_publish: int = 0
+    jobs_qa_failed: int = 0
+    jobs_retry_wait: int = 0
+    jobs_skipped_completed: int = 0
+    jobs_skipped_duplicate: int = 0
+    jobs_daily_limit_blocked: int = 0
+    jobs_concurrency_blocked: int = 0
+    jobs_cycle_limit_blocked: int = 0
+    status: str = "completed"
+    error_message: Optional[str] = None
+    active_strategy_version: str = "strat-v1"
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    decision_reasons: List[Dict[str, str]] = Field(default_factory=list)
+
+
 # =====================================================================
 # Milestone 10: Multi-Channel Scaling & Channel Profiles Contracts
 # =====================================================================
