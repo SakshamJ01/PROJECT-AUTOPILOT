@@ -332,3 +332,389 @@ tbody tr:hover {
   color: var(--muted);
   font-size: 12px;
 }
+
+/* ------------------------------------------------------------------ */
+/* M2 — Queue + Production screens
+/* ------------------------------------------------------------------ */
+
+.queue-screen,
+.production-screen {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.page-title {
+  margin: 0;
+  font-size: 18px;
+}
+
+.small {
+  font-size: 12px;
+}
+
+.text-input,
+.select-input {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 13px;
+  min-width: 160px;
+}
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 12px;
+}
+
+.summary-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.summary-value {
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.summary-label {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.ghost-btn {
+  background: transparent;
+  color: var(--info);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 12px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.ghost-btn:hover {
+  border-color: var(--info);
+}
+
+.primary-btn {
+  background: var(--accent);
+  color: #fff;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 7px 16px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.primary-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.danger-btn {
+  background: transparent;
+  color: var(--bad);
+  border: 1px solid var(--bad);
+  border-radius: 6px;
+  padding: 7px 16px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.danger-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.item-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.production-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+.controls-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.start-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.start-form-row {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.start-form-row label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+  flex: 1;
+  min-width: 160px;
+}
+
+.start-form-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.banner-info {
+  background: rgba(90, 169, 230, 0.12);
+  border: 1px solid var(--info);
+  color: var(--info);
+}
+
+/* Stage timeline (Production) */
+
+.stage-timeline {
+  display: flex;
+  gap: 0;
+  margin: 14px 0 4px;
+  padding: 0;
+  list-style: none;
+  overflow-x: auto;
+}
+
+.stage-timeline li {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 64px;
+  position: relative;
+  padding-top: 6px;
+}
+
+.stage-timeline li::before {
+  content: "";
+  position: absolute;
+  top: 11px;
+  left: 0;
+  right: 50%;
+  height: 2px;
+  background: var(--border);
+}
+
+.stage-timeline li:first-child::before {
+  display: none;
+}
+
+.stage-timeline li::after {
+  content: "";
+  position: absolute;
+  top: 11px;
+  left: 50%;
+  right: 0;
+  height: 2px;
+  background: var(--border);
+}
+
+.stage-timeline li:last-child::after {
+  display: none;
+}
+
+.stage-dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  background: var(--bg-panel);
+  position: relative;
+  z-index: 1;
+}
+
+.stage-name {
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  text-align: center;
+}
+
+.stage-done .stage-dot {
+  border-color: var(--ok);
+  background: var(--ok);
+}
+
+.stage-done::before,
+.stage-done::after {
+  background: var(--ok);
+}
+
+.stage-done .stage-name {
+  color: var(--text);
+}
+
+.stage-active .stage-dot {
+  border-color: var(--info);
+  background: var(--info);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.stage-active .stage-name {
+  color: var(--info);
+  font-weight: 600;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(90, 169, 230, 0.5);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(90, 169, 230, 0);
+  }
+}
+
+.stage-pending .stage-name {
+  color: var(--muted);
+}
+
+.stage-future .stage-dot {
+  opacity: 0.35;
+}
+
+.stage-future .stage-name {
+  opacity: 0.45;
+}
+
+/* Artifact cards */
+
+.artifact-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 14px;
+}
+
+.artifact-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  min-width: 150px;
+  max-width: 220px;
+}
+
+.artifact-card.artifact-media {
+  border-color: var(--ok);
+}
+
+.artifact-name {
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.artifact-list {
+  margin: 0;
+  padding: 0 14px;
+  list-style: none;
+}
+
+.artifact-item {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.error-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.job-links {
+  display: flex;
+  gap: 8px;
+  padding: 12px 0 0;
+}
+
+.kv-row {
+  display: contents;
+}
+
+/* Drawer tabs */
+
+.drawer-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+
+.drawer-tab {
+  background: transparent;
+  color: var(--muted);
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 10px 14px;
+  cursor: pointer;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.drawer-tab:hover {
+  color: var(--text);
+}
+
+.drawer-tab.active {
+  color: var(--text);
+  border-bottom-color: var(--info);
+}
+
+.tab-panel {
+  padding: 4px 0 18px;
+}
+
+.timeline-states {
+  font-weight: 600;
+}
+
+.timeline-reason {
+  color: var(--muted);
+  font-size: 12px;
+}

@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   engineCall,
   engineStatus,
@@ -9,6 +9,8 @@ import type {
   HealthGet,
   JobInspect,
   LogEntry,
+  ProductionActionResult,
+  ProductionStartResult,
   QueueList,
   WorkflowEvent,
 } from "./types";
@@ -39,11 +41,40 @@ export function useSystemStatusQuery() {
   });
 }
 
-export function useQueueQuery() {
+const TERMINAL_QUEUE_STATUSES = new Set([
+  "succeeded",
+  "failed",
+  "cancelled",
+  "blocked",
+  "dead_letter",
+]);
+
+/** Polls fast while active queue items exist; slows once all are terminal. */
+export function useQueueQuery(filters?: { status?: string; search?: string; channel_id?: string }) {
+  const status = filters?.status === "all" ? undefined : filters?.status;
   return useQuery({
-    queryKey: ["engine", "queue.list"],
-    queryFn: () => engineCall<QueueList>("queue.list"),
-    refetchInterval: POLL.queueMs,
+    queryKey: [
+      "engine",
+      "queue.list",
+      status ?? "all",
+      filters?.search ?? "",
+      filters?.channel_id ?? "all",
+    ],
+    queryFn: () =>
+      engineCall<QueueList>("queue.list", {
+        status,
+        search: filters?.search,
+        channel_id: filters?.channel_id,
+        limit: 200,
+      }),
+    refetchInterval: (query) => {
+      const snapshot = query.state.data as QueueList | undefined;
+      if (!snapshot) return POLL.queueMs;
+      const hasActive = snapshot.items.some(
+        (it) => !TERMINAL_QUEUE_STATUSES.has(it.status),
+      );
+      return hasActive ? POLL.queueMs : POLL.systemMs;
+    },
     retry: false,
   });
 }
@@ -52,9 +83,58 @@ export function useJobInspectQuery(jobId: string | null) {
   return useQuery({
     queryKey: ["engine", "job.inspect", jobId],
     queryFn: () => engineCall<JobInspect>("job.inspect", { job_id: jobId }),
-    refetchInterval: POLL.activityMs,
+    refetchInterval: (query) => {
+      const inspect = query.state.data as JobInspect | undefined;
+      const status = inspect?.queue_item?.status;
+      if (!status) return POLL.activityMs;
+      return TERMINAL_QUEUE_STATUSES.has(status) ? false : 1500;
+    },
     retry: false,
     enabled: jobId !== null,
+  });
+}
+
+export function useProductionStartMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (params: {
+      topic: string;
+      channel?: string;
+      policy?: string;
+      profile?: string;
+      llm_provider?: string;
+      research_provider?: string;
+      tts_provider?: string;
+      asset_provider?: string;
+      production_engine?: string;
+    }) => engineCall<ProductionStartResult>("production.start", params),
+    onSuccess: (data) => {
+      void queryClient.invalidateQueries({ queryKey: ["engine", "queue.list"] });
+      void queryClient.invalidateQueries({ queryKey: ["engine", "health.get"] });
+      void queryClient.invalidateQueries({ queryKey: ["engine", "job.inspect", data.job_id] });
+    },
+  });
+}
+
+export function useProductionCancelMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (params: { job_id?: string; queue_id?: string }) =>
+      engineCall<ProductionActionResult>("production.cancel", params),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["engine", "queue.list"] });
+    },
+  });
+}
+
+export function useProductionRetryMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (params: { job_id?: string; queue_id?: string }) =>
+      engineCall<ProductionActionResult>("production.retry", params),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["engine", "queue.list"] });
+    },
   });
 }
 

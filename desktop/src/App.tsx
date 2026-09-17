@@ -1,9 +1,19 @@
 import StatusBadge from "./components/StatusBadge";
 import Dashboard from "./components/Dashboard";
 import SystemPanel from "./components/SystemPanel";
+import QueueScreen from "./components/QueueScreen";
+import ProductionScreen from "./components/ProductionScreen";
 import JobDrawer from "./components/JobDrawer";
 import { useEngineStatusQuery } from "./api/hooks";
 import { useUiStore } from "./state/ui";
+import type { Page } from "./state/ui";
+
+const PAGES: Array<{ id: Page; label: string }> = [
+  { id: "dashboard", label: "Dashboard" },
+  { id: "queue", label: "Queue" },
+  { id: "production", label: "Production" },
+  { id: "system", label: "System & Logs" },
+];
 
 export default function App() {
   const page = useUiStore((s) => s.page);
@@ -17,18 +27,15 @@ export default function App() {
       <header className="app-header">
         <div className="brand">Autopilot Desktop</div>
         <nav className="nav">
-          <button
-            className={page === "dashboard" ? "nav-item active" : "nav-item"}
-            onClick={() => setPage("dashboard")}
-          >
-            Dashboard
-          </button>
-          <button
-            className={page === "system" ? "nav-item active" : "nav-item"}
-            onClick={() => setPage("system")}
-          >
-            System & Logs
-          </button>
+          {PAGES.map((p) => (
+            <button
+              key={p.id}
+              className={page === p.id ? "nav-item active" : "nav-item"}
+              onClick={() => setPage(p.id)}
+            >
+              {p.label}
+            </button>
+          ))}
         </nav>
         <StatusBadge
           label={reachable ? "engine online" : "engine offline"}
@@ -42,9 +49,12 @@ export default function App() {
             autopilot.bridge) and restart the app.
           </div>
         ) : null}
-        {page === "dashboard" ? <Dashboard /> : <SystemPanel />}
+        {page === "dashboard" ? <Dashboard /> : null}
+        {page === "queue" ? <QueueScreen /> : null}
+        {page === "production" ? <ProductionScreen /> : null}
+        {page === "system" ? <SystemPanel /> : null}
       </main>
-      {page === "dashboard" ? <JobDrawer /> : null}
+      <JobDrawer />
     </div>
   );
 }

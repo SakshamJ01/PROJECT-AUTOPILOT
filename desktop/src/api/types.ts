@@ -62,11 +62,42 @@ export interface QueueItem {
   completed_at: string | null;
   payload_json: string | null;
   manifest_id: string | null;
+  last_error: string | null;
+  worker_id: string | null;
+  profile: string | null;
+  policy: string | null;
+  auto_publish: boolean;
+  publish_visibility: string | null;
+  providers?: Record<string, string>;
 }
 
 export interface QueueList {
   items: QueueItem[];
   summary: QueueSummary;
+}
+
+export interface QaCheck {
+  check_id: string;
+  status: string;
+  check_name?: string;
+  message?: string;
+}
+
+export interface QaFinding {
+  finding_id: string;
+  severity: string;
+  message?: string;
+}
+
+export interface QaReport {
+  report_id: string;
+  job_id: string | null;
+  status?: string;
+  overall_score?: number | null;
+  publish_allowed?: boolean | null;
+  created_at?: string | null;
+  checks?: QaCheck[];
+  findings?: QaFinding[];
 }
 
 export interface WorkflowEvent {
@@ -111,4 +142,33 @@ export interface JobInspect {
   errors: ErrorEntry[];
   queue_item: QueueItem | null;
   publications: Record<string, unknown>[];
+  qa_reports?: QaReport[];
+  stage_order?: string[];
+}
+
+export interface ProductionStartRequest {
+  topic: string;
+  channel?: string;
+  policy?: string;
+  profile?: string;
+  llm_provider?: string;
+  research_provider?: string;
+  tts_provider?: string;
+  asset_provider?: string;
+  production_engine?: string;
+}
+
+export interface ProductionStartResult {
+  queue_id: string;
+  job_id: string;
+  status: string;
+  media_path: string | null;
+  qa_status: string | null;
+  error: string | null;
+}
+
+export interface ProductionActionResult {
+  cancelled?: boolean;
+  retried?: boolean;
+  queue_id: string;
 }

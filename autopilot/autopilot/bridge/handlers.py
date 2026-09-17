@@ -1,4 +1,4 @@
-"""M1 bridge handlers — thin wrappers over EXISTING backend surfaces.
+"""M1+M2 bridge handlers — thin wrappers over EXISTING backend surfaces.
 
 Each handler delegates to the existing DB / engine layer. No business logic
 lives here: decisions, gates and state transitions remain in the backend.
@@ -6,17 +6,31 @@ lives here: decisions, gates and state transitions remain in the backend.
 
 from __future__ import annotations
 
+import json as _json
 import os
 import platform
 import sqlite3
 import sys
 import time
+import uuid
 from typing import Any, Optional
 
 from autopilot.bridge import BRIDGE_VERSION
-from autopilot.bridge.protocol import INVALID_PARAMS, METHOD_NOT_FOUND, ProtocolError
+from autopilot.bridge.protocol import (
+    INVALID_PARAMS,
+    INTERNAL_ERROR,
+    METHOD_NOT_FOUND,
+    ProtocolError,
+)
 from autopilot.core.config import Config
 from autopilot.db.manager import DBManager
+
+
+# Canonical queue stage ordering for timeline display.
+_STAGE_ORDER = [
+    "RESEARCH", "SCRIPT", "VOICE", "ASSETS", "RENDER", "QA",
+    "PUBLISH", "COMPLETE",
+]
 
 
 class BridgeHandlers:
@@ -28,6 +42,9 @@ class BridgeHandlers:
         "job.inspect",
         "events.tail",
         "logs.tail",
+        "production.start",
+        "production.cancel",
+        "production.retry",
         "system.shutdown",
         "system.restart",
     )
@@ -172,10 +189,21 @@ class BridgeHandlers:
         params = params or {}
         status = params.get("status")
         channel_id = params.get("channel_id")
+        search = params.get("search")
         limit = self._int_param(params, "limit", default=50, minimum=1, maximum=500)
         rows = self.db.list_queue_items(status=status, limit=limit, channel_id=channel_id)
+        # Enrich rows with parsed payload fields (thin serialisation, not logic).
+        enriched = [self._enrich_queue_item(r) for r in rows]
+        if search:
+            needle = str(search).lower()
+            enriched = [
+                r for r in enriched
+                if needle in str(r.get("topic") or "").lower()
+                or needle in str(r.get("job_id") or "").lower()
+                or needle in str(r.get("queue_id") or "").lower()
+            ]
         return {
-            "items": rows,
+            "items": enriched,
             "summary": self.db.get_queue_status_summary(),
         }
 
@@ -187,6 +215,16 @@ class BridgeHandlers:
         job = self.db.get_job(job_id)
         if job is None:
             return {"found": False, "job_id": job_id}
+        # Fetch QA reports (most recent first, include checks/findings).
+        qa_reports = self.db.get_qa_reports_for_job(job_id)
+        enriched_qa = []
+        for report in qa_reports[:3]:
+            report_id = report.get("report_id", "")
+            enriched_qa.append({
+                **report,
+                "checks": self.db.get_qa_checks(report_id),
+                "findings": self.db.get_qa_findings(report_id),
+            })
         return {
             "found": True,
             "job_id": job_id,
@@ -194,9 +232,168 @@ class BridgeHandlers:
             "events": self.db.get_events(job_id),
             "artifacts": self.db.get_artifacts_for_job(job_id),
             "errors": self.db.get_errors_for_job(job_id),
-            "queue_item": self.db.get_queue_item_by_job(job_id),
+            "queue_item": self._enrich_queue_item(
+                self.db.get_queue_item_by_job(job_id) or {}
+            ),
             "publications": self.db.get_publications_for_job(job_id),
+            "qa_reports": enriched_qa,
+            "stage_order": _STAGE_ORDER,
         }
+
+    # ------------------------------------------------------------------
+    # production control
+    # ------------------------------------------------------------------
+    def on_production_start(self, params: dict | None) -> dict[str, Any]:
+        """Enqueue and synchronously execute a production pipeline job.
+
+        Delegates to LocalWorker.process_claimed_item for the canonical
+        pipeline path. Runs on a bridge pool thread so the stdio loop
+        stays responsive.
+        """
+        params = params or {}
+        topic = (params.get("topic") or "").strip()
+        if not topic:
+            raise ProtocolError(INVALID_PARAMS, "Missing required param: topic")
+
+        channel_id = params.get("channel", "default")
+        policy = params.get("policy", "local_only")
+        profile = params.get("profile", "short_vertical")
+        auto_publish = False  # M2 never allows publishing from desktop
+
+        # Provider overrides — only include if explicitly supplied.
+        provider_overrides: dict[str, str] = {}
+        for key in ("llm", "research", "tts", "asset", "production_engine"):
+            val = params.get(f"{key}_provider")
+            if val is not None:
+                provider_overrides[key] = val
+        provider_overrides["policy"] = policy
+
+        job_id = f"prod-{topic.replace(' ', '-')[:30]}-{uuid.uuid4().hex[:8]}"
+        queue_id = f"desk-{uuid.uuid4().hex[:12]}"
+
+        payload: dict[str, Any] = {
+            "topic": topic,
+            "channel_id": channel_id,
+            "policy": policy,
+            "profile": profile,
+            "auto_publish": auto_publish,
+        }
+        # Persist provider names in payload for audit / inspection.
+        for key in ("llm", "research", "tts", "asset", "production_engine"):
+            val = params.get(f"{key}_provider")
+            if val is not None:
+                payload[f"{key}_provider"] = val
+
+        self.db.enqueue_item(
+            queue_id=queue_id,
+            job_id=job_id,
+            priority=3,
+            channel_id=channel_id,
+            payload=payload,
+        )
+
+        # Claim the item we just enqueued (must be in queued state).
+        claimed = self.db.claim_queue_item(
+            queue_id=queue_id,
+            worker_id=f"desktop-{os.getpid()}",
+            lease_duration_sec=3600,
+        )
+        if claimed is None:
+            raise ProtocolError(INTERNAL_ERROR, "Failed to claim newly enqueued item")
+
+        # Execute pipeline synchronously via the canonical worker path.
+        from autopilot.core.worker import LocalWorker
+
+        worker = LocalWorker(
+            worker_id=f"desktop-{os.getpid()}",
+            config=self.config,
+            db=self.db,
+        )
+        try:
+            result = worker.process_claimed_item(
+                claimed,
+                provider_overrides=provider_overrides or None,
+                force_auto_publish=False,
+            )
+        except Exception as exc:  # noqa: BLE001 — must not crash the bridge
+            self.db.fail_queue_item(queue_id, str(exc), retryable=False)
+            result = {
+                "queue_id": queue_id,
+                "job_id": job_id,
+                "status": "failed",
+                "error": str(exc),
+            }
+
+        return {
+            "queue_id": queue_id,
+            "job_id": job_id,
+            "status": result.get("status", "unknown"),
+            "media_path": result.get("media_path"),
+            "qa_status": result.get("qa_status"),
+            "error": result.get("error"),
+        }
+
+    def on_production_cancel(self, params: dict | None) -> dict[str, Any]:
+        """Cancel a queue item by job_id or queue_id."""
+        params = params or {}
+        job_id = params.get("job_id")
+        queue_id = params.get("queue_id")
+        if not job_id and not queue_id:
+            raise ProtocolError(
+                INVALID_PARAMS, "Missing required param: job_id or queue_id"
+            )
+        if not queue_id and job_id:
+            item = self.db.get_queue_item_by_job(job_id)
+            if item is None:
+                raise ProtocolError(INVALID_PARAMS, f"No queue item for job_id={job_id}")
+            queue_id = item["queue_id"]
+        ok = self.db.cancel_queue_item(queue_id)
+        return {"cancelled": ok, "queue_id": queue_id}
+
+    def on_production_retry(self, params: dict | None) -> dict[str, Any]:
+        """Retry a failed/blocked/cancelled queue item by job_id or queue_id."""
+        params = params or {}
+        job_id = params.get("job_id")
+        queue_id = params.get("queue_id")
+        if not job_id and not queue_id:
+            raise ProtocolError(
+                INVALID_PARAMS, "Missing required param: job_id or queue_id"
+            )
+        if not queue_id and job_id:
+            item = self.db.get_queue_item_by_job(job_id)
+            if item is None:
+                raise ProtocolError(INVALID_PARAMS, f"No queue item for job_id={job_id}")
+            queue_id = item["queue_id"]
+        ok = self.db.retry_queue_item(queue_id)
+        return {"retried": ok, "queue_id": queue_id}
+
+    # ------------------------------------------------------------------
+    # helpers — queue enrichment
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _enrich_queue_item(row: dict) -> dict:
+        """Parse payload_json and surface safe top-level fields."""
+        if not row:
+            return row
+        payload_raw = row.get("payload_json") or "{}"
+        try:
+            payload = _json.loads(payload_raw) if isinstance(payload_raw, str) else payload_raw
+        except Exception:  # noqa: BLE001
+            payload = {}
+        row["topic"] = payload.get("topic")
+        row["profile"] = payload.get("profile")
+        row["policy"] = payload.get("policy")
+        row["auto_publish"] = payload.get("auto_publish", False)
+        row["publish_visibility"] = payload.get("publish_visibility")
+        # Provider names are safe (no secrets).
+        providers = {}
+        for key in ("llm_provider", "research_provider", "tts_provider", "asset_provider", "production_engine"):
+            val = payload.get(key)
+            if val is not None:
+                providers[key.replace("_provider", "")] = val
+        if providers:
+            row["providers"] = providers
+        return row
 
     # ------------------------------------------------------------------
     # activity / logs

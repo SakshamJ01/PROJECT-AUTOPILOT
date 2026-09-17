@@ -50,7 +50,8 @@ def seeded_db(tmp_path):
         content_id="c-1",
         priority=3,
         channel_id="chan1",
-        payload={"topic": "Quantum Computing Basics", "channel_id": "chan1"},
+        payload={"topic": "Quantum Computing Basics", "channel_id": "chan1",
+                 "policy": "local_only", "profile": "short_vertical", "auto_publish": False},
     )
     return db_path
 
@@ -220,6 +221,18 @@ def test_queue_list_snapshot(client):
     assert item["channel_id"] == "chan1"
     assert item["stage"] == "RESEARCH"
     assert item["status"] == "queued"
+    # M2 enrichment from payload_json
+    assert item["topic"] == "Quantum Computing Basics"
+    assert item["profile"] == "short_vertical"
+    assert item["policy"] == "local_only"
+    assert item["auto_publish"] is False
+
+
+def test_queue_list_search_filter(client):
+    res = client.call("queue.list", {"search": "quantum"})["result"]
+    assert any(i["queue_id"] == "q-1" for i in res["items"])
+    res = client.call("queue.list", {"search": "zzzz-no-match"})["result"]
+    assert res["items"] == []
 
 
 def test_queue_list_status_filter(client):
@@ -247,6 +260,176 @@ def test_job_inspect_missing(client):
 def test_job_inspect_requires_job_id(client):
     res = client.call("job.inspect", {})
     assert res["error"]["code"] == -32602
+
+
+# ---------------------------------------------------------------------------
+# M2 production control
+# ---------------------------------------------------------------------------
+
+def test_production_cancel_by_job_id(client):
+    res = client.call("production.cancel", {"job_id": "job-1"})["result"]
+    assert res["cancelled"] is True
+    assert res["queue_id"] == "q-1"
+    # Reflects in next snapshot.
+    later = client.call("queue.list")["result"]
+    item = next(i for i in later["items"] if i["queue_id"] == "q-1")
+    assert item["status"] == "cancelled"
+
+
+def test_production_cancel_by_queue_id(client):
+    res = client.call("production.cancel", {"queue_id": "q-1"})["result"]
+    assert res["cancelled"] is True
+
+
+def test_production_cancel_requires_target(client):
+    res = client.call("production.cancel", {})
+    assert res["error"]["code"] == -32602
+
+
+def test_production_cancel_unknown_job(client):
+    res = client.call("production.cancel", {"job_id": "ghost-job"})
+    assert res["error"]["code"] == -32602
+
+
+def test_production_cancel_non_cancellable_status(seeded_db):
+    """A succeeded item is not cancellable — cancel returns false, state unchanged."""
+    from autopilot.db.manager import DBManager
+
+    db = DBManager(seeded_db)
+    db.update_queue_item_status("q-1", "succeeded", error_message=None)
+
+    cli = BridgeClient(seeded_db)
+    try:
+        res = cli.call("production.cancel", {"job_id": "job-1"})["result"]
+        assert res["cancelled"] is False
+        later = cli.call("queue.list")["result"]
+        item = next(i for i in later["items"] if i["queue_id"] == "q-1")
+        assert item["status"] == "succeeded"
+    finally:
+        cli.close()
+
+
+def test_production_retry_after_cancel(client):
+    client.call("production.cancel", {"queue_id": "q-1"})
+    res = client.call("production.retry", {"job_id": "job-1"})["result"]
+    assert res["retried"] is True
+    assert res["queue_id"] == "q-1"
+    later = client.call("queue.list")["result"]
+    item = next(i for i in later["items"] if i["queue_id"] == "q-1")
+    assert item["status"] == "queued"
+    assert item["attempt_count"] == 0
+
+
+def test_production_retry_unknown_job(client):
+    res = client.call("production.retry", {"job_id": "ghost-job"})
+    assert res["error"]["code"] == -32602
+
+
+def test_production_start_requires_topic(client):
+    res = client.call("production.start", {})
+    assert res["error"]["code"] == -32602
+    res = client.call("production.start", {"topic": "   "})
+    assert res["error"]["code"] == -32602
+
+
+def test_production_start_delegates_to_worker(tmp_path, monkeypatch):
+    """production.start enqueues, claims, and runs the canonical worker path
+    (stubbed) with auto_publish forced off and no secrets in the payload."""
+    import autopilot.core.worker as worker_module
+    from autopilot.bridge.handlers import BridgeHandlers
+    from autopilot.core.config import Config
+    from autopilot.db.manager import DBManager
+
+    monkeypatch.setenv("AUTOPILOT_DB_PATH", str(tmp_path / "start.db"))
+    db = DBManager(tmp_path / "start.db")
+    db.init_schema()
+
+    captured: dict = {}
+
+    class FakeWorker:
+        def __init__(self, worker_id, config, db):
+            captured["worker_id"] = worker_id
+
+        def process_claimed_item(self, claimed, provider_overrides=None, force_auto_publish=None):
+            captured["claimed"] = claimed
+            captured["provider_overrides"] = provider_overrides
+            captured["force_auto_publish"] = force_auto_publish
+            db.complete_queue_item(claimed["queue_id"])  # mirror the real worker
+            return {
+                "queue_id": claimed["queue_id"],
+                "job_id": claimed["job_id"],
+                "status": "succeeded",
+                "media_path": "/tmp/out.mp4",
+                "qa_status": "APPROVED",
+                "error": None,
+            }
+
+    monkeypatch.setattr(worker_module, "LocalWorker", FakeWorker)
+
+    handlers = BridgeHandlers(Config(), db)
+    result = handlers.dispatch("production.start", {
+        "topic": "Rust performance",
+        "channel": "chan1",
+        "policy": "local_only",
+    })
+
+    assert result["status"] == "succeeded"
+    assert result["qa_status"] == "APPROVED"
+    assert result["job_id"].startswith("prod-Rust-performance-")
+    assert result["queue_id"].startswith("desk-")
+
+    claimed = captured["claimed"]
+    assert claimed["status"] == "running"
+    assert claimed["channel_id"] == "chan1"
+    assert captured["force_auto_publish"] is False
+    overrides = captured["provider_overrides"]
+    assert overrides["policy"] == "local_only"
+
+    # Payload persisted during processing is free of secrets.
+    item = db.get_queue_item(result["queue_id"])
+    assert item is not None
+    hits = _collect_sensitive({"payload_json": item.get("payload_json")})
+    assert hits == []
+
+    # Queue summary reflects the completed run.
+    summary = db.get_queue_status_summary()
+    assert summary["succeeded"] >= 1
+    assert summary["queued"] == 0
+
+
+def test_production_start_blocks_mock_under_local_only(tmp_path, monkeypatch):
+    """Explicit mock providers under local_only must never silently ship
+    from the desktop surface — delegation to the worker enforces fail-closed."""
+    import autopilot.core.worker as worker_module
+    from autopilot.bridge.handlers import BridgeHandlers
+    from autopilot.core.config import Config
+    from autopilot.db.manager import DBManager
+
+    monkeypatch.setenv("AUTOPILOT_DB_PATH", str(tmp_path / "block.db"))
+    db = DBManager(tmp_path / "block.db")
+    db.init_schema()
+
+    captured: dict = {}
+
+    class FakeWorker:
+        def __init__(self, worker_id, config, db):
+            pass
+
+        def process_claimed_item(self, claimed, provider_overrides=None, force_auto_publish=None):
+            captured["overrides"] = provider_overrides
+            return {"queue_id": claimed["queue_id"], "job_id": claimed["job_id"], "status": "failed", "error": "X"}
+
+    monkeypatch.setattr(worker_module, "LocalWorker", FakeWorker)
+
+    handlers = BridgeHandlers(Config(), db)
+    handlers.dispatch("production.start", {
+        "topic": "Rust performance",
+        "policy": "local_only",
+        "llm_provider": "mock",
+        "tts_provider": "mock",
+    })
+    assert captured["overrides"]["policy"] == "local_only"
+    assert captured["overrides"]["llm"] == "mock"  # worker will reject silently with resolve_providers_for_policy
 
 
 def test_events_tail(client):
@@ -286,9 +469,15 @@ def test_logs_search_filter(client):
 # ---------------------------------------------------------------------------
 
 def test_no_secrets_in_any_response(client):
-    methods = ["ping", "system.status", "health.get", "queue.list", "job.inspect", "events.tail", "logs.tail"]
+    methods = ["ping", "system.status", "health.get", "queue.list", "job.inspect", "events.tail", "logs.tail", "production.cancel", "production.retry"]
     for method in methods:
-        frame = client.call(method, {"job_id": "job-1", "limit": 10} if method == "job.inspect" else None)
+        if method == "job.inspect":
+            params: dict | None = {"job_id": "job-1", "limit": 10}
+        elif method in ("production.cancel", "production.retry"):
+            params = {"job_id": "job-1"}
+        else:
+            params = None
+        frame = client.call(method, params)
         hits = _collect_sensitive(frame)
         assert hits == [], f"{method} leaked sensitive keys: {hits}"
         text = json.dumps(frame).lower()

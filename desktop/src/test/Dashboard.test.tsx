@@ -104,7 +104,10 @@ describe("Dashboard polls the engine bridge", () => {
     expect(screen.getByText("queued")).toBeInTheDocument();
     expect(screen.getByText(/2 ready · 5 published/)).toBeInTheDocument();
     expect(invoke).toHaveBeenCalledWith("engine_call", { method: "health.get", params: null });
-    expect(invoke).toHaveBeenCalledWith("engine_call", { method: "queue.list", params: null });
+    expect(invoke).toHaveBeenCalledWith(
+      "engine_call",
+      expect.objectContaining({ method: "queue.list" }),
+    );
   });
 
   it("opens the job drawer when a queue row is clicked", async () => {
@@ -130,6 +133,10 @@ describe("Dashboard polls the engine bridge", () => {
 
     const row = await screen.findByText("Quantum Computing Basics");
     fireEvent.click(row);
+
+    // Errors live behind the Errors tab in the M2 tabbed drawer.
+    const errorsTab = await screen.findByRole("tab", { name: "Errors" });
+    fireEvent.click(errorsTab);
 
     await waitFor(() => {
       expect(screen.getByText("FFMPEG_TIMEOUT")).toBeInTheDocument();
