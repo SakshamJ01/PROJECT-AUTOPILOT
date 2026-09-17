@@ -154,6 +154,108 @@ class PublishingEngine:
 
         return exported
 
+    def _enforce_approval_gate(
+        self,
+        job_id: str,
+        db: DBManager,
+        media_checksum: str,
+        platform: str,
+    ) -> Optional[PublishError]:
+        """Enforce the operator approval gate before a real publication.
+
+        The gate requires (a) job readiness (READY_TO_PUBLISH == APPROVED),
+        (b) an explicitly approved approval record, (c) approval channel match,
+        (d) approval platform match, and (e) that the published artifact is
+        byte-identical to the artifact the operator approved. Failures never
+        flip the job to FAILED_PUBLISH — the job remains READY_TO_PUBLISH.
+        """
+        job = db.get_job(job_id)
+        if not job:
+            return PublishError(
+                error_code="JOB_NOT_FOUND",
+                message=f"Job '{job_id}' not found.",
+                retryable=False,
+            )
+
+        job_status = (job.get("status") or "").upper()
+        job_channel = (job.get("channel_id") or "default").lower()
+        ready_states = {WorkflowState.APPROVED.value.upper(), WorkflowState.READY.value.upper()}
+        if job_status not in ready_states:
+            return PublishError(
+                error_code="JOB_NOT_READY",
+                message=(
+                    f"Job '{job_id}' is in state '{job.get('status')}'; explicit operator "
+                    f"approval requires READY_TO_PUBLISH (APPROVED)."
+                ),
+                retryable=False,
+            )
+
+        approval = db.get_publish_approval(job_id)
+        if approval is None:
+            return PublishError(
+                error_code="APPROVAL_REQUIRED",
+                message=f"No approval record for job '{job_id}'. Explicit operator approval is required before publishing.",
+                retryable=False,
+            )
+
+        if approval.get("status") != "approved":
+            err_code = "APPROVAL_REJECTED" if approval.get("status") == "rejected" else "APPROVAL_PENDING"
+            return PublishError(
+                error_code=err_code,
+                message=(
+                    f"Publication for job '{job_id}' is {approval.get('status')}. "
+                    f"Explicit operator approval is required before publishing."
+                ),
+                retryable=False,
+            )
+
+        approval_channel = (approval.get("channel_id") or "default").lower()
+        if approval_channel != job_channel:
+            return PublishError(
+                error_code="APPROVAL_CHANNEL_MISMATCH",
+                message=(
+                    f"Approval channel '{approval_channel}' does not match job channel "
+                    f"'{job_channel}' for job '{job_id}'."
+                ),
+                retryable=False,
+            )
+
+        approval_platform = (approval.get("platform") or "").lower()
+        if approval_platform and approval_platform != str(platform).lower():
+            return PublishError(
+                error_code="APPROVAL_PLATFORM_MISMATCH",
+                message=(
+                    f"Approval platform '{approval_platform}' does not match requested "
+                    f"platform '{platform}' for job '{job_id}'."
+                ),
+                retryable=False,
+            )
+
+        bound_checksum = approval.get("media_checksum_sha256")
+        if bound_checksum and bound_checksum != media_checksum:
+            self.db.decide_publish_approval(
+                job_id,
+                approved=False,
+                decided_by="system",
+                notes=(
+                    f"Approval invalidated: artifact changed after approval "
+                    f"({bound_checksum[:12]}... != {media_checksum[:12]}...)."
+                ),
+            )
+            return PublishError(
+                error_code="APPROVAL_ARTIFACT_MISMATCH",
+                message=(
+                    f"Approved artifact for job '{job_id}' no longer matches the current "
+                    f"media file (SHA-256 changed post-approval). The approval was "
+                    f"invalidated; re-approve the new artifact."
+                ),
+                retryable=False,
+            )
+        # Idempotent audit binding: COALESCE fills only unbound values, so this is
+        # a no-op when the operator already pinned the checksum/platform.
+        db.bind_publish_approval(job_id, media_checksum, str(platform).lower())
+        return None
+
     def publish_job(
         self,
         job_id: str,
@@ -165,6 +267,7 @@ class PublishingEngine:
         media_path: Optional[str] = None,
         provider: Optional[PublisherProvider] = None,
         db_manager: Optional[DBManager] = None,
+        require_approval: bool = False,
     ) -> PublishResult:
         """Publish a QA-verified rendered job to the target platform."""
         db = db_manager or self.db
@@ -408,6 +511,27 @@ class PublishingEngine:
                         attempts=[],
                     )
 
+        # 7.5 Protected publishing: enforcement of the operator approval gate.
+        # Dry runs and CC-autonomous pre-authorized publishes with an existing
+        # approved approval bypass nothing — dry runs only, since they never touch
+        # a remote platform.
+        if require_approval and not is_dry_run:
+            gate_error = self._enforce_approval_gate(job_id, db, media_checksum, platform)
+            if gate_error:
+                db.record_error(
+                    job_id,
+                    stage="publish",
+                    error_type="APPROVAL_GATE",
+                    message=gate_error.message,
+                    details={"error_code": gate_error.error_code, "platform": platform},
+                )
+                return PublishResult(
+                    success=False,
+                    status=PublishStatus.BLOCKED_APPROVAL,
+                    error=gate_error,
+                    attempts=[],
+                )
+
         # 8. State Machine: Transition to PUBLISHING
         db.update_job_status(job_id, WorkflowState.PUBLISHING.value, idempotency_key=idempotency_key)
         db.log_event(job_id, WorkflowState.APPROVED.value, WorkflowState.PUBLISHING.value, idempotency_key=idempotency_key)
@@ -484,3 +608,29 @@ class PublishingEngine:
         return result
 
     publish = publish_job
+
+    def publish_with_approval(
+        self,
+        job_id: str,
+        platform: str = "youtube",
+        visibility: Optional[str] = None,
+        scheduled_time: Optional[str] = None,
+        dry_run: Optional[bool] = None,
+        force_retry: bool = False,
+        media_path: Optional[str] = None,
+        provider: Optional[PublisherProvider] = None,
+        db_manager: Optional[DBManager] = None,
+    ) -> PublishResult:
+        """Publish via the protected approval loop (explicit operator approval enforced)."""
+        return self.publish_job(
+            job_id=job_id,
+            platform=platform,
+            visibility=visibility,
+            scheduled_time=scheduled_time,
+            dry_run=dry_run,
+            force_retry=force_retry,
+            media_path=media_path,
+            provider=provider,
+            db_manager=db_manager,
+            require_approval=True,
+        )

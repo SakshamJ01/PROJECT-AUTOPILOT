@@ -858,7 +858,7 @@ class AutonomyEngine:
             return {"status": "error", "message": f"No approval record found for job '{job_id}'."}
         from autopilot.core.publisher import PublishingEngine
         pe = PublishingEngine(self.config, self.db)
-        res = pe.publish_job(job_id=job_id)
+        res = pe.publish_job(job_id=job_id, require_approval=True)
         return {
             "status": "approved_and_published" if getattr(res, "success", False) else "approved_publish_pending",
             "job_id": job_id,
@@ -990,16 +990,30 @@ class AutonomyEngine:
                 )
                 approval_status = "pending"
             elif mode == "autonomous":
-                # Publish according to policy
-                from autopilot.core.publisher import PublishingEngine
-                pe = PublishingEngine(self.config, self.db)
-                pub_result = pe.publish_job(
-                    job_id=job_id,
-                    platform=publish_platform,
-                    visibility=publish_visibility,
-                    dry_run=dry_run,
-                )
-                approval_status = "auto_approved"
+                # Protected publishing loop: autonomous mode never silently
+                # publishes. It creates a pending approval and halts, exactly like
+                # assisted mode. Publication only happens when the operator opted
+                # into `autonomy_auto_publish` AND a previously approved approval
+                # record already exists (i.e. this run merely executes it).
+                pre_auth = self.db.get_publish_approval(job_id)
+                if self.config.autonomy_auto_publish and pre_auth and pre_auth.get("status") == "approved":
+                    from autopilot.core.publisher import PublishingEngine
+                    pe = PublishingEngine(self.config, self.db)
+                    pub_result = pe.publish_job(
+                        job_id=job_id,
+                        platform=publish_platform,
+                        visibility=publish_visibility,
+                        dry_run=dry_run,
+                        require_approval=True,
+                    )
+                    approval_status = "auto_approved"
+                else:
+                    self.db.create_publish_approval(
+                        job_id=job_id,
+                        channel_id=cid,
+                        notes=f"Autonomous mode approval gate for topic '{selected_topic}'",
+                    )
+                    approval_status = "pending"
             else:
                 approval_status = "manual_held"
 

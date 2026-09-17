@@ -4,11 +4,12 @@ Schema designed to be migrated without rewriting core.
 from __future__ import annotations
 import sqlite3
 import json
+import uuid
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-DB_SCHEMA_VERSION = 10
+DB_SCHEMA_VERSION = 11
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -533,6 +534,8 @@ CREATE TABLE IF NOT EXISTS publish_approvals (
     decided_at TEXT,
     decided_by TEXT,
     notes TEXT,
+    media_checksum_sha256 TEXT,
+    platform TEXT DEFAULT 'youtube',
     FOREIGN KEY (job_id) REFERENCES jobs(job_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_publish_approvals_job ON publish_approvals(job_id);
@@ -685,6 +688,17 @@ class DBManager:
                     conn.execute("ALTER TABLE autonomy_schedules ADD COLUMN operation_mode TEXT")
                 if cols and "include_learning" not in cols:
                     conn.execute("ALTER TABLE autonomy_schedules ADD COLUMN include_learning INTEGER NOT NULL DEFAULT 0")
+            except Exception:
+                pass
+
+            # v11: publish approval loop — bind approved artifacts/platform to approval records
+            try:
+                cur = conn.execute("PRAGMA table_info(publish_approvals)")
+                cols = [row["name"] for row in cur.fetchall()]
+                if cols and "media_checksum_sha256" not in cols:
+                    conn.execute("ALTER TABLE publish_approvals ADD COLUMN media_checksum_sha256 TEXT")
+                if cols and "platform" not in cols:
+                    conn.execute("ALTER TABLE publish_approvals ADD COLUMN platform TEXT DEFAULT 'youtube'")
             except Exception:
                 pass
 
@@ -3231,29 +3245,56 @@ class DBManager:
         job_id: str,
         channel_id: str = "default",
         notes: str = "",
+        media_checksum_sha256: str | None = None,
+        platform: str | None = None,
     ) -> str:
-        """Create or update a pending publication approval request."""
-        approval_id = f"appr-{job_id}"
+        """Create a pending publication approval request for a job.
+
+        Each call inserts a distinct row so a full decision history is kept (the
+        previous ``INSERT OR REPLACE`` behaviour overwrote prior approvals).
+        """
+        approval_id = f"appr-{job_id}-{uuid.uuid4().hex[:8]}"
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT OR REPLACE INTO publish_approvals (
-                    approval_id, job_id, channel_id, status, requested_at, notes
-                ) VALUES (?, ?, ?, 'pending', CURRENT_TIMESTAMP, ?)
+                INSERT INTO publish_approvals (
+                    approval_id, job_id, channel_id, status, requested_at, notes,
+                    media_checksum_sha256, platform
+                ) VALUES (?, ?, ?, 'pending', CURRENT_TIMESTAMP, ?, ?, ?)
                 """,
-                (approval_id, job_id, channel_id, notes),
+                (approval_id, job_id, channel_id, notes, media_checksum_sha256, platform),
             )
             conn.commit()
             return approval_id
 
     def get_publish_approval(self, job_id: str) -> dict | None:
-        """Get publication approval for a given job."""
+        """Get the most recent publication approval for a given job."""
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT * FROM publish_approvals WHERE job_id = ? ORDER BY requested_at DESC LIMIT 1",
+                "SELECT * FROM publish_approvals WHERE job_id = ? ORDER BY rowid DESC LIMIT 1",
                 (job_id,),
             ).fetchone()
             return dict(row) if row else None
+
+    def list_publish_approvals(self, job_id: str | None = None) -> list[dict]:
+        """List publication approval history.
+
+        With ``job_id`` returns every approval for that job in insertion order
+        (``rowid`` is the SQLite insertion sequence and therefore deterministic
+        even when several requests land in the same second); otherwise returns
+        the full audit trail newest-first.
+        """
+        with self._connect() as conn:
+            if job_id:
+                rows = conn.execute(
+                    "SELECT * FROM publish_approvals WHERE job_id = ? ORDER BY rowid ASC",
+                    (job_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM publish_approvals ORDER BY rowid DESC"
+                ).fetchall()
+            return [dict(r) for r in rows]
 
     def decide_publish_approval(
         self,
@@ -3261,17 +3302,62 @@ class DBManager:
         approved: bool,
         decided_by: str = "operator",
         notes: str = "",
+        artifact_checksum: str | None = None,
+        platform: str | None = None,
     ) -> bool:
-        """Approve or reject a publication approval."""
+        """Approve or reject the most recent publication approval for a job.
+
+        Only the latest pending/decided record is touched so prior decisions are
+        preserved in the history. When ``artifact_checksum``/``platform`` are
+        supplied they are bound to the decision at the same time.
+        """
         status = "approved" if approved else "rejected"
+        bind_sets = ""
+        bind_values: list = []
+        if artifact_checksum:
+            bind_sets += ", media_checksum_sha256 = ?"
+            bind_values.append(artifact_checksum)
+        if platform:
+            bind_sets += ", platform = ?"
+            bind_values.append(platform)
+        with self._connect() as conn:
+            cur = conn.execute(
+                f"""
+                UPDATE publish_approvals
+                SET status = ?, decided_at = CURRENT_TIMESTAMP, decided_by = ?,
+                    notes = COALESCE(notes || '; ', '') || ?
+                    {bind_sets}
+                WHERE approval_id = (
+                    SELECT approval_id FROM publish_approvals
+                    WHERE job_id = ?
+                    ORDER BY rowid DESC LIMIT 1
+                )
+                """,
+                (status, decided_by, notes, *bind_values, job_id),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
+    def bind_publish_approval(
+        self,
+        job_id: str,
+        media_checksum_sha256: str,
+        platform: str,
+    ) -> bool:
+        """Lazily bind the published artifact checksum/platform to the latest approval."""
         with self._connect() as conn:
             cur = conn.execute(
                 """
                 UPDATE publish_approvals
-                SET status = ?, decided_at = CURRENT_TIMESTAMP, decided_by = ?, notes = COALESCE(notes || '; ', '') || ?
-                WHERE job_id = ?
+                SET media_checksum_sha256 = COALESCE(media_checksum_sha256, ?),
+                    platform = COALESCE(platform, ?)
+                WHERE approval_id = (
+                    SELECT approval_id FROM publish_approvals
+                    WHERE job_id = ?
+                    ORDER BY rowid DESC LIMIT 1
+                )
                 """,
-                (status, decided_by, notes, job_id),
+                (media_checksum_sha256, platform, job_id),
             )
             conn.commit()
             return cur.rowcount > 0
@@ -3289,6 +3375,25 @@ class DBManager:
                     "SELECT * FROM publish_approvals WHERE status = 'pending' ORDER BY requested_at DESC"
                 ).fetchall()
             return [dict(r) for r in rows]
+
+    def get_publish_health_counts(self) -> dict:
+        """Aggregate publication-loop counts for the health report."""
+        with self._connect() as conn:
+            approvals = conn.execute(
+                "SELECT status, count(*) AS n FROM publish_approvals GROUP BY status"
+            ).fetchall()
+            jobs = conn.execute(
+                "SELECT status, count(*) AS n FROM jobs WHERE status IN ('PUBLISHED', 'FAILED_PUBLISH') GROUP BY status"
+            ).fetchall()
+        counts = {r["status"]: r["n"] for r in approvals}
+        job_counts = {r["status"]: r["n"] for r in jobs}
+        return {
+            "awaiting_approval": counts.get("pending", 0),
+            "approved": counts.get("approved", 0),
+            "rejected": counts.get("rejected", 0),
+            "published": job_counts.get("PUBLISHED", 0),
+            "publish_failures": job_counts.get("FAILED_PUBLISH", 0),
+        }
 
 
 # Alias for backward compatibility

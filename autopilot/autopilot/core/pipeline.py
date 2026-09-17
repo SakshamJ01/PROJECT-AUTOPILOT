@@ -827,7 +827,9 @@ class PipelineOrchestrator:
             if on_stage_progress:
                 on_stage_progress("PUBLISH")
             try:
-                self.db.update_job_status(job_id, WorkflowState.PUBLISHING.value)
+                # The engine owns the APPROVED -> PUBLISHING transition so that the
+                # approval gate runs before any state change. A blocked approval
+                # leaves the job READY_TO_PUBLISH (never FAILED_PUBLISH).
                 publisher = PublishingEngine(config=self.config, db=self.db)
                 publish_result = publisher.publish(
                     job_id=job_id,
@@ -835,8 +837,14 @@ class PipelineOrchestrator:
                     visibility=publish_visibility,
                     dry_run=False,
                     media_path=str(final_mp4),
+                    require_approval=True,
                 )
                 if not publish_result.success:
+                    if publish_result.status == PublishStatus.BLOCKED_APPROVAL:
+                        err_msg = publish_result.error.message if publish_result.error else "Operator approval required"
+                        self.db.record_error(job_id, "PUBLISH", "approval_gate_blocked", err_msg)
+                        raise PipelineError(f"Publication held for approval: {err_msg}", category="NON_RETRYABLE", stage="PUBLISH")
+
                     self.db.update_job_status(job_id, WorkflowState.FAILED_PUBLISH.value)
                     err_msg = publish_result.error.message if publish_result.error else "Publishing failed"
                     raise PipelineError(f"Publishing failed: {err_msg}", category="RETRYABLE", stage="PUBLISH")

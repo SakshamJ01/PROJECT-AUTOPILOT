@@ -262,6 +262,10 @@ def run_health() -> int:
             "max_daily_jobs": CONFIG.autonomy_max_daily_jobs,
             "max_ideas_per_cycle": CONFIG.autonomy_max_ideas_per_cycle,
         },
+        "publishing": {
+            "status": "AVAILABLE",
+            "counts": db.get_publish_health_counts(),
+        },
         "providers_registered": list(provider_health.keys()),
         "provider_health": {k: v.model_dump() for k, v in provider_health.items()},
     }
@@ -1171,12 +1175,17 @@ def run_publish(
     force_retry: bool = False,
     media_path: Optional[str] = None,
     output_json: bool = False,
+    require_approval: Optional[bool] = None,
 ) -> int:
     import json
     from autopilot.core.publisher import PublishingEngine
     from autopilot.core.contracts import PublishStatus
 
     engine = PublishingEngine(CONFIG)
+    # The publication gate is enforced for every real (non-dry-run) publish.
+    # Dry runs are WORKFLOW-EXEMPT: they never touch a remote platform and are
+    # used purely for operator preview.
+    effective_approval = require_approval if require_approval is not None else (not dry_run)
     result = engine.publish_job(
         job_id=job_id,
         platform=platform,
@@ -1185,6 +1194,7 @@ def run_publish(
         dry_run=dry_run,
         force_retry=force_retry,
         media_path=media_path,
+        require_approval=effective_approval,
     )
 
     if output_json:
@@ -1233,6 +1243,201 @@ def run_publish(
             print(f"Receipt:  {art_dir / 'receipt.json'}")
 
     return 0 if result.success else 1
+
+
+def _publish_media_checksum(job_id: str) -> str | None:
+    from autopilot.core.publisher import PublishingEngine, compute_file_sha256
+
+    engine = PublishingEngine(CONFIG)
+    media = engine._resolve_media_file(job_id)
+    if not media:
+        return None
+    return compute_file_sha256(media)
+
+
+def run_publish_approve(
+    job_id: Optional[str],
+    platform: str = "youtube",
+    decided_by: str = "operator",
+    notes: str = "",
+    output_json: bool = False,
+) -> int:
+    import json
+    from autopilot.db.manager import DBManager
+
+    if not job_id:
+        print("Error: Job ID is required (e.g. autopilot publish approve <job_id>)", file=sys.stderr)
+        return 1
+    db = DBManager(CONFIG.db_path)
+    db.init_schema()
+    job = db.get_job(job_id)
+    if not job:
+        print(f"Error: Job '{job_id}' not found.", file=sys.stderr)
+        return 1
+
+    checksum = _publish_media_checksum(job_id)
+    if db.get_publish_approval(job_id) is None:
+        db.create_publish_approval(
+            job_id=job_id,
+            channel_id=job.get("channel_id") or "default",
+            notes=f"Approval created via CLI (publish approve) by {decided_by or 'operator'}",
+        )
+    ok = db.decide_publish_approval(
+        job_id,
+        approved=True,
+        decided_by=decided_by or "operator",
+        notes=notes or "",
+        artifact_checksum=checksum,
+        platform=platform,
+    )
+    approval = db.get_publish_approval(job_id)
+    if not ok or not approval or approval.get("status") != "approved":
+        print(f"Error: Failed to approve publication for job '{job_id}'.", file=sys.stderr)
+        return 1
+
+    if output_json:
+        print(json.dumps({
+            "job_id": job_id,
+            "status": "approved",
+            "platform": approval.get("platform") or platform,
+            "decided_by": approval.get("decided_by"),
+            "decided_at": approval.get("decided_at"),
+            "media_checksum_sha256": checksum,
+        }, indent=2, default=str))
+    else:
+        print(f"JOB:                 {job_id}")
+        print(f"STATUS:              APPROVED")
+        print(f"PLATFORM:            {approval.get('platform') or platform}")
+        print(f"DECIDED BY:          {approval.get('decided_by')}")
+        print(f"DECIDED AT:          {approval.get('decided_at')}")
+        print(f"MEDIA CHECKSUM:      {checksum or 'N/A'}")
+        print("Publication is now authorized. Run 'autopilot publish run <job_id>' to publish.")
+        if notes:
+            print(f"NOTES:               {notes}")
+    return 0
+
+
+def run_publish_reject(
+    job_id: Optional[str],
+    decided_by: str = "operator",
+    notes: str = "",
+    output_json: bool = False,
+) -> int:
+    import json
+    from autopilot.db.manager import DBManager
+
+    if not job_id:
+        print("Error: Job ID is required (e.g. autopilot publish reject <job_id>)", file=sys.stderr)
+        return 1
+    db = DBManager(CONFIG.db_path)
+    db.init_schema()
+    approval = db.get_publish_approval(job_id)
+    if approval is None:
+        print(f"Error: No approval record found for job '{job_id}'.", file=sys.stderr)
+        return 1
+    ok = db.decide_publish_approval(
+        job_id,
+        approved=False,
+        decided_by=decided_by or "operator",
+        notes=notes or "",
+    )
+    approval = db.get_publish_approval(job_id)
+    if output_json:
+        print(json.dumps({
+            "job_id": job_id,
+            "status": approval.get("status") if approval else "rejected",
+            "decided_by": approval.get("decided_by") if approval else None,
+            "decided_at": approval.get("decided_at") if approval else None,
+        }, indent=2, default=str))
+    else:
+        print(f"JOB:                 {job_id}")
+        print(f"STATUS:              REJECTED")
+        if approval:
+            print(f"DECIDED BY:          {approval.get('decided_by')}")
+            print(f"DECIDED AT:          {approval.get('decided_at')}")
+        if notes:
+            print(f"NOTES:               {notes}")
+        print("This job will NOT be published until it is explicitly approved again.")
+    return 0 if ok else 1
+
+
+def run_publish_inspect(job_id: Optional[str], output_json: bool = False) -> int:
+    import json
+    from autopilot.core.publisher import PublishingEngine, compute_file_sha256
+    from autopilot.db.manager import DBManager
+
+    if not job_id:
+        print("Error: Job ID is required (e.g. autopilot publish inspect <job_id>)", file=sys.stderr)
+        return 1
+    db = DBManager(CONFIG.db_path)
+    db.init_schema()
+    job = db.get_job(job_id)
+    engine = PublishingEngine(CONFIG)
+    approval = db.get_publish_approval(job_id)
+    history = db.list_publish_approvals(job_id=job_id)
+    publications = db.get_publications_for_job(job_id)
+    attempts = db.get_publish_attempts_for_job(job_id)
+    qa = engine._load_qa_receipt(job_id, db)
+    media = engine._resolve_media_file(job_id)
+    checksum = compute_file_sha256(media) if media else None
+
+    job_status = (job or {}).get("status")
+    state = "READY_TO_PUBLISH" if job_status == "APPROVED" else str(job_status or "UNKNOWN")
+    if approval:
+        bound = approval.get("media_checksum_sha256")
+        if approval.get("status") == "approved":
+            auth_status = "AUTHORIZED" if (not bound or bound == checksum) else "INVALIDATED (artifact changed)"
+        else:
+            auth_status = f"NOT AUTHORIZED ({approval['status']})"
+    else:
+        auth_status = "UNAUTHORIZED"
+    qa_status = "MISSING"
+    if qa:
+        qa_status = qa.get("status") or ("PASS" if qa.get("publish_allowed") else "BLOCK")
+
+    summary = {
+        "job_id": job_id,
+        "state": state,
+        "approval_status": auth_status,
+        "qa_status": qa_status,
+        "media_checksum_sha256": checksum,
+        "approval": approval,
+        "approval_history": history,
+        "publications": publications,
+        "publish_attempts": attempts,
+    }
+    if output_json:
+        print(json.dumps(summary, indent=2, default=str))
+    else:
+        print(f"=== PUBLICATION INSPECT: {job_id} ===")
+        print(f"State:                {state}")
+        print(f"Authorization:        {auth_status}")
+        print(f"QA:                   {qa_status}")
+        print(f"Media SHA-256:        {checksum or 'N/A'}")
+        if approval:
+            appr = approval
+            print("--- Latest Approval ---")
+            print(f"ID / Status:          {appr.get('approval_id')} / {appr.get('status')}")
+            print(f"Requested:            {appr.get('requested_at')}")
+            print(f"Decided:              {appr.get('decided_at') or 'PENDING'}")
+            print(f"Decided By:           {appr.get('decided_by') or '-'}")
+            print(f"Platform Bound:       {appr.get('platform') or '-'}")
+            print(f"Checksum Bound:       {appr.get('media_checksum_sha256') or '-'}")
+            if appr.get("notes"):
+                print(f"Notes:                {appr.get('notes')}")
+        if history:
+            print("--- Approval History ---")
+            for h in history:
+                print(f"  {h.get('requested_at')}  {h.get('status').upper():<9} by {h.get('decided_by') or '-'}")
+        if publications:
+            print("--- Published Records ---")
+            for p in publications:
+                print(f"  {p.get('published_at')}  id={p.get('remote_video_id')}  {p.get('remote_url')}")
+        else:
+            print("Publications:         none yet")
+        if attempts:
+            print(f"Publish attempts:     {len(attempts)}")
+    return 0
 
 
 def run_youtube_auth(
@@ -2833,6 +3038,13 @@ def build_parser():
     sub_parser_publish.add_argument("--force-retry", action="store_true", help="Force re-attempt even if previous publication succeeded")
     sub_parser_publish.add_argument("--media", default=None, help="Explicit path to media file (optional)")
     sub_parser_publish.add_argument("--json", action="store_true", help="Output machine-readable JSON result")
+    # Protected publishing loop. The action word is translated from
+    # `publish <action> <job>` by main() into this hidden optional so the legacy
+    # flat `publish <job_id>` parsing surface stays byte-for-byte untouched.
+    sub_parser_publish.add_argument("--publish-action", default=None, choices=["approve", "reject", "run", "inspect"],
+                                    help=argparse.SUPPRESS)
+    sub_parser_publish.add_argument("--by", default=None, help=argparse.SUPPRESS)
+    sub_parser_publish.add_argument("--notes", default=None, help=argparse.SUPPRESS)
 
     sub_parser_ytauth = sub.add_parser("youtube-auth", help="Perform interactive Google OAuth authorization for YouTube publishing")
     sub_parser_ytauth.add_argument("--secrets", default=None, help="Path to client_secret.json (optional override)")
@@ -3071,6 +3283,14 @@ def build_parser():
 
 
 def main() -> int:
+    # Translate `publish <action> <job>` into `publish --publish-action <action> <job>`
+    # so the legacy flat `publish <job_id>` surface stays intact. Only the argv
+    # consumed by main() is rewritten; build_parser().parse_args() is untouched.
+    argv = list(sys.argv)
+    if len(argv) >= 3 and argv[1] == "publish" and argv[2] in ("approve", "reject", "run", "inspect"):
+        argv = [argv[0], argv[1]] + ["--publish-action", argv[2]] + argv[3:]
+        sys.argv = argv
+
     parser = build_parser()
     args = parser.parse_args()
 
@@ -3174,6 +3394,42 @@ def main() -> int:
     elif args.command == "inspect":
         return run_queue_inspect(job_id=args.job, output_json=args.json)
     elif args.command == "publish":
+        action = getattr(args, "publish_action", None)
+        if action is not None:
+            sub_job = getattr(args, "positional_job", None) or args.job
+            if not sub_job:
+                print(f"Error: Job ID is required (e.g. autopilot publish {action} <job_id>)")
+                return 1
+            if action == "approve":
+                return run_publish_approve(
+                    job_id=sub_job,
+                    platform=getattr(args, "platform", "youtube"),
+                    decided_by=args.by or "operator",
+                    notes=args.notes or "",
+                    output_json=args.json,
+                )
+            if action == "reject":
+                return run_publish_reject(
+                    job_id=sub_job,
+                    decided_by=args.by or "operator",
+                    notes=args.notes or "",
+                    output_json=args.json,
+                )
+            if action == "run":
+                vis = "public" if args.public else ("unlisted" if args.unlisted else "private")
+                return run_publish(
+                    job_id=sub_job,
+                    platform=args.platform,
+                    dry_run=args.dry_run,
+                    visibility=vis,
+                    scheduled_time=args.schedule,
+                    force_retry=args.force_retry,
+                    media_path=args.media,
+                    output_json=args.json,
+                    require_approval=True,
+                )
+            if action == "inspect":
+                return run_publish_inspect(job_id=sub_job, output_json=args.json)
         target_job = getattr(args, "positional_job", None) or args.job
         if not target_job:
             print("Error: Job ID is required (e.g. autopilot publish <job_id> or --job <job_id>)")
