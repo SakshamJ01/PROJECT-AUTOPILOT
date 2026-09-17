@@ -8,13 +8,17 @@ export type JsonValue =
   | JsonValue[]
   | { [key: string]: JsonValue };
 
+// Structured params are accepted directly; they are serialised by the invoke
+// boundary. Untyped ad-hoc objects still work via Record<string, unknown>.
+type EngineParams = Record<string, unknown> | object;
+
 export function engineCall<T = JsonValue>(
   method: string,
-  params?: Record<string, unknown>,
+  params?: EngineParams,
 ): Promise<T> {
   return invoke<T>("engine_call", {
     method,
-    params: params ?? null,
+    params: (params as Record<string, unknown> | null) ?? null,
   });
 }
 

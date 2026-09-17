@@ -3,6 +3,8 @@ import Dashboard from "./components/Dashboard";
 import SystemPanel from "./components/SystemPanel";
 import QueueScreen from "./components/QueueScreen";
 import ProductionScreen from "./components/ProductionScreen";
+import AutopilotScreen from "./components/AutopilotScreen";
+import SchedulerScreen from "./components/SchedulerScreen";
 import JobDrawer from "./components/JobDrawer";
 import { useEngineStatusQuery } from "./api/hooks";
 import { useUiStore } from "./state/ui";
@@ -12,6 +14,8 @@ const PAGES: Array<{ id: Page; label: string }> = [
   { id: "dashboard", label: "Dashboard" },
   { id: "queue", label: "Queue" },
   { id: "production", label: "Production" },
+  { id: "autopilot", label: "Autopilot" },
+  { id: "scheduler", label: "Scheduler" },
   { id: "system", label: "System & Logs" },
 ];
 
@@ -52,6 +56,8 @@ export default function App() {
         {page === "dashboard" ? <Dashboard /> : null}
         {page === "queue" ? <QueueScreen /> : null}
         {page === "production" ? <ProductionScreen /> : null}
+        {page === "autopilot" ? <AutopilotScreen /> : null}
+        {page === "scheduler" ? <SchedulerScreen /> : null}
         {page === "system" ? <SystemPanel /> : null}
       </main>
       <JobDrawer />

@@ -1,7 +1,7 @@
 import { create } from "zustand";
 
 export type SeverityFilter = "all" | "info" | "error";
-export type Page = "dashboard" | "system" | "queue" | "production";
+export type Page = "dashboard" | "system" | "queue" | "production" | "autopilot" | "scheduler";
 
 interface UiState {
   page: Page;
