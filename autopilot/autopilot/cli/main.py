@@ -167,6 +167,35 @@ def get_schedule_status_summary(db) -> dict:
         return {"status": "DEGRADED", "error": str(exc)}
 
 
+def _learning_health(db) -> dict:
+    """Status snapshot for the analytics-driven learning engine (no secrets)."""
+    try:
+        active = None
+        current_version = None
+        try:
+            from autopilot.core.feedback import StrategyManager
+            active = StrategyManager(db).get_active_strategy()
+            if active:
+                current_version = active.version_id
+        except Exception:
+            current_version = None
+        runs = db.list_learning_runs(channel_id="default", limit=1)
+        last_run = runs[0] if runs else None
+        return {
+            "status": "AVAILABLE",
+            "current_strategy_version": current_version,
+            "last_learning_run": {
+                "run_id": last_run.get("run_id"),
+                "status": last_run.get("status") if last_run else None,
+                "observations_used": last_run.get("observations_used") if last_run else None,
+                "dry_run": bool(last_run.get("dry_run")) if last_run else None,
+                "resulting_strategy_version": last_run.get("resulting_strategy_version") if last_run else None,
+            } if last_run else None,
+        }
+    except Exception as exc:
+        return {"status": "DEGRADED", "error": str(exc)}
+
+
 def run_health() -> int:
     import json
     from autopilot.db.manager import DBManager
@@ -226,6 +255,7 @@ def run_health() -> int:
             "status": "AVAILABLE",
             "default_provider": CONFIG.analytics_default_provider,
         },
+        "learning_engine": _learning_health(db),
         "autonomy_engine": {
             "status": "AVAILABLE",
             "autonomy_level": CONFIG.autonomy_level,
@@ -262,6 +292,12 @@ def run_health() -> int:
     sched = report["scheduler"]
     print(f"Scheduler: AVAILABLE ({sched['total_schedules']} schedules, {sched['enabled_schedules']} enabled, {sched['due_now']} due now, {sched['total_runs']} runs)")
     print(f"Analytics Engine: AVAILABLE (default={CONFIG.analytics_default_provider})")
+    lrn = report["learning_engine"]
+    lrn_status = lrn.get("status")
+    lrn_detail = lrn.get("current_strategy_version") or "-"
+    if lrn.get("last_learning_run"):
+        lrn_detail += f" | last run={lrn['last_learning_run']['status']}"
+    print(f"Learning Engine: {lrn_status} (strategy={lrn_detail})")
     print(f"Autonomy Engine: AVAILABLE (level={CONFIG.autonomy_level}, daily_limit={CONFIG.autonomy_max_daily_jobs})")
     print(f"Channel Engine: AVAILABLE ({len(all_channels)} profiles, {len(enabled_channels)} enabled)")
     print(f"Artifacts: {artifacts_dir}")
@@ -1703,6 +1739,106 @@ def run_analytics_report(
     return 0
 
 
+def run_analytics_learn(
+    channel_id: str = "default",
+    dry_run: bool = False,
+    min_samples: int | None = None,
+    window_days: int | None = None,
+    output_json: bool = False,
+) -> int:
+    """Run one bounded, idempotent analytics learning cycle for a channel."""
+    import json as _json
+
+    from autopilot.core.learning import LearningEngine
+
+    engine = LearningEngine()
+    summary = engine.update_strategy(
+        channel_id=channel_id,
+        dry_run=dry_run,
+        min_samples=min_samples,
+        window_days=window_days,
+    )
+
+    if output_json:
+        print(summary.model_dump_json(indent=2))
+        return 0
+
+    print("=" * 78)
+    print(f"  ANALYTICS LEARNING {'(DRY RUN)' if dry_run else 'RUN'}  [{summary.run_id}]")
+    print("=" * 78)
+    print(f"Channel:              {summary.channel_id}")
+    print(f"Status:               {summary.status}")
+    print(f"Observation window:   {summary.window_days} days")
+    print(f"Observations:         {summary.observations_used} used / {summary.observations_considered} considered "
+          f"({summary.observations_excluded} excluded)")
+    if summary.excluded_reasons:
+        print(f"Excluded reasons:     {summary.excluded_reasons}")
+    print(f"Synthetic input:      {summary.is_synthetic_input}")
+    print(f"Input fingerprint:    {summary.input_fingerprint[:16]}...")
+    print(f"Parent strategy:      {summary.parent_strategy_version}")
+    print(f"Resulting strategy:   {summary.resulting_strategy_version or 'none (no change)'}")
+    if summary.deltas:
+        print("\n--- BOUNDED PARAMETER CHANGES (niche_weights only) ---")
+        for d in summary.deltas:
+            print(
+                f"  * {d.parameter:<12} {d.old_value:>6.3f} -> {d.new_value:<6.3f} "
+                f"(delta {d.applied_delta:+.3f}, n={d.sample_size}, conf={d.confidence:.2f})"
+            )
+            print(f"      {d.reason}")
+    print(f"\nReason: {summary.reason}")
+    if summary.error_message:
+        print(f"Error:  {summary.error_message}")
+    print(f"Applied: {'NO (dry run)' if dry_run else 'YES' if summary.status == 'applied' else 'NO'}")
+    return 0
+
+
+def run_analytics_summary(
+    channel_id: str = "default",
+    limit: int = 5,
+    output_json: bool = False,
+) -> int:
+    """Show learning status, observations, and active strategy for a channel."""
+    import json as _json
+
+    from autopilot.core.feedback import StrategyManager
+    from autopilot.core.learning import LearningEngine
+
+    engine = LearningEngine()
+    manager = StrategyManager(engine.db)
+
+    active = manager.get_active_strategy(channel_id=channel_id)
+    runs = engine.db.list_learning_runs(channel_id=channel_id, limit=limit)
+
+    if output_json:
+        print(_json.dumps({
+            "channel_id": channel_id,
+            "active_strategy": active.model_dump(mode="json") if active else None,
+            "learning_runs": [
+                {k: v for k, v in r.items() if k not in ("category_signals_json", "deltas_json", "observation_ids_json")}
+                for r in runs
+            ],
+        }, indent=2, default=str))
+        return 0
+
+    print("=" * 78)
+    print(f"  ANALYTICS LEARNING SUMMARY  [{channel_id}]")
+    print("=" * 78)
+    if active:
+        print(f"Active strategy:      {active.version_id} ({active.status.value})")
+        print(f"Parent:               {active.parent_version_id or '-'}")
+        print(f"Niche weights:        {active.niche_weights}")
+        print(f"Rationale:            {(active.rationale or '-')[:90]}")
+    else:
+        print("Active strategy:      none")
+    print(f"\nRecent learning runs ({len(runs)}):")
+    if not runs:
+        print("  (none yet — run `autopilot analytics learn` to start)")
+    for r in runs:
+        print(f"  * {r['run_id'][:34]:<34} {r['status']:<12} used={r['observations_used']:<3} "
+              f"-> {r['resulting_strategy_version'] or '-'}")
+    return 0
+
+
 def run_autonomy_run(
     level: int | None = None,
     channel_id: str | None = None,
@@ -1980,10 +2116,21 @@ def run_autonomy_strategy(activate_id: str | None = None, output_json: bool = Fa
     active = manager.get_active_strategy()
     all_strategies = manager.db.list_strategy_versions(limit=20)
 
+    # Link each version to the learning run that produced it (explainability).
+    learning_by_version = {}
+    try:
+        for s in all_strategies:
+            runs = manager.db.list_learning_runs_for_strategy(s.version_id, limit=1)
+            if runs:
+                learning_by_version[s.version_id] = runs[0].get("run_id")
+    except Exception:
+        pass
+
     if output_json:
         print(json.dumps({
             "active_strategy": active.model_dump(mode="json") if active else None,
             "strategies": [s.model_dump(mode="json") for s in all_strategies],
+            "learning_run_by_version": learning_by_version,
         }, indent=2))
     else:
         print("=== AUTONOMY STRATEGY VERSIONS ===")
@@ -1996,9 +2143,9 @@ def run_autonomy_strategy(activate_id: str | None = None, output_json: bool = Fa
         else:
             print("Active Strategy: None")
         print(f"\nAll Strategy Versions ({len(all_strategies)}):")
-        fmt = "{:<16} {:<12} {:<16} {:<10} {:<24}"
-        print(fmt.format("Version ID", "Status", "Parent", "Evidence", "Created At"))
-        print("-" * 82)
+        fmt = "{:<16} {:<12} {:<16} {:<10} {:<28} {:<28}"
+        print(fmt.format("Version ID", "Status", "Parent", "Evidence", "Created At", "Learning Run"))
+        print("-" * 112)
         for s in all_strategies:
             print(fmt.format(
                 s.version_id[:16],
@@ -2006,6 +2153,7 @@ def run_autonomy_strategy(activate_id: str | None = None, output_json: bool = Fa
                 (s.parent_version_id or "-")[:16],
                 str(len(s.supporting_evidence_ids)),
                 str(s.created_at)[:24],
+                (learning_by_version.get(s.version_id) or "-")[:28],
             ))
     return 0
 
@@ -2071,6 +2219,7 @@ def run_schedule_create(
     limit: int = 10,
     dry_run: bool = False,
     policy: str = "local_only",
+    include_learning: bool = False,
     output_json: bool = False,
 ) -> int:
     import json
@@ -2087,6 +2236,7 @@ def run_schedule_create(
             max_items_per_run=limit,
             dry_run=dry_run,
             policy=policy,
+            include_learning=include_learning,
         )
     except ValueError as exc:
         if output_json:
@@ -2106,8 +2256,40 @@ def run_schedule_create(
         print(f"Max Items / Run:  {schedule.max_items_per_run}")
         print(f"Dry Run:          {schedule.dry_run}")
         print(f"Policy Tier:      {schedule.policy}")
+        print(f"Include Learning: {schedule.include_learning}")
         print(f"Enabled:          {schedule.enabled}")
         print(f"Next Run At:      {schedule.next_run_at}")
+    return 0
+
+
+def run_schedule_update(
+    schedule_id: str,
+    include_learning: bool | None = None,
+    enabled: bool | None = None,
+    output_json: bool = False,
+) -> int:
+    """Update mutable schedule settings (learning toggle, enabled state)."""
+    import json
+
+    engine = _schedule_engine()
+    try:
+        if enabled is not None:
+            (engine.enable_schedule if enabled else engine.disable_schedule)(schedule_id)
+        if include_learning is not None:
+            engine.db.update_schedule(schedule_id, include_learning=include_learning)
+    except ValueError as exc:
+        if output_json:
+            print(json.dumps({"error": str(exc)}))
+        else:
+            print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    schedule = engine.get_schedule(schedule_id)
+    if output_json:
+        print(schedule.model_dump_json(indent=2))
+    else:
+        print(f"=== SCHEDULE UPDATED [{schedule.schedule_id}] ===")
+        print(f"Include Learning: {schedule.include_learning}")
+        print(f"Enabled:          {schedule.enabled}")
     return 0
 
 
@@ -2736,6 +2918,18 @@ def build_parser():
     sub_analytics_report.add_argument("--limit", type=int, default=20, help="Maximum number of entries to display")
     sub_analytics_report.add_argument("--json", action="store_true", help="Output machine-readable JSON")
 
+    sub_analytics_learn = sub_analytics.add_parser("learn", help="Run an analytics-driven strategy learning cycle (bounded, idempotent)")
+    sub_analytics_learn.add_argument("--channel", "--channel-id", dest="channel_id", default="default", help="Channel to learn for (channel-isolated; default: default)")
+    sub_analytics_learn.add_argument("--dry-run", action="store_true", help="Compute and show proposed strategy changes without persisting them")
+    sub_analytics_learn.add_argument("--min-samples", type=int, default=None, help="Override minimum valid observations required (default: config learning_min_samples)")
+    sub_analytics_learn.add_argument("--window-days", type=int, default=None, help="Override analytics observation window in days (default: config learning_window_days)")
+    sub_analytics_learn.add_argument("--json", action="store_true", help="Output machine-readable JSON")
+
+    sub_analytics_summary = sub_analytics.add_parser("summary", help="Show learning status, observations, and active strategy for a channel")
+    sub_analytics_summary.add_argument("--channel", "--channel-id", dest="channel_id", default="default", help="Channel ID (default: default)")
+    sub_analytics_summary.add_argument("--limit", type=int, default=5, help="Recent learning runs to show")
+    sub_analytics_summary.add_argument("--json", action="store_true", help="Output machine-readable JSON")
+
     # Milestone 9 / M9 — Autonomous Ideation & Feedback Loop subparsers
     sub_parser_autonomy = sub.add_parser("autonomy", help="Autonomous Ideation & Feedback Loop (Milestone 9)")
     sub_parser_autonomy.add_argument("--channel", default=None, help="Target channel profile ID")
@@ -2795,7 +2989,16 @@ def build_parser():
     sub_schedule_create.add_argument("--limit", type=int, default=10, help="Maximum items processed per run")
     sub_schedule_create.add_argument("--dry-run", action="store_true", help="Run cycles in dry-run (simulation) mode")
     sub_schedule_create.add_argument("--policy", default="local_only", help="Level 4 production provider policy tier (default: local_only)")
+    sub_schedule_create.add_argument("--include-learning", action="store_true", help="Run the opt-in analytics learning stage once after the operation stages (bounded, idempotent; off by default)")
     sub_schedule_create.add_argument("--json", action="store_true", help="Output machine-readable JSON")
+
+    sub_schedule_update = sub_schedule.add_parser("update", help="Update schedule settings (e.g. toggle analytics learning)")
+    sub_schedule_update.add_argument("--id", required=True, help="Schedule ID")
+    sub_schedule_update.add_argument("--include-learning", dest="include_learning", default=None, action="store_true", help="Enable the opt-in analytics learning stage")
+    sub_schedule_update.add_argument("--no-include-learning", dest="include_learning", action="store_false", help="Disable the opt-in analytics learning stage")
+    sub_schedule_update.add_argument("--enabled", dest="enabled", default=None, action="store_true", help="Enable the schedule")
+    sub_schedule_update.add_argument("--disabled", dest="enabled", action="store_false", help="Disable the schedule")
+    sub_schedule_update.add_argument("--json", action="store_true", help="Output machine-readable JSON")
 
     sub_schedule_enable = sub_schedule.add_parser("enable", help="Enable a schedule")
     sub_schedule_enable.add_argument("--id", required=True, help="Schedule ID")
@@ -3044,6 +3247,20 @@ def main() -> int:
             )
         elif args.analytics_action == "show":
             return run_analytics_show(job_id=args.job, output_json=args.json)
+        elif args.analytics_action == "learn":
+            return run_analytics_learn(
+                channel_id=getattr(args, "channel_id", "default"),
+                dry_run=getattr(args, "dry_run", False),
+                min_samples=getattr(args, "min_samples", None),
+                window_days=getattr(args, "window_days", None),
+                output_json=getattr(args, "json", False),
+            )
+        elif args.analytics_action == "summary":
+            return run_analytics_summary(
+                channel_id=getattr(args, "channel_id", "default"),
+                limit=getattr(args, "limit", 5),
+                output_json=getattr(args, "json", False),
+            )
         elif args.analytics_action == "report" or getattr(args, "channel", None) or args.analytics_action is None:
             return run_analytics_report(
                 platform=getattr(args, "platform", None),
@@ -3133,6 +3350,14 @@ def main() -> int:
                 limit=args.limit,
                 dry_run=args.dry_run,
                 policy=args.policy,
+                include_learning=getattr(args, "include_learning", False),
+                output_json=args.json,
+            )
+        elif args.schedule_action == "update":
+            return run_schedule_update(
+                schedule_id=args.id,
+                include_learning=getattr(args, "include_learning", None),
+                enabled=getattr(args, "enabled", None),
                 output_json=args.json,
             )
         elif args.schedule_action == "enable":

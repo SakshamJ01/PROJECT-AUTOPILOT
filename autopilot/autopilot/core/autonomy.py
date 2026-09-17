@@ -193,12 +193,55 @@ class AutonomyEngine:
         )
         self.diversity_filter = DiversityFilter()
         self.ideation_engine = IdeationEngine(diversity_filter=self.diversity_filter)
-        self.scorer = TopicScorer()
+        self.scorer = TopicScorer(strategy_influence_scale=self.config.strategy_influence_scale)
         self.feedback_analyzer = FeedbackAnalyzer(self.db)
         self.strategy_manager = StrategyManager(self.db)
         self.policy_gate = PolicyGate(self.policy)
         self.channel_manager = ChannelManager(self.db)
         self.logger = StructuredLogger(job_id="autonomy", stage="ideation")
+
+    @property
+    def learning_engine(self):
+        """Lazily-constructed shared learning engine.
+
+        Import is deferred so the autonomy module never hard-depends on the
+        learning subsystem at import time; the engine itself is forbidden from
+        importing any production/publishing machinery (asserted by test).
+        """
+        from autopilot.core.learning import LearningEngine
+
+        return LearningEngine(
+            config=self.config,
+            db=self.db,
+            feedback_analyzer=self.feedback_analyzer,
+            strategy_manager=self.strategy_manager,
+        )
+
+    def run_learning_cycle(
+        self,
+        channel_id: Optional[str] = None,
+        dry_run: bool = False,
+        min_samples: Optional[int] = None,
+        window_days: Optional[int] = None,
+        min_age_days: Optional[int] = None,
+        exclude_job_ids: Optional[List[str]] = None,
+    ) -> Any:
+        """Deterministic, idempotent analytics learning entry point.
+
+        Delegates entirely to the shared ``LearningEngine`` so that CLI,
+        scheduler, and this engine never duplicate learning logic.  Learning
+        only influences future ideation via bounded strategy weights; it never
+        publishes, produces, or alters policy.
+        """
+        cid = channel_id or "default"
+        return self.learning_engine.update_strategy(
+            channel_id=cid,
+            dry_run=dry_run,
+            min_samples=min_samples,
+            window_days=window_days,
+            min_age_days=min_age_days,
+            exclude_job_ids=set(exclude_job_ids) if exclude_job_ids else None,
+        )
 
     def run_cycle(
         self,
@@ -300,7 +343,9 @@ class AutonomyEngine:
             for cand in candidates:
                 # Find matching signal if any
                 sig = next((s for s in signals if s.signal_id in cand.supporting_signal_ids), None)
-                score = self.scorer.score_candidate(cand, signal=sig, feedback_signals=feedback_signals)
+                score = self.scorer.score_candidate(
+                    cand, signal=sig, feedback_signals=feedback_signals, strategy=active_strategy
+                )
 
                 decision = policy_gate.evaluate(
                     candidate=cand,
@@ -967,23 +1012,23 @@ class AutonomyEngine:
         except Exception as exc:
             analytics_info = {"status": "error", "error": str(exc)}
 
-        # 5. Feedback / Strategy Learning
+        # 5. Feedback / Strategy Learning (idempotent, bounded, shared engine)
         strategy_update_info = {"updated": False, "version": strat.version_id}
         try:
-            fb_signals = self.feedback_analyzer.extract_feedback_signals(limit=25, channel_id=cid)
-            obs = self.feedback_analyzer.analyze_learning_observations(fb_signals, min_sample_size=3, channel_id=cid)
-            if obs:
-                new_strat = self.strategy_manager.propose_strategy_version(
-                    parent_version=strat,
-                    observations=obs,
-                    rationale=f"Cycle {cycle_id} learning update",
-                    channel_id=cid,
-                )
-                if new_strat:
-                    self.strategy_manager.activate_strategy(new_strat.version_id, channel_id=cid)
-                    strategy_update_info = {"updated": True, "version": new_strat.version_id}
-        except Exception:
-            pass
+            learn_summary = self.learning_engine.update_strategy(
+                channel_id=cid,
+                dry_run=dry_run,
+                exclude_job_ids={job_id} if job_id else None,
+            )
+            strategy_update_info = {
+                "updated": learn_summary.status == "applied",
+                "version": learn_summary.resulting_strategy_version or strat.version_id,
+                "learning_run_id": learn_summary.run_id,
+                "learning_status": learn_summary.status,
+                "observations_used": learn_summary.observations_used,
+            }
+        except Exception as exc:  # pragma: no cover - defensive
+            strategy_update_info = {"updated": False, "version": strat.version_id, "error": str(exc)[:200]}
 
         return {
             "cycle_id": cycle_id,

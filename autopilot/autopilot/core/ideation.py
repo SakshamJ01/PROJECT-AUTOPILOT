@@ -123,6 +123,15 @@ class IdeationEngine:
                 if channel.niche.ideation_weighting and cat in channel.niche.ideation_weighting:
                     niche_weight = channel.niche.ideation_weighting[cat]
 
+            # Strategy weights may legitimately exceed 1.0 (bounded boosts from
+            # learning, capped at strategy_weight_ceiling).  The floor of 0.0
+            # still applies; the ceiling is enforced by the strategy layer, and
+            # the scorer exposes the excess explicitly as an auditable
+            # ``strategy_bonus`` rather than silently discarding it here.
+            # ``commercial_relevance`` remains a separate 0..1 signal and is
+            # never stretched past 1.0 (its contract bound).
+            relevance = max(0.0, min(float(niche_weight), 1.0))
+
             # Persona & niche-driven angle transformation
             persona_tone = channel.persona.tone.lower() if channel and channel.persona else "informative"
             niche_name = channel.niche.niche_name.lower() if channel and channel.niche else "general"
@@ -190,12 +199,13 @@ class IdeationEngine:
                 angle=angle,
                 hook_hypothesis=hook,
                 content_format=profile,
+                category=cat,
                 rationale=f"Derived for channel '{cid}' from trend '{sig.topic}' in '{cat}' with freshness {sig.freshness_score:.2f}.",
                 supporting_signal_ids=[sig.signal_id],
                 confidence=round(sig.confidence * (1.0 - (dup_risk * 0.4)), 3),
                 estimated_effort=2,
                 duplicate_risk=round(dup_risk, 3),
-                commercial_relevance=round(min(1.0, max(0.0, niche_weight)), 2),
+                commercial_relevance=round(relevance, 3),
                 created_at=now_iso,
             )
 

@@ -13,6 +13,7 @@ from autopilot.core.contracts import (
     StrategyVersion,
     StrategyStatus,
     PerformanceTier,
+    StrategyDelta,
 )
 from autopilot.core.config import CONFIG
 from autopilot.db.manager import DBManager
@@ -21,12 +22,71 @@ from autopilot.db.manager import DBManager
 class FeedbackAnalyzer:
     """Ingests M8 analytics and extracts associational feedback signals with outlier damping."""
 
+    # Tier values used for robust, median-relative performance classification.
+    # Percentile-based tiering is inherently outlier-damped: a single viral
+    # video cannot define the baseline because ranks are relative.
+    TIER_VALUES: Dict[str, float] = {
+        PerformanceTier.TOP.value: 0.85,
+        PerformanceTier.AVERAGE.value: 0.50,
+        PerformanceTier.LOW.value: 0.25,
+    }
+
+    @staticmethod
+    def compute_view_thresholds(views: List[float]) -> Dict[str, float]:
+        """Median/p66/p33 thresholds from a list of view counts.
+
+        Robust by construction (median-based).  Falls back to a neutral
+        baseline when there is too little data to rank meaningfully.
+        """
+        all_views = sorted(v for v in views if v is not None)
+        n = len(all_views)
+        median = all_views[n // 2] if n else 1000.0
+        if median <= 0:
+            median = 1000.0
+        if n >= 3:
+            p66 = all_views[int(n * 0.6)]
+            p33 = all_views[int(n * 0.3)]
+        else:
+            p66 = median if median >= 2000 else median * 1.2
+            p33 = median * 0.5
+        return {"median": median, "p66": p66, "p33": p33, "n": float(n)}
+
+    @staticmethod
+    def classify_tier(views: float, thresholds: Dict[str, float]) -> PerformanceTier:
+        """Classify a single view count into a performance tier.
+
+        Ties are handled explicitly: when the distribution is degenerate
+        (p33 == p66, e.g. one category dominates the sample with identical
+        values) every observation is AVERAGE — the neutral, correct answer —
+        rather than being misclassified as LOW.
+        """
+        p33 = thresholds["p33"]
+        p66 = thresholds["p66"]
+        if p66 <= p33:
+            return PerformanceTier.AVERAGE
+        if views >= p66 and views > p33:
+            return PerformanceTier.TOP
+        if views <= p33 and views < p66:
+            return PerformanceTier.LOW
+        return PerformanceTier.AVERAGE
+
     def __init__(self, db: Optional[DBManager] = None):
         self.db = db or DBManager(CONFIG.db_path)
         self.db.init_schema()
 
-    def extract_feedback_signals(self, limit: int = 50, channel_id: Optional[str] = None) -> List[FeedbackSignal]:
-        """Extracts feedback signals from historical job performance, isolating by channel if provided."""
+    def extract_feedback_signals(
+        self,
+        limit: int = 50,
+        channel_id: Optional[str] = None,
+        window_days: Optional[int] = None,
+        min_age_days: int = 0,
+        job_ids: Optional[List[str]] = None,
+    ) -> List[FeedbackSignal]:
+        """Extracts feedback signals from historical job performance, isolating by channel if provided.
+
+        ``window_days`` / ``min_age_days`` / ``job_ids`` are optional learning-time
+        filters; when omitted the historical behavior is preserved exactly.
+        """
         signals: List[FeedbackSignal] = []
         now_iso = datetime.now(timezone.utc).isoformat()
 
@@ -43,6 +103,12 @@ class FeedbackAnalyzer:
                     (limit,),
                 ).fetchall()
 
+        # Optional explicit job-id allowlist (learning eligibility is decided by
+        # the caller; this keeps the tierer a pure function of its inputs).
+        if job_ids is not None:
+            allowed = set(job_ids)
+            jobs = [j for j in jobs if j["job_id"] in allowed]
+
         perf_records = []
         for j in jobs:
             perf = self.db.get_content_performance(j["job_id"])
@@ -50,38 +116,40 @@ class FeedbackAnalyzer:
                 # Ensure channel_id is recorded
                 if not perf.channel_id or perf.channel_id == "default":
                     perf.channel_id = j["channel_id"] or "default"
+
+                # Optional learning-window recency filter
+                if window_days is not None:
+                    try:
+                        obs = perf.latest_snapshot.observed_at
+                        if obs:
+                            obs_dt = datetime.fromisoformat(obs.replace("Z", "+00:00"))
+                            if (datetime.now(timezone.utc) - obs_dt).days > int(window_days):
+                                continue
+                    except Exception:
+                        pass
+
                 perf_records.append(perf)
 
         if not perf_records:
             return signals
 
-        # Calculate median views to establish relative performance baseline
-        all_views = sorted(
+        # Robust median-relative baseline (shared with LearningEngine).  Median-
+        # based ranking is outlier-damped by construction.
+        thresholds = self.compute_view_thresholds(
             [p.latest_snapshot.metrics.get("views").normalized_value for p in perf_records if "views" in p.latest_snapshot.metrics]
         )
-        n_views = len(all_views)
-        median_views = all_views[n_views // 2] if all_views else 1000.0
-        if median_views <= 0:
-            median_views = 1000.0
-
-        if n_views >= 3:
-            p66 = all_views[int(n_views * 0.6)]
-            p33 = all_views[int(n_views * 0.3)]
-        else:
-            p66 = median_views if median_views >= 2000 else median_views * 1.2
-            p33 = median_views * 0.5
+        median_views = thresholds["median"]
 
         for perf in perf_records:
             snap = perf.latest_snapshot
             views = snap.metrics.get("views").normalized_value if "views" in snap.metrics else 0.0
             eng_rate = snap.derived_metrics.get("engagement_rate").value if "engagement_rate" in snap.derived_metrics else 0.0
 
-            # Classify into tier
-            if views >= p66 and views > p33:
-                tier = PerformanceTier.TOP
+            # Classify into tier (ties -> AVERAGE, never a false LOW)
+            tier = self.classify_tier(views, thresholds)
+            if tier == PerformanceTier.TOP:
                 note = f"Topic '{perf.topic}' was associated with stronger observed views ({int(views)} vs baseline {int(median_views)})."
-            elif views <= p33:
-                tier = PerformanceTier.LOW
+            elif tier == PerformanceTier.LOW:
                 note = f"Topic '{perf.topic}' was associated with lower observed views ({int(views)} vs baseline {int(median_views)})."
             else:
                 tier = PerformanceTier.AVERAGE
@@ -219,6 +287,80 @@ class StrategyManager:
         self.db.record_strategy_version(new_strat)
         return new_strat
 
+    def _next_version_id(self, channel_id: Optional[str], parent_version: StrategyVersion) -> str:
+        """Next monotonic version id for this channel's strategy lineage.
+
+        Uses max(existing numeric versions)+1 rather than parent+1 so that
+        re-applying learning after a rollback cannot overwrite a historical
+        version record (history is preserved for audit/rollback).
+        """
+        prefix = f"strat-{channel_id}-v" if channel_id and channel_id != "default" else "strat-v"
+        max_num = 0
+        try:
+            existing = self.db.list_strategy_versions(limit=500)
+            for s in existing:
+                vid = s.version_id or ""
+                if vid.startswith(prefix):
+                    tail = vid[len(prefix):]
+                    try:
+                        max_num = max(max_num, int(tail))
+                    except ValueError:
+                        pass
+        except Exception:
+            pass
+        try:
+            base_num = int(str(parent_version.version_id).split("-v")[-1])
+        except Exception:
+            base_num = 0
+        return f"{prefix}{max(base_num, max_num) + 1}"
+
+    def propose_bounded_strategy_version(
+        self,
+        parent_version: StrategyVersion,
+        deltas: List["StrategyDelta"],
+        rationale: str,
+        channel_id: Optional[str] = None,
+        weight_floor: float = 0.3,
+        weight_ceiling: float = 1.5,
+    ) -> Optional[StrategyVersion]:
+        """Creates a new strategy version from pre-bounded StrategyDelta objects.
+
+        This is the learning path: the caller (LearningEngine) has already
+        computed and capped every delta.  Here we only:
+          * apply each delta to the parent niche_weights,
+          * clamp to [weight_floor, weight_ceiling] (exploration floor prevents
+            any category from collapsing to zero influence),
+          * preserve every non-tunable field verbatim (hook_patterns, topic_rules,
+            and anything policy-related are copied untouched).
+
+        Safety invariant: niche_weights are the ONLY fields that may change.
+        """
+        if not deltas:
+            return None
+
+        new_version_id = self._next_version_id(channel_id, parent_version)
+
+        weights = dict(parent_version.niche_weights)
+        for d in deltas:
+            key = d.parameter
+            base = weights.get(key, 1.0)
+            # Defensive: re-clamp even though the LearningEngine already capped.
+            new_val = min(weight_ceiling, max(weight_floor, base + d.applied_delta))
+            weights[key] = round(new_val, 4)
+
+        new_strat = StrategyVersion(
+            version_id=new_version_id,
+            parent_version_id=parent_version.version_id,
+            status=StrategyStatus.PROPOSED,
+            niche_weights=weights,
+            hook_patterns=list(parent_version.hook_patterns),
+            topic_rules=dict(parent_version.topic_rules),
+            supporting_evidence_ids=[d.parameter for d in deltas],
+            rationale=rationale,
+        )
+        self.db.record_strategy_version(new_strat)
+        return new_strat
+
     def activate_strategy(self, version_id: str, channel_id: Optional[str] = None) -> bool:
         """Activates a proposed or existing strategy version, binding to channel if specified."""
         if channel_id and channel_id != "default":
@@ -226,7 +368,12 @@ class StrategyManager:
             if ch and ch.get("profile"):
                 from autopilot.core.contracts import ChannelProfile
                 profile = ChannelProfile.model_validate(ch["profile"])
+                # Keep BOTH strategy fields in sync: update_channel() mirrors
+                # ``active_strategy_version`` back into ``active_strategy_version_id``,
+                # so a stale optional field would otherwise undo the activation and
+                # break per-channel idempotency.
                 profile.active_strategy_version_id = version_id
+                profile.active_strategy_version = version_id
                 from autopilot.core.channel import ChannelManager
                 cm = ChannelManager(self.db)
                 cm.update_channel(profile, bump_version=True, change_summary=f"Activate strategy {version_id}")

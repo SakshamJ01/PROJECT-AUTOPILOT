@@ -1148,6 +1148,10 @@ class TopicCandidate(BaseModel):
     angle: str = ""
     hook_hypothesis: str = ""
     content_format: str = "short_vertical"
+    # Niche category inherited from the source trend signal.  Carries the
+    # segmentation key used by strategy niche_weights so scoring influence is
+    # fully traceable (candidate -> category -> strategy weight).
+    category: Optional[str] = None
     rationale: str = ""
     supporting_signal_ids: List[str] = Field(default_factory=list)
     confidence: float = Field(default=0.8, ge=0.0, le=1.0)
@@ -1166,8 +1170,13 @@ class TopicScore(BaseModel):
     content_novelty: float = Field(default=1.0, ge=0.0, le=1.0)
     production_effort_factor: float = Field(default=0.5, ge=0.0, le=1.0)
     duplicate_risk_penalty: float = Field(default=0.0, ge=0.0, le=1.0)
+    # Explicit, bounded, auditable adjustment derived from the active
+    # StrategyVersion niche weights (see TopicScorer).  Zero by default and
+    # whenever no strategy is supplied, so historical callers are unaffected.
+    strategy_bonus: float = Field(default=0.0, ge=-1.0, le=1.0)
+    strategy_version: Optional[str] = None
     total_score: float = Field(default=0.0, ge=0.0, le=1.0)
-    breakdown: Dict[str, float] = Field(default_factory=dict)
+    breakdown: Dict[str, Any] = Field(default_factory=dict)
     explanation: str = ""
     calculated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -1283,6 +1292,71 @@ class StrategyVersion(BaseModel):
     )
     supporting_evidence_ids: List[str] = Field(default_factory=list)
     rationale: str = "Initial baseline strategy"
+
+
+class LearningRunStatus(str, Enum):
+    """Outcome states of a single analytics learning run."""
+    APPLIED = "applied"                    # new strategy version created + activated
+    NO_CHANGE = "no_change"                # fingerprint already applied (idempotent skip)
+    INSUFFICIENT = "insufficient"          # not enough valid observations
+    DRY_RUN = "dry_run"                    # proposed but not persisted
+    FAILED = "failed"                      # error during learning
+
+
+class StrategyDelta(BaseModel):
+    """One bounded parameter change produced by a learning run.
+
+    Only ``niche_weights`` entries are tunable.  Every change carries its
+    evidence so the adjustment is fully auditable.
+    """
+    parameter: str = Field(..., min_length=1)      # niche_weights key (category)
+    old_value: float = Field(..., ge=0.0)
+    new_value: float = Field(..., ge=0.0)
+    raw_delta: float = Field(default=0.0)          # before bounding/clamping
+    applied_delta: float = Field(default=0.0)      # after max-delta cap
+    sample_size: int = Field(default=0, ge=0)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    signal: float = Field(default=0.0, ge=-1.0, le=1.0)
+    source_job_ids: List[str] = Field(default_factory=list)
+    reason: str = ""
+
+
+class LearningRunSummary(BaseModel):
+    """Structured, explainable result of one analytics learning cycle.
+
+    Captures the full lineage: what data was consumed, which signals were
+    calculated, what changed, and why.  Learning never publishes and never
+    triggers production; this record is observation + bounded strategy update
+    only.
+    """
+    run_id: str
+    channel_id: str = "default"
+    status: str = LearningRunStatus.INSUFFICIENT.value
+    dry_run: bool = False
+
+    # Input provenance
+    window_days: int = 30
+    observations_considered: int = 0      # raw published jobs in window
+    observations_used: int = 0           # after quality gating
+    observations_excluded: int = 0
+    excluded_reasons: Dict[str, int] = Field(default_factory=dict)
+    input_fingerprint: str = ""
+    is_synthetic_input: bool = False     # True when any consumed snapshot is mock/synthetic
+
+    # Signals & segmentation
+    category_signals: Dict[str, Any] = Field(default_factory=dict)
+    signals_summary: Dict[str, Any] = Field(default_factory=dict)
+
+    # Strategy lineage
+    parent_strategy_version: str = "strat-v1"
+    resulting_strategy_version: Optional[str] = None
+    deltas: List[StrategyDelta] = Field(default_factory=list)
+    observation_ids: List[str] = Field(default_factory=list)
+
+    reason: str = ""
+    error_message: Optional[str] = None
+    started_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    completed_at: Optional[str] = None
 
 
 class AutonomyCycleSummary(BaseModel):
@@ -1413,6 +1487,9 @@ class AutonomySchedule(BaseModel):
     max_items_per_run: int = Field(default=10, ge=1)
     dry_run: bool = False
     policy: str = "local_only"
+    # Opt-in: run exactly one idempotent analytics learning stage after the
+    # operation stages.  Default False — existing schedules never learn.
+    include_learning: bool = False
     next_run_at: Optional[str] = None
     last_run_at: Optional[str] = None
     last_run_id: Optional[str] = None
@@ -1445,6 +1522,11 @@ class ScheduleRunSummary(BaseModel):
     level4_run_id: Optional[str] = None
     level4_status: Optional[str] = None
     level4_jobs_ready_to_publish: int = 0
+    # Opt-in analytics learning stage (runs once after Level 4, idempotent and
+    # fully isolated from the Level 3/4 terminal status).  Off by default.
+    include_learning: bool = False
+    learning_run_id: Optional[str] = None
+    learning_status: Optional[str] = None
     next_run_at: Optional[str] = None
     publish_calls: int = 0
     error_message: Optional[str] = None

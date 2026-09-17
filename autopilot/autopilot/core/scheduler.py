@@ -143,6 +143,7 @@ class ScheduleEngine:
             max_items_per_run=int(row["max_items_per_run"]),
             dry_run=bool(row["dry_run"]),
             policy=row["policy"],
+            include_learning=bool(row["include_learning"]) if "include_learning" in row.keys() else False,
             next_run_at=row["next_run_at"],
             last_run_at=row["last_run_at"],
             last_run_id=row["last_run_id"],
@@ -194,6 +195,7 @@ class ScheduleEngine:
         max_items_per_run: int = 10,
         dry_run: bool = False,
         policy: str = "local_only",
+        include_learning: bool = False,
         schedule_id: Optional[str] = None,
         next_run_at: Optional[str] = None,
         now: Optional[datetime] = None,
@@ -217,6 +219,7 @@ class ScheduleEngine:
             max_items_per_run=int(max_items_per_run),
             dry_run=bool(dry_run),
             policy=policy,
+            include_learning=bool(include_learning),
             next_run_at=next_run_at or next_run_after(
                 AutonomySchedule(schedule_id=sid, channel_id=str(channel_id).strip(), autonomy_level=int(autonomy_level), cadence=cadence_enum, days_of_week=days, timezone=timezone),
                 now,
@@ -233,6 +236,7 @@ class ScheduleEngine:
             max_items_per_run=model.max_items_per_run,
             dry_run=model.dry_run,
             policy=model.policy,
+            include_learning=model.include_learning,
             enabled=True,
             next_run_at=model.next_run_at,
         ):
@@ -247,6 +251,7 @@ class ScheduleEngine:
                 "cadence": model.cadence.value,
                 "timezone": model.timezone,
                 "dry_run": model.dry_run,
+                "include_learning": model.include_learning,
                 "next_run_at": model.next_run_at,
             },
         )
@@ -569,6 +574,71 @@ class ScheduleEngine:
             "level4_skipped_reason": skip_reason,
         }
 
+    def _run_learning_stage(
+        self,
+        schedule: AutonomySchedule,
+        engine,
+        now: datetime,
+        stage_summaries: dict,
+    ) -> dict:
+        """Opt-in analytics learning stage (exactly once, after Level 4).
+
+        Fully isolated: any failure, insufficiency, or no-op here is recorded
+        as ``learning_status`` on the schedule-run summary and NEVER changes the
+        Level 3/4 terminal status.  Learning consumes *prior* published
+        analytics only; content produced in this same operation is excluded
+        explicitly by id (and is excluded anyway by the publish boundary — it
+        has no analytics yet).
+
+        Reuses the shared ``LearningEngine`` via the autonomy engine, so CLI,
+        scheduler, and autonomy never duplicate learning logic.
+        """
+        learning_run_id: Optional[str] = None
+        learning_status: Optional[str] = None
+        learning_summary: Optional[dict] = None
+        try:
+            # Collect job ids touched *this* operation so learning can exclude
+            # them (never learn from content produced in the same run).
+            produced_job_ids: list = []
+            for stage_key in ("level3", "level4"):
+                stage = stage_summaries.get(stage_key) or {}
+                for reason in stage.get("decision_reasons", []) or []:
+                    jid = reason.get("job_id")
+                    if jid:
+                        produced_job_ids.append(jid)
+
+            summary = engine.run_learning_cycle(
+                channel_id=schedule.channel_id,
+                dry_run=schedule.dry_run,
+                exclude_job_ids=produced_job_ids or None,
+            )
+            learning_run_id = getattr(summary, "run_id", None)
+            learning_status = getattr(summary, "status", None)
+            learning_summary = summary.model_dump(mode="json") if hasattr(summary, "model_dump") else dict(summary)
+            self.logger.info(
+                "operation_loop_learning_done",
+                details={
+                    "schedule_id": schedule.schedule_id,
+                    "channel_id": schedule.channel_id,
+                    "learning_run_id": learning_run_id,
+                    "learning_status": learning_status,
+                    "observations_used": getattr(summary, "observations_used", 0),
+                },
+            )
+        except Exception as exc:  # pragma: no cover - isolated by contract
+            learning_status = "failed"
+            learning_summary = {"error": str(exc)[:500]}
+            self.logger.error(
+                "operation_loop_learning_failed",
+                error=str(exc),
+                details={"schedule_id": schedule.schedule_id, "channel_id": schedule.channel_id},
+            )
+        return {
+            "learning_run_id": learning_run_id,
+            "learning_status": learning_status,
+            "learning_summary": learning_summary,
+        }
+
     def _execute(self, schedule: AutonomySchedule, row: dict, worker_id: str, now: datetime) -> ScheduleRunSummary:
         run_id = _fresh_run_id(now)
         started_at = now.isoformat()
@@ -595,6 +665,7 @@ class ScheduleEngine:
                 "dry_run": schedule.dry_run,
             },
         )
+        engine = None
         try:
             engine = self._autonomy_engine()
             if mode == OperationMode.LEVEL_3_THEN_4.value:
@@ -622,6 +693,30 @@ class ScheduleEngine:
         except Exception as exc:  # pragma: no cover - defensive; stages never raise
             error_message = str(exc)[:500]
             cycle_status = "failed"
+
+        # --- Opt-in analytics learning stage (isolated from terminal status) ---
+        # Runs exactly once after the operation stages.  Its outcome is recorded
+        # on the schedule-run summary but can never flip the Level 3/4 result.
+        learning_run_id: Optional[str] = None
+        learning_status: Optional[str] = None
+        if schedule.include_learning and engine is not None:
+            stage_summaries = {}
+            try:
+                stage_summaries = json.loads(cycle_summary_json or "{}")
+            except Exception:
+                stage_summaries = {}
+            learning_result = self._run_learning_stage(schedule, engine, now, stage_summaries)
+            learning_run_id = learning_result["learning_run_id"]
+            learning_status = learning_result["learning_status"]
+            # Attach the learning outcome to the persisted cycle summary.
+            try:
+                enriched = json.loads(cycle_summary_json or "{}") if cycle_summary_json else {}
+                if not isinstance(enriched, dict):
+                    enriched = {}
+                enriched["learning"] = learning_result["learning_summary"]
+                cycle_summary_json = json.dumps(enriched)
+            except Exception:
+                pass
 
         run_status = "completed" if (cycle_status or "") in CYCLE_SUCCESS_STATUSES else "failed"
         if error_message is None and run_status == "failed":
@@ -661,6 +756,9 @@ class ScheduleEngine:
             "level4_run_id": level4_run_id,
             "level4_status": level4_status,
             "level4_jobs_ready_to_publish": level4_jobs_ready,
+            "include_learning": schedule.include_learning,
+            "learning_run_id": learning_run_id,
+            "learning_status": learning_status,
             "next_run_at": next_run.isoformat(),
         }
         if run_status == "completed":
@@ -686,6 +784,9 @@ class ScheduleEngine:
             level4_run_id=level4_run_id,
             level4_status=level4_status,
             level4_jobs_ready_to_publish=level4_jobs_ready,
+            include_learning=schedule.include_learning,
+            learning_run_id=learning_run_id,
+            learning_status=learning_status,
             next_run_at=next_run.isoformat(),
             publish_calls=0,
             error_message=error_message,

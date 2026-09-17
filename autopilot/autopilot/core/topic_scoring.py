@@ -7,7 +7,7 @@ import hashlib
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
-from autopilot.core.contracts import TopicCandidate, TopicScore, TrendSignal, FeedbackSignal, PerformanceTier
+from autopilot.core.contracts import TopicCandidate, TopicScore, TrendSignal, FeedbackSignal, PerformanceTier, StrategyVersion
 
 
 class TopicScorer:
@@ -20,12 +20,39 @@ class TopicScorer:
         weight_historical: float = 0.25,
         weight_novelty: float = 0.25,
         penalty_duplicate: float = 0.35,
+        strategy_influence_scale: float = 0.25,
     ):
         self.w_fresh = weight_freshness
         self.w_rel = weight_relevance
         self.w_hist = weight_historical
         self.w_nov = weight_novelty
         self.p_dup = penalty_duplicate
+        self.strategy_scale = float(strategy_influence_scale)
+
+    @staticmethod
+    def compute_strategy_bonus(
+        candidate: TopicCandidate,
+        strategy: Optional[StrategyVersion],
+        scale: float = 0.25,
+    ) -> tuple[float, Optional[str]]:
+        """Explicit, bounded adjustment from the active strategy.
+
+        ``bonus = (niche_weight[candidate.category] - 1.0) * scale``
+
+        The (weight - 1.0) term is *excess* preference only: a neutral strategy
+        (all weights 1.0) contributes exactly 0.  Strategy weights are bounded to
+        [strategy_weight_floor, strategy_weight_ceiling] by the learning layer,
+        so the bonus is bounded to roughly +-0.5*scale and can never dominate the
+        base multi-factor score.  Returns (bonus, strategy_version).
+        """
+        if not strategy:
+            return 0.0, None
+        category = (candidate.category or "").strip().lower()
+        if not category:
+            return 0.0, strategy.version_id
+        weight = float(strategy.niche_weights.get(category, 1.0))
+        bonus = round((weight - 1.0) * float(scale), 4)
+        return bonus, strategy.version_id
 
     def calculate_historical_factor(
         self,
@@ -68,6 +95,7 @@ class TopicScorer:
         signal: Optional[TrendSignal] = None,
         feedback_signals: Optional[List[FeedbackSignal]] = None,
         supporting_signals: Optional[List[TrendSignal]] = None,
+        strategy: Optional[StrategyVersion] = None,
     ) -> TopicScore:
         """Scores a TopicCandidate deterministically and produces an explainable breakdown."""
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -81,12 +109,20 @@ class TopicScorer:
         effort_factor = max(0.0, 1.0 - (candidate.estimated_effort - 1) / 4.0)
         dup_penalty = candidate.duplicate_risk * self.p_dup
 
+        # Explicit, bounded, auditable strategy influence.  This is the ONLY
+        # place learned strategy enters the score, so it is always visible in
+        # the breakdown rather than hidden inside a heuristic.
+        strategy_bonus, strategy_version = self.compute_strategy_bonus(
+            candidate, strategy, scale=self.strategy_scale
+        )
+
         weighted_sum = (
             (self.w_fresh * freshness)
             + (self.w_rel * relevance)
             + (self.w_hist * historical_factor)
             + (self.w_nov * novelty)
             - dup_penalty
+            + strategy_bonus
         )
         total = round(max(0.0, min(1.0, weighted_sum)), 3)
 
@@ -99,6 +135,8 @@ class TopicScorer:
             "content_novelty": round(novelty, 3),
             "production_effort_factor": round(effort_factor, 3),
             "duplicate_risk_penalty": round(dup_penalty, 3),
+            "strategy_bonus": round(strategy_bonus, 4),
+            "strategy_version": strategy_version,
             "weight_freshness": self.w_fresh,
             "weight_relevance": self.w_rel,
             "weight_historical": self.w_hist,
@@ -108,7 +146,8 @@ class TopicScorer:
         explanation = (
             f"Score {total:.2f}: Freshness={freshness:.2f}, Relevance={relevance:.2f}, "
             f"Novelty={novelty:.2f}, HistoricalAssociation={historical_factor:.2f}, "
-            f"DuplicatePenalty={dup_penalty:.2f}."
+            f"DuplicatePenalty={dup_penalty:.2f}, StrategyBonus={strategy_bonus:+.3f}"
+            f"{' (strategy ' + strategy_version + ')' if strategy_version else ''}."
         )
 
         return TopicScore(
@@ -120,6 +159,8 @@ class TopicScorer:
             content_novelty=novelty,
             production_effort_factor=effort_factor,
             duplicate_risk_penalty=dup_penalty,
+            strategy_bonus=strategy_bonus,
+            strategy_version=strategy_version,
             total_score=total,
             breakdown=breakdown,
             explanation=explanation,

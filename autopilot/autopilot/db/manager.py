@@ -8,7 +8,7 @@ from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-DB_SCHEMA_VERSION = 9
+DB_SCHEMA_VERSION = 10
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -551,6 +551,7 @@ CREATE TABLE IF NOT EXISTS autonomy_schedules (
     max_items_per_run INTEGER NOT NULL DEFAULT 10,
     dry_run INTEGER NOT NULL DEFAULT 0,
     policy TEXT NOT NULL DEFAULT 'local_only', -- Level 4 production policy tier
+    include_learning INTEGER NOT NULL DEFAULT 0, -- opt-in analytics learning stage after Level 4 (off by default)
     next_run_at TEXT,
     last_run_at TEXT,
     last_run_id TEXT,
@@ -578,6 +579,35 @@ CREATE TABLE IF NOT EXISTS autonomy_schedule_runs (
     completed_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_schedule_runs_schedule ON autonomy_schedule_runs(schedule_id);
+
+-- Milestone 11: Analytics-Driven Feedback & Strategy Learning run records.
+-- Each row is one deterministic, idempotent learning cycle: what analytics it
+-- consumed (fingerprint + lineage), what signals it computed, and which bounded
+-- strategy version it produced.  Audience learning only: it never drives
+-- production or publishing.
+CREATE TABLE IF NOT EXISTS learning_runs (
+    run_id TEXT PRIMARY KEY,
+    channel_id TEXT NOT NULL DEFAULT 'default',
+    input_fingerprint TEXT NOT NULL,
+    parent_strategy_version TEXT NOT NULL,
+    resulting_strategy_version TEXT,
+    status TEXT NOT NULL, -- applied | no_change | insufficient | dry_run | failed
+    dry_run INTEGER NOT NULL DEFAULT 0,
+    observations_considered INTEGER NOT NULL DEFAULT 0,
+    observations_used INTEGER NOT NULL DEFAULT 0,
+    observations_excluded INTEGER NOT NULL DEFAULT 0,
+    is_synthetic_input INTEGER NOT NULL DEFAULT 0,
+    observation_ids_json TEXT DEFAULT '[]',
+    category_signals_json TEXT DEFAULT '{}',
+    deltas_json TEXT DEFAULT '[]',
+    reason TEXT,
+    error_message TEXT,
+    started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_learning_runs_channel ON learning_runs(channel_id);
+CREATE INDEX IF NOT EXISTS idx_learning_runs_fingerprint ON learning_runs(channel_id, input_fingerprint, status);
+CREATE INDEX IF NOT EXISTS idx_learning_runs_strategy ON learning_runs(resulting_strategy_version);
 """
 
 
@@ -653,6 +683,8 @@ class DBManager:
                 cols = [row["name"] for row in cur.fetchall()]
                 if cols and "operation_mode" not in cols:
                     conn.execute("ALTER TABLE autonomy_schedules ADD COLUMN operation_mode TEXT")
+                if cols and "include_learning" not in cols:
+                    conn.execute("ALTER TABLE autonomy_schedules ADD COLUMN include_learning INTEGER NOT NULL DEFAULT 0")
             except Exception:
                 pass
 
@@ -2032,6 +2064,7 @@ class DBManager:
         dry_run: bool = False,
         policy: str = "local_only",
         enabled: bool = True,
+        include_learning: bool = False,
         next_run_at: Optional[str] = None,
         created_at: Optional[str] = None,
         updated_at: Optional[str] = None,
@@ -2045,10 +2078,10 @@ class DBManager:
                 """
                 INSERT OR IGNORE INTO autonomy_schedules (
                     schedule_id, channel_id, autonomy_level, operation_mode, enabled, cadence, days_of_week,
-                    timezone, max_items_per_run, dry_run, policy, next_run_at,
+                    timezone, max_items_per_run, dry_run, policy, include_learning, next_run_at,
                     last_run_at, last_run_id, last_run_status, total_runs, consecutive_failures,
                     leased_by, lease_until, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 0, 0, NULL, NULL, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 0, 0, NULL, NULL, ?, ?)
                 """,
                 (
                     schedule_id,
@@ -2062,6 +2095,7 @@ class DBManager:
                     int(max_items_per_run),
                     1 if dry_run else 0,
                     policy,
+                    1 if include_learning else 0,
                     next_run_at,
                     created_at,
                     updated_at,
@@ -2095,7 +2129,7 @@ class DBManager:
         """Update allowed schedule columns; always refreshes updated_at."""
         allowed = {
             "channel_id", "autonomy_level", "operation_mode", "enabled", "cadence", "days_of_week",
-            "timezone", "max_items_per_run", "dry_run", "policy", "next_run_at",
+            "timezone", "max_items_per_run", "dry_run", "policy", "include_learning", "next_run_at",
         }
         sets = ["updated_at = ?"]
         params: list = [datetime.now(timezone.utc).isoformat()]
@@ -2564,6 +2598,30 @@ class DBManager:
             conn.commit()
             return True
 
+    def get_strategy_ancestor_chain(self, version_id: str, max_depth: int = 64) -> list[str]:
+        """Return the ancestor chain [version_id, parent, grandparent, ...].
+
+        Used by learning idempotency: if the strategy produced by a past learning
+        run already lies in the ancestry of the currently active strategy, that
+        evidence has already been incorporated and re-learning is a no-op.
+        Terminates on missing parent, self-reference, or ``max_depth``.
+        """
+        chain: list[str] = []
+        current = version_id
+        with self._connect() as conn:
+            for _ in range(max(1, int(max_depth))):
+                if not current or current in chain:
+                    break
+                chain.append(current)
+                row = conn.execute(
+                    "SELECT parent_version_id FROM strategy_versions WHERE version_id = ?",
+                    (current,),
+                ).fetchone()
+                if row is None:
+                    break
+                current = row["parent_version_id"]
+        return chain
+
     def list_strategy_versions(self, limit: int = 50):
         from autopilot.core.contracts import StrategyVersion, StrategyStatus
         with self._connect() as conn:
@@ -2630,6 +2688,181 @@ class DBManager:
                     (limit,),
                 ).fetchall()
             return [dict(r) for r in rows]
+
+    # =====================================================================
+    # Milestone 11: Analytics-Driven Feedback & Strategy Learning persistence
+    # =====================================================================
+
+    def record_learning_run(self, summary) -> str:
+        """Persist one learning run record. Accepts a LearningRunSummary or dict.
+
+        Idempotent on run_id (INSERT OR REPLACE).  The input fingerprint is the
+        key used by the idempotency check in ``find_applied_learning_run``.
+        """
+        data = summary.model_dump(mode="json") if hasattr(summary, "model_dump") else dict(summary)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO learning_runs (
+                    run_id, channel_id, input_fingerprint, parent_strategy_version,
+                    resulting_strategy_version, status, dry_run,
+                    observations_considered, observations_used, observations_excluded,
+                    is_synthetic_input, observation_ids_json, category_signals_json,
+                    deltas_json, reason, error_message, started_at, completed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    data.get("run_id"),
+                    data.get("channel_id") or "default",
+                    data.get("input_fingerprint") or "",
+                    data.get("parent_strategy_version") or "strat-v1",
+                    data.get("resulting_strategy_version"),
+                    data.get("status") or "insufficient",
+                    1 if data.get("dry_run") else 0,
+                    int(data.get("observations_considered") or 0),
+                    int(data.get("observations_used") or 0),
+                    int(data.get("observations_excluded") or 0),
+                    1 if data.get("is_synthetic_input") else 0,
+                    json.dumps(data.get("observation_ids") or []),
+                    json.dumps(data.get("category_signals") or {}),
+                    json.dumps(data.get("deltas") or [], default=str),
+                    data.get("reason") or "",
+                    data.get("error_message"),
+                    data.get("started_at"),
+                    data.get("completed_at"),
+                ),
+            )
+            conn.commit()
+            return data.get("run_id")
+
+    def get_learning_run(self, run_id: str) -> Optional[dict]:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM learning_runs WHERE run_id = ?", (run_id,)).fetchone()
+            return dict(row) if row else None
+
+    def list_learning_runs(self, channel_id: Optional[str] = None, limit: int = 20) -> list[dict]:
+        with self._connect() as conn:
+            if channel_id:
+                rows = conn.execute(
+                    "SELECT * FROM learning_runs WHERE channel_id = ? ORDER BY started_at DESC LIMIT ?",
+                    (channel_id, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM learning_runs ORDER BY started_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            return [dict(r) for r in rows]
+
+    def find_applied_learning_run(self, channel_id: str, input_fingerprint: str) -> Optional[dict]:
+        """Find the most recent *applied* (persisted, non-dry-run) learning run
+        for this channel whose input fingerprint matches.
+
+        Dry-run records are deliberately excluded: a dry run proposes but never
+        applies, so it must not block a later real application of the same data.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM learning_runs
+                WHERE channel_id = ? AND input_fingerprint = ? AND status = 'applied'
+                ORDER BY started_at DESC LIMIT 1
+                """,
+                (channel_id, input_fingerprint),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_learning_runs_for_strategy(self, version_id: str, limit: int = 10) -> list[dict]:
+        """Learning runs that produced (or proposed) a given strategy version."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM learning_runs WHERE resulting_strategy_version = ? ORDER BY started_at DESC LIMIT ?",
+                (version_id, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def list_published_jobs(
+        self,
+        channel_id: Optional[str] = None,
+        since_iso: Optional[str] = None,
+        published_statuses: Optional[tuple] = None,
+    ) -> list[dict]:
+        """List jobs that carry an actual publication record.
+
+        Audience-performance learning only ever consumes content that really
+        reached the publish stage.  ``published_statuses`` defaults to the
+        genuinely-published states (SUCCESS / PUBLISHED); DRY_RUN and FAILED
+        records are excluded so unpublished content never masquerades as
+        audience evidence.
+        """
+        statuses = published_statuses if published_statuses is not None else ("SUCCESS", "PUBLISHED")
+        placeholders = ",".join("?" for _ in statuses)
+        sql = (
+            "SELECT pr.job_id, pr.platform, pr.remote_video_id, pr.status, pr.created_at AS published_at, "
+            "j.topic, j.channel_id "
+            "FROM publish_records pr JOIN jobs j ON j.job_id = pr.job_id "
+            f"WHERE pr.status IN ({placeholders})"
+        )
+        params: list = list(statuses)
+        if channel_id:
+            sql += " AND j.channel_id = ?"
+            params.append(channel_id)
+        if since_iso:
+            sql += " AND datetime(pr.created_at) >= datetime(?)"
+            params.append(since_iso)
+        sql += " ORDER BY datetime(pr.created_at) DESC"
+        with self._connect() as conn:
+            rows = conn.execute(sql, tuple(params)).fetchall()
+            return [dict(r) for r in rows]
+
+    def resolve_job_category(self, job_id: str) -> tuple[Optional[str], str]:
+        """Resolve the niche category for a published job.
+
+        Lineage first (deterministic, exact): the job's queue payload carries
+        ``parent_signal_ids`` from ideation, which map to ``trend_signals.category``.
+
+        Fallback (deterministic keyword mapper) for manually-enqueued jobs with
+        no trend lineage.  Returns ``(category, source)`` where source is one of
+        ``lineage`` | ``keyword`` | ``unresolved``.  Unresolved jobs are never
+        silently assigned to an arbitrary category; callers bucket them as
+        ``general`` and flag them explicitly.
+        """
+        with self._connect() as conn:
+            # 1. Lineage: job -> queue payload parent_signal_ids -> trend category
+            try:
+                qrow = conn.execute(
+                    "SELECT payload_json FROM queue_items WHERE job_id = ? ORDER BY created_at DESC LIMIT 1",
+                    (job_id,),
+                ).fetchone()
+            except Exception:
+                qrow = None
+            if qrow:
+                try:
+                    payload = json.loads(qrow["payload_json"] or "{}")
+                except Exception:
+                    payload = {}
+                signal_ids = payload.get("parent_signal_ids") or payload.get("supporting_signal_ids") or []
+                if signal_ids:
+                    placeholders = ",".join("?" for _ in signal_ids)
+                    srow = conn.execute(
+                        f"SELECT category FROM trend_signals WHERE signal_id IN ({placeholders}) "
+                        f"AND category IS NOT NULL ORDER BY detected_at DESC LIMIT 1",
+                        tuple(signal_ids),
+                    ).fetchone()
+                    if srow and srow["category"]:
+                        return str(srow["category"]).strip().lower(), "lineage"
+
+            # 2. Keyword fallback over the job topic
+            try:
+                jrow = conn.execute("SELECT topic FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+            except Exception:
+                jrow = None
+            topic = (jrow["topic"] if jrow else "") or ""
+            cat = _classify_topic_by_keyword(topic)
+            if cat:
+                return cat, "keyword"
+
+        return None, "unresolved"
 
     def count_autonomous_jobs_queued_today(self, channel_id: str | None = None) -> int:
         """Counts queue items enqueued today by autonomous or manual-approved origins.
@@ -3060,5 +3293,59 @@ class DBManager:
 
 # Alias for backward compatibility
 DatabaseManager = DBManager
+
+
+# Keyword -> niche category map for the deterministic fallback resolver.
+# Keys are lowercase substrings matched against the job topic.  This is the only
+# category heuristic in the system; it never invents categories outside this set
+# (which mirrors the StrategyVersion.niche_weights keys + channel niche names).
+KEYWORD_CATEGORY_MAP: dict[str, str] = {
+    "technology": "technology",
+    "tech": "technology",
+    "software": "technology",
+    "ai": "technology",
+    "artificial intelligence": "technology",
+    "quantum": "technology",
+    "cryptograph": "technology",
+    "neural": "technology",
+    "cyber": "technology",
+    "robot": "technology",
+    "computer": "technology",
+    "engineering": "technology",
+    "science": "science",
+    "physics": "science",
+    "fusion": "science",
+    "space": "science",
+    "ocean": "science",
+    "biology": "science",
+    "chemistry": "science",
+    "astronom": "science",
+    "microbial": "science",
+    "climate": "science",
+    "history": "history",
+    "ancient": "history",
+    "archaeolog": "history",
+    "bronze age": "history",
+    "medieval": "history",
+    "empire": "history",
+    "finance": "finance",
+    "economic": "finance",
+    "market": "finance",
+    "invest": "finance",
+    "money": "finance",
+    "business": "finance",
+    "stock": "finance",
+}
+
+
+def _classify_topic_by_keyword(topic: str) -> Optional[str]:
+    """Deterministic substring matcher; returns a known category or None."""
+    if not topic:
+        return None
+    lowered = topic.lower()
+    for keyword, category in KEYWORD_CATEGORY_MAP.items():
+        if keyword in lowered:
+            return category
+    return None
 
 

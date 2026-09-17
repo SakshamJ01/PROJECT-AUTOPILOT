@@ -299,7 +299,7 @@ def test_l3_score_failure(tmp_path):
 
     # Override scorer to return low score
     class LowScorer:
-        def score_candidate(self, cand, signal=None, feedback_signals=None):
+        def score_candidate(self, cand, signal=None, feedback_signals=None, strategy=None):
             return TopicScore(
                 score_id=f"sc-low-{cand.candidate_id}",
                 candidate_id=cand.candidate_id,

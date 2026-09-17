@@ -113,6 +113,22 @@ class Config(BaseModel):
     autonomy_trend_provider: str = "mock"
     autonomy_auto_publish: bool = False
 
+    # Milestone 11 / M11 Analytics-Driven Feedback & Strategy Learning.
+    # Single authoritative source of truth for every learning bound.
+    # These cap how much one learning cycle may change; they are deliberately
+    # conservative so a single short-lived signal cannot redefine strategy.
+    learning_min_samples: int = 5                 # total valid observations required
+    learning_min_category_observations: int = 2  # per-category floor
+    learning_window_days: int = 30               # analytics observation window
+    learning_recency_weight: float = 0.6         # exponential recency weighting
+    learning_full_confidence_samples: int = 6    # observations for confidence=1.0
+    strategy_max_weight_delta: float = 0.15      # max change per parameter per run
+    strategy_max_params_per_update: int = 3      # max dimensions changed per run
+    strategy_weight_floor: float = 0.3           # exploration floor (no collapse)
+    strategy_weight_ceiling: float = 1.5         # absolute cap
+    strategy_min_age_days: int = 2               # min content age before learning
+    strategy_influence_scale: float = 0.25       # bounded scorer bonus scale
+
     def __init__(self, **data):
         # Apply env overrides before validation
         env_map = {
@@ -163,6 +179,17 @@ class Config(BaseModel):
             "AUTOPILOT_AUTONOMY_MIN_SCORE_THRESHOLD": "autonomy_min_score_threshold",
             "AUTOPILOT_AUTONOMY_TREND_PROVIDER": "autonomy_trend_provider",
             "AUTOPILOT_AUTONOMY_AUTO_PUBLISH": "autonomy_auto_publish",
+            "AUTOPILOT_LEARNING_MIN_SAMPLES": "learning_min_samples",
+            "AUTOPILOT_LEARNING_MIN_CATEGORY_OBSERVATIONS": "learning_min_category_observations",
+            "AUTOPILOT_LEARNING_WINDOW_DAYS": "learning_window_days",
+            "AUTOPILOT_LEARNING_RECENCY_WEIGHT": "learning_recency_weight",
+            "AUTOPILOT_LEARNING_FULL_CONFIDENCE_SAMPLES": "learning_full_confidence_samples",
+            "AUTOPILOT_STRATEGY_MAX_WEIGHT_DELTA": "strategy_max_weight_delta",
+            "AUTOPILOT_STRATEGY_MAX_PARAMS_PER_UPDATE": "strategy_max_params_per_update",
+            "AUTOPILOT_STRATEGY_WEIGHT_FLOOR": "strategy_weight_floor",
+            "AUTOPILOT_STRATEGY_WEIGHT_CEILING": "strategy_weight_ceiling",
+            "AUTOPILOT_STRATEGY_MIN_AGE_DAYS": "strategy_min_age_days",
+            "AUTOPILOT_STRATEGY_INFLUENCE_SCALE": "strategy_influence_scale",
             "AUTOPILOT_PRODUCTION_ENGINE": "default_production_engine",
             "MONEYPRINTER_ENDPOINT": "moneyprinter_endpoint",
             "MONEYPRINTER_CLI_PATH": "moneyprinter_cli_path",
@@ -201,9 +228,9 @@ class Config(BaseModel):
             if val is not None:
                 if field_name in ("openverse_enabled", "rights_policy_allow_partial", "synthetic_smoke_enabled", "qa_strict_mode", "publish_dry_run_default", "autonomy_auto_publish", "ollama_think"):
                     data[field_name] = val.lower() in ("1", "true", "yes")
-                elif field_name in ("openverse_max_results", "asset_target_width", "asset_target_height", "asset_max_download_bytes", "asset_max_redirects", "qa_caption_max_line_length", "qa_caption_max_lines", "publish_max_retries", "publish_chunk_size_bytes", "queue_default_priority", "queue_max_attempts", "queue_max_concurrency", "queue_max_queued_jobs", "analytics_sync_interval_hours", "analytics_cache_ttl_seconds", "analytics_batch_size", "autonomy_level", "autonomy_max_ideas_per_cycle", "autonomy_max_auto_queue_per_cycle", "autonomy_max_daily_jobs", "autonomy_topic_cooldown_days", "ollama_num_predict"):
+                elif field_name in ("openverse_max_results", "asset_target_width", "asset_target_height", "asset_max_download_bytes", "asset_max_redirects", "qa_caption_max_line_length", "qa_caption_max_lines", "publish_max_retries", "publish_chunk_size_bytes", "queue_default_priority", "queue_max_attempts", "queue_max_concurrency", "queue_max_queued_jobs", "analytics_sync_interval_hours", "analytics_cache_ttl_seconds", "analytics_batch_size", "autonomy_level", "autonomy_max_ideas_per_cycle", "autonomy_max_auto_queue_per_cycle", "autonomy_max_daily_jobs", "autonomy_topic_cooldown_days", "ollama_num_predict", "learning_min_samples", "learning_min_category_observations", "learning_window_days", "learning_full_confidence_samples", "strategy_max_params_per_update", "strategy_min_age_days"):
                     data[field_name] = int(val)
-                elif field_name in ("openverse_timeout", "qa_loudness_target_lufs", "qa_max_silence_duration_sec", "qa_silence_threshold_db", "qa_max_black_duration_sec", "qa_max_freeze_duration_sec", "qa_duration_tolerance_sec", "qa_duration_tolerance_pct", "qa_fps_target", "publish_timeout_seconds", "queue_lease_duration_seconds", "queue_poll_interval_seconds", "queue_retry_backoff_base_seconds", "autonomy_similarity_threshold", "autonomy_min_score_threshold", "ollama_timeout", "ollama_idle_timeout"):
+                elif field_name in ("openverse_timeout", "qa_loudness_target_lufs", "qa_max_silence_duration_sec", "qa_silence_threshold_db", "qa_max_black_duration_sec", "qa_max_freeze_duration_sec", "qa_duration_tolerance_sec", "qa_duration_tolerance_pct", "qa_fps_target", "publish_timeout_seconds", "queue_lease_duration_seconds", "queue_poll_interval_seconds", "queue_retry_backoff_base_seconds", "autonomy_similarity_threshold", "autonomy_min_score_threshold", "ollama_timeout", "ollama_idle_timeout", "learning_recency_weight", "strategy_max_weight_delta", "strategy_weight_floor", "strategy_weight_ceiling", "strategy_influence_scale"):
                     data[field_name] = float(val)
                 else:
                     data[field_name] = val
