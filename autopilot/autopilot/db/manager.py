@@ -774,6 +774,72 @@ class DBManager:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    def list_recent_events(
+        self,
+        limit: int = 100,
+        job_id: str | None = None,
+        channel_id: str | None = None,
+        since_event_id: int | None = None,
+    ) -> list[dict]:
+        """Recent workflow events, newest-first, optionally scoped (read-only bridge helper)."""
+        conds: list[str] = []
+        args: list[object] = []
+        if job_id:
+            conds.append("e.job_id = ?")
+            args.append(job_id)
+        if channel_id:
+            conds.append("j.channel_id = ?")
+            args.append(channel_id)
+        if since_event_id is not None:
+            conds.append("e.event_id > ?")
+            args.append(int(since_event_id))
+        where = f" WHERE {' AND '.join(conds)}" if conds else ""
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT e.event_id, e.job_id, e.from_state, e.to_state, e.reason, e.occurred_at,
+                       j.channel_id, j.topic
+                FROM workflow_events e
+                LEFT JOIN jobs j ON j.job_id = e.job_id
+                {where}
+                ORDER BY e.occurred_at DESC, e.event_id DESC
+                LIMIT ?
+                """,
+                (*args, int(limit)),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def list_recent_errors(
+        self,
+        limit: int = 100,
+        job_id: str | None = None,
+        channel_id: str | None = None,
+    ) -> list[dict]:
+        """Recent errors, newest-first, optionally scoped (read-only bridge helper)."""
+        conds: list[str] = []
+        args: list[object] = []
+        if job_id:
+            conds.append("e.job_id = ?")
+            args.append(job_id)
+        if channel_id:
+            conds.append("j.channel_id = ?")
+            args.append(channel_id)
+        where = f" WHERE {' AND '.join(conds)}" if conds else ""
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT e.error_id, e.job_id, e.stage, e.error_type, e.message, e.occurred_at,
+                       j.channel_id, j.topic
+                FROM errors e
+                LEFT JOIN jobs j ON j.job_id = e.job_id
+                {where}
+                ORDER BY e.occurred_at DESC, e.error_id DESC
+                LIMIT ?
+                """,
+                (*args, int(limit)),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
     def get_events_for_job(self, job_id: str) -> list[dict]:
         return self.get_events(job_id)
 
