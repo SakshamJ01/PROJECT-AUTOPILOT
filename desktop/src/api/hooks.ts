@@ -6,6 +6,13 @@ import {
   type JsonValue,
 } from "./engine";
 import type {
+  AnalyticsReport,
+  AnalyticsSnapshots,
+  AnalyticsStatus,
+  AnalyticsSyncAllResult,
+  AnalyticsSyncParams,
+  ApprovalActionResult,
+  AutonomyPublishStatus,
   AutonomyInspectProposal,
   AutonomyInspectRun,
   AutonomyProposal,
@@ -18,13 +25,23 @@ import type {
   ProductionActionResult,
   ProductionStartResult,
   ProposalActionResponse,
+  PublishActionResult,
+  PublishRequestParams,
+  PublishingInspect,
+  PublishingStatus,
   QueueList,
+  ReadyList,
   Schedule,
   ScheduleCreateRequest,
   ScheduleInspect,
   ScheduleRunSummary,
   ScheduleUpdateRequest,
   SchedulerStatus,
+  StrategyLearnParams,
+  StrategyLearnResult,
+  StrategyShow,
+  StrategyStatus,
+  YouTubeAuthStatus,
   WorkflowEvent,
 } from "./types";
 
@@ -382,5 +399,218 @@ export function useScheduleRunNowMutation() {
       void queryClient.invalidateQueries({ queryKey: ["engine", "queue.list"] });
       void queryClient.invalidateQueries({ queryKey: ["engine", "autonomy.status"] });
     },
+  });
+}
+
+// =====================================================================
+// M4 — Publishing
+// =====================================================================
+
+export function usePublishingStatusQuery() {
+  return useQuery({
+    queryKey: ["engine", "publishing.status"],
+    queryFn: () => engineCall<PublishingStatus>("publishing.status"),
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      // Poll faster while jobs are awaiting approval or ready to publish.
+      const active = data && (data.awaiting_approval > 0 || data.ready_to_publish > 0);
+      return active ? POLL.queueMs : POLL.systemMs;
+    },
+    retry: false,
+  });
+}
+
+export function useReadyListQuery() {
+  return useQuery({
+    queryKey: ["engine", "publishing.list_ready"],
+    queryFn: () => engineCall<ReadyList>("publishing.list_ready"),
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      const anyReady = data && data.items.length > 0;
+      return anyReady ? POLL.queueMs : POLL.systemMs;
+    },
+    retry: false,
+  });
+}
+
+export function usePublishingInspectQuery(jobId: string | null) {
+  return useQuery({
+    queryKey: ["engine", "publishing.inspect", jobId],
+    queryFn: () =>
+      engineCall<PublishingInspect>("publishing.inspect", { job_id: jobId }),
+    enabled: Boolean(jobId),
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      // Stop aggressive polling once the job reached a terminal publish state.
+      const terminal = data && (data.state === "PUBLISHED" || data.state === "FAILED_PUBLISH");
+      return terminal ? POLL.systemMs : POLL.queueMs;
+    },
+    retry: false,
+  });
+}
+
+export function useYouTubeAuthQuery() {
+  return useQuery({
+    queryKey: ["engine", "youtube.auth_status"],
+    queryFn: () => engineCall<YouTubeAuthStatus>("youtube.auth_status"),
+    refetchInterval: POLL.systemMs,
+    retry: false,
+  });
+}
+
+export function usePublishApproveMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (params: {
+      job_id: string;
+      platform?: string;
+      decided_by?: string;
+      notes?: string;
+    }) => engineCall<ApprovalActionResult>("publishing.approve", params),
+    onSuccess: (_data, variables) => {
+      void queryClient.invalidateQueries({ queryKey: ["engine", "publishing.list_ready"] });
+      void queryClient.invalidateQueries({ queryKey: ["engine", "publishing.status"] });
+      void queryClient.invalidateQueries({
+        queryKey: ["engine", "publishing.inspect", variables.job_id],
+      });
+    },
+  });
+}
+
+export function usePublishRejectMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (params: {
+      job_id: string;
+      decided_by?: string;
+      notes?: string;
+    }) => engineCall<ApprovalActionResult>("publishing.reject", params),
+    onSuccess: (_data, variables) => {
+      void queryClient.invalidateQueries({ queryKey: ["engine", "publishing.list_ready"] });
+      void queryClient.invalidateQueries({ queryKey: ["engine", "publishing.status"] });
+      void queryClient.invalidateQueries({
+        queryKey: ["engine", "publishing.inspect", variables.job_id],
+      });
+    },
+  });
+}
+
+export function usePublishMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (params: PublishRequestParams) =>
+      engineCall<PublishActionResult>("publishing.publish", params),
+    onSuccess: (_data, variables) => {
+      void queryClient.invalidateQueries({ queryKey: ["engine", "publishing.list_ready"] });
+      void queryClient.invalidateQueries({ queryKey: ["engine", "publishing.status"] });
+      void queryClient.invalidateQueries({ queryKey: ["engine", "queue.list"] });
+      void queryClient.invalidateQueries({ queryKey: ["engine", "health"] });
+      void queryClient.invalidateQueries({
+        queryKey: ["engine", "publishing.inspect", variables.job_id],
+      });
+      void queryClient.invalidateQueries({ queryKey: ["engine", "analytics.status"] });
+      void queryClient.invalidateQueries({ queryKey: ["engine", "analytics.report"] });
+    },
+  });
+}
+
+// =====================================================================
+// M4 — Analytics
+// =====================================================================
+
+export function useAnalyticsStatusQuery() {
+  return useQuery({
+    queryKey: ["engine", "analytics.status"],
+    queryFn: () => engineCall<AnalyticsStatus>("analytics.status"),
+    // Slower polling while idle; refresh after sync invalidates.
+    refetchInterval: POLL.healthMs,
+    retry: false,
+  });
+}
+
+export function useAnalyticsSyncMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (params: AnalyticsSyncParams) =>
+      engineCall<AnalyticsSyncAllResult>("analytics.sync", params),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["engine", "analytics.status"] });
+      void queryClient.invalidateQueries({ queryKey: ["engine", "analytics.report"] });
+      void queryClient.invalidateQueries({ queryKey: ["engine", "analytics.snapshots"] });
+      void queryClient.invalidateQueries({ queryKey: ["engine", "strategy.status"] });
+    },
+  });
+}
+
+export function useAnalyticsSnapshotsQuery(jobId: string | null) {
+  return useQuery({
+    queryKey: ["engine", "analytics.snapshots", jobId],
+    queryFn: () =>
+      engineCall<AnalyticsSnapshots>("analytics.snapshots", { job_id: jobId }),
+    enabled: Boolean(jobId),
+    refetchInterval: POLL.healthMs,
+    retry: false,
+  });
+}
+
+export function useAnalyticsReportQuery(channelId?: string) {
+  return useQuery({
+    queryKey: ["engine", "analytics.report", channelId ?? null],
+    queryFn: () =>
+      engineCall<AnalyticsReport>("analytics.report", { channel_id: channelId }),
+    refetchInterval: POLL.healthMs,
+    retry: false,
+  });
+}
+
+// =====================================================================
+// M4 — Strategy
+// =====================================================================
+
+export function useStrategyStatusQuery(channelId?: string) {
+  return useQuery({
+    queryKey: ["engine", "strategy.status", channelId ?? "default"],
+    queryFn: () =>
+      engineCall<StrategyStatus>("strategy.status", { channel_id: channelId }),
+    refetchInterval: POLL.systemMs,
+    retry: false,
+  });
+}
+
+export function useStrategyShowQuery(versionId: string | null) {
+  return useQuery({
+    queryKey: ["engine", "strategy.show", versionId ?? null],
+    queryFn: () => engineCall<StrategyShow>("strategy.show", { version_id: versionId }),
+    enabled: true,
+    refetchInterval: POLL.systemMs,
+    retry: false,
+  });
+}
+
+export function useStrategyLearnMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (params: StrategyLearnParams) =>
+      engineCall<StrategyLearnResult>("strategy.learn", params),
+    onSuccess: () => {
+      // Refresh strategy state after a learning run.
+      void queryClient.invalidateQueries({ queryKey: ["engine", "strategy.status"] });
+      void queryClient.invalidateQueries({ queryKey: ["engine", "strategy.show"] });
+      void queryClient.invalidateQueries({ queryKey: ["engine", "analytics.status"] });
+      void queryClient.invalidateQueries({ queryKey: ["engine", "autonomy.status"] });
+    },
+  });
+}
+
+// =====================================================================
+// M4 — Autonomous public publishing switch (read-only)
+// =====================================================================
+
+export function useAutonomyPublishStatusQuery() {
+  return useQuery({
+    queryKey: ["engine", "autonomy.publish_status"],
+    queryFn: () => engineCall<AutonomyPublishStatus>("autonomy.publish_status"),
+    refetchInterval: POLL.systemMs,
+    retry: false,
   });
 }

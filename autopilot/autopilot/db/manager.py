@@ -708,6 +708,24 @@ class DBManager:
             conn.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (DB_SCHEMA_VERSION,))
             conn.commit()
 
+    def list_jobs_by_status(self, status: str, limit: int = 100) -> list[dict]:
+        """List jobs in a given workflow status, newest first."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM jobs WHERE UPPER(status) = UPPER(?) ORDER BY updated_at DESC LIMIT ?",
+                (status, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def count_jobs_by_status(self, status: str) -> int:
+        """Count jobs in a given workflow status."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM jobs WHERE UPPER(status) = UPPER(?)",
+                (status,),
+            ).fetchone()
+            return int(row["n"]) if row else 0
+
     def create_job(self, job_id: str, channel_id: str = "default", topic: str = "", idempotency_key: str | None = None) -> None:
         with self._connect() as conn:
             conn.execute(

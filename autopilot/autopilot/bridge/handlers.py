@@ -13,6 +13,7 @@ import sqlite3
 import sys
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Optional
 
 from autopilot.bridge import BRIDGE_VERSION
@@ -23,6 +24,7 @@ from autopilot.bridge.protocol import (
     ProtocolError,
 )
 from autopilot.core.config import Config
+from autopilot.core.publisher import compute_file_sha256
 from autopilot.db.manager import DBManager
 
 
@@ -61,6 +63,25 @@ class BridgeHandlers:
         "scheduler.delete",
         "scheduler.run_now",
         "scheduler.run_due",
+        # M4 — publishing control surface
+        "publishing.status",
+        "publishing.list_ready",
+        "publishing.inspect",
+        "publishing.approve",
+        "publishing.reject",
+        "publishing.publish",
+        "youtube.auth_status",
+        # M4 — analytics control surface
+        "analytics.status",
+        "analytics.sync",
+        "analytics.snapshots",
+        "analytics.report",
+        # M4 — strategy control surface
+        "strategy.status",
+        "strategy.show",
+        "strategy.learn",
+        # M4 — autonomous public publishing switch (read-only)
+        "autonomy.publish_status",
         "system.shutdown",
         "system.restart",
     )
@@ -914,7 +935,617 @@ class BridgeHandlers:
         }
 
     # ------------------------------------------------------------------
-    # helpers
+    # M4 — YouTube auth status (safe, no secrets)
+    # ------------------------------------------------------------------
+    def _youtube_auth_status(self) -> dict[str, Any]:
+        """Resolve a safe YouTube auth status. NEVER returns tokens or file
+        contents — only booleans and human-readable state names."""
+        from autopilot.providers.youtube_oauth import (
+            find_default_client_secrets_path,
+            resolve_youtube_access_token,
+        )
+
+        secrets_present = bool(find_default_client_secrets_path(self.config))
+        try:
+            token = resolve_youtube_access_token(self.config)
+        except Exception:  # noqa: BLE001 — auth status must never crash
+            token = None
+        authenticated = bool(token)
+
+        if authenticated:
+            status = "authenticated"
+        elif secrets_present:
+            status = "needs_auth"
+        elif self.config.youtube_token_path and Path(self.config.youtube_token_path).exists():
+            status = "needs_auth"
+        else:
+            status = "unconfigured"
+
+        return {
+            "status": status,
+            "authenticated": authenticated,
+            "secrets_present": secrets_present,
+            # Action guidance without exposing any credential material.
+            "guidance": (
+                "Run the YouTube OAuth flow on the backend "
+                "(autopilot youtube auth) to authorise uploads."
+                if status == "needs_auth"
+                else (
+                    "Place client_secret.json in credentials/ and run the OAuth flow."
+                    if status == "unconfigured"
+                    else "YouTube publishing is authorised."
+                )
+            ),
+        }
+
+    def on_youtube_auth_status(self, params: dict | None) -> dict[str, Any]:
+        return self._youtube_auth_status()
+
+    # ------------------------------------------------------------------
+    # M4 — publishing control surface
+    # ------------------------------------------------------------------
+    def _publishing_engine(self):
+        from autopilot.core.publisher import PublishingEngine
+
+        return PublishingEngine(config=self.config, db=self.db)
+
+    def _publish_health(self) -> dict[str, Any]:
+        from autopilot.cli.main import _learning_health
+
+        counts = self.db.get_publish_health_counts()
+        return {
+            "counts": counts,
+            "ready_to_publish": self.db.count_jobs_by_status("APPROVED"),
+            "published": counts.get("published", 0),
+            "publish_failures": counts.get("publish_failures", 0),
+            "awaiting_approval": counts.get("awaiting_approval", 0),
+            "approved": counts.get("approved", 0),
+            "rejected": counts.get("rejected", 0),
+            "learning": _learning_health(self.db),
+            "youtube": self._youtube_auth_status(),
+            "default_visibility": self.config.publish_default_visibility,
+            # M4 hard boundary: autonomous public publishing is OFF by default
+            # and only the backend can flip it. This surface is read-only.
+            "autonomy_auto_publish_enabled": bool(self.config.autonomy_auto_publish),
+        }
+
+    def on_publishing_status(self, params: dict | None) -> dict[str, Any]:
+        """Read-only publishing loop status: counts, readiness, auth, switch."""
+        return {
+            "status": "AVAILABLE",
+            **self._publish_health(),
+            "publish_boundary": (
+                "Publishing requires explicit operator approval. Autonomous public "
+                "publishing is disabled by default and can only be enabled by the "
+                "backend, never from this control surface."
+            ),
+        }
+
+    def on_publishing_list_ready(self, params: dict | None) -> dict[str, Any]:
+        """List READY_TO_PUBLISH jobs with approval/QA/checksum state.
+
+        Enrichment only — every gate remains in the publisher.
+        """
+        params = params or {}
+        limit = self._int_param(params, "limit", default=50, minimum=1, maximum=500)
+        channel_id = params.get("channel_id")
+
+        engine = self._publishing_engine()
+        ready_jobs = self.db.list_jobs_by_status("APPROVED", limit=limit)
+        if channel_id:
+            ready_jobs = [j for j in ready_jobs if j.get("channel_id") == channel_id]
+
+        items = []
+        for job in ready_jobs:
+            job_id = job.get("job_id")
+            approval = self.db.get_publish_approval(job_id)
+            qa = engine._load_qa_receipt(job_id, self.db)
+            media = engine._resolve_media_file(job_id)
+            checksum = compute_file_sha256(media) if media else None
+            publications = self.db.get_publications_for_job(job_id)
+            published = any(
+                str(p.get("status")).upper() in ("SUCCESS", "PUBLISHED")
+                for p in publications
+            )
+            items.append(
+                {
+                    "job_id": job_id,
+                    "topic": job.get("topic"),
+                    "channel_id": job.get("channel_id") or "default",
+                    "status": job.get("status"),
+                    "approval_status": (approval or {}).get("status"),
+                    "approval_id": (approval or {}).get("approval_id"),
+                    "qa_status": (qa or {}).get("status") if qa else None,
+                    "qa_publish_allowed": bool((qa or {}).get("publish_allowed")) if qa else False,
+                    "media_checksum_sha256": checksum,
+                    "approved_checksum": (approval or {}).get("media_checksum_sha256"),
+                    "checksum_matches": (
+                        (approval or {}).get("media_checksum_sha256") is None
+                        or (approval or {}).get("media_checksum_sha256") == checksum
+                    ) if approval else False,
+                    "published": published,
+                    "remote_video_id": (publications[0] if publications else {}).get("remote_video_id"),
+                    "visibility": (publications[0] if publications else {}).get("visibility"),
+                    "published_at": (publications[0] if publications else {}).get("created_at"),
+                    "idempotency_key": (publications[0] if publications else {}).get("idempotency_key"),
+                    "publication_count": len(publications),
+                }
+            )
+        return {
+            "items": items,
+            "summary": self._publish_health(),
+        }
+
+    def on_publishing_inspect(self, params: dict | None) -> dict[str, Any]:
+        """Full publication inspection for one job (mirrors CLI inspect)."""
+        params = params or {}
+        job_id = params.get("job_id")
+        if not job_id:
+            raise ProtocolError(INVALID_PARAMS, "Missing required param: job_id")
+
+        engine = self._publishing_engine()
+        job = self.db.get_job(job_id)
+        approval = self.db.get_publish_approval(job_id)
+        history = self.db.list_publish_approvals(job_id=job_id)
+        publications = self.db.get_publications_for_job(job_id)
+        attempts = self.db.get_publish_attempts_for_job(job_id)
+        qa = engine._load_qa_receipt(job_id, self.db)
+        media = engine._resolve_media_file(job_id)
+        checksum = compute_file_sha256(media) if media else None
+
+        job_status = (job or {}).get("status")
+        state = "READY_TO_PUBLISH" if str(job_status).upper() == "APPROVED" else str(job_status or "UNKNOWN")
+        if approval:
+            bound = approval.get("media_checksum_sha256")
+            if approval.get("status") == "approved":
+                auth_status = "AUTHORIZED" if (not bound or bound == checksum) else "INVALIDATED_ARTIFACT_CHANGED"
+            else:
+                auth_status = f"NOT_AUTHORIZED_{str(approval.get('status')).upper()}"
+        else:
+            auth_status = "UNAUTHORIZED"
+        qa_status = "MISSING"
+        if qa:
+            qa_status = qa.get("status") or ("PASS" if qa.get("publish_allowed") else "BLOCK")
+
+        return {
+            "found": job is not None,
+            "job_id": job_id,
+            "state": state,
+            "approval_status": auth_status,
+            "qa_status": qa_status,
+            "qa_publish_allowed": bool(qa.get("publish_allowed")) if qa else False,
+            "media_checksum_sha256": checksum,
+            "approval": approval,
+            "approval_history": history,
+            "publications": publications,
+            "publish_attempts": attempts,
+            "publishable": (
+                job is not None
+                and str(job.get("status")).upper() == "APPROVED"
+                and bool(qa)
+                and bool(qa.get("publish_allowed"))
+                and bool(checksum)
+                and approval is not None
+                and approval.get("status") == "approved"
+            ),
+        }
+
+    def on_publishing_approve(self, params: dict | None) -> dict[str, Any]:
+        """Create/record an explicit operator approval for a job.
+
+        Delegates to the existing approval DB layer; binds the current artifact
+        checksum + platform so the publisher's gate can detect tampering.
+        """
+        params = params or {}
+        job_id = params.get("job_id")
+        if not job_id:
+            raise ProtocolError(INVALID_PARAMS, "Missing required param: job_id")
+        platform = str(params.get("platform") or "youtube").lower()
+        decided_by = str(params.get("decided_by") or "operator")
+        notes = str(params.get("notes") or "Approved via desktop control surface")
+
+        job = self.db.get_job(job_id)
+        if job is None:
+            raise ProtocolError(INVALID_PARAMS, f"Job not found: {job_id}")
+
+        engine = self._publishing_engine()
+        media = engine._resolve_media_file(job_id)
+        checksum = compute_file_sha256(media) if media else None
+
+        if self.db.get_publish_approval(job_id) is None:
+            self.db.create_publish_approval(
+                job_id=job_id,
+                channel_id=job.get("channel_id") or "default",
+                notes=f"Approval requested via desktop by {decided_by}",
+            )
+        ok = self.db.decide_publish_approval(
+            job_id,
+            approved=True,
+            decided_by=decided_by,
+            notes=notes,
+            artifact_checksum=checksum,
+            platform=platform,
+        )
+        approval = self.db.get_publish_approval(job_id)
+        if not ok or not approval or approval.get("status") != "approved":
+            raise ProtocolError(INTERNAL_ERROR, f"Failed to approve job {job_id}")
+        return {
+            "job_id": job_id,
+            "status": "approved",
+            "platform": approval.get("platform") or platform,
+            "decided_by": approval.get("decided_by"),
+            "decided_at": approval.get("decided_at"),
+            "media_checksum_sha256": checksum,
+        }
+
+    def on_publishing_reject(self, params: dict | None) -> dict[str, Any]:
+        """Record an explicit operator rejection for a job."""
+        params = params or {}
+        job_id = params.get("job_id")
+        if not job_id:
+            raise ProtocolError(INVALID_PARAMS, "Missing required param: job_id")
+        decided_by = str(params.get("decided_by") or "operator")
+        notes = str(params.get("notes") or "Rejected via desktop control surface")
+
+        approval = self.db.get_publish_approval(job_id)
+        if approval is None:
+            raise ProtocolError(
+                INVALID_PARAMS, f"No approval record for job {job_id}; nothing to reject"
+            )
+        ok = self.db.decide_publish_approval(
+            job_id, approved=False, decided_by=decided_by, notes=notes
+        )
+        approval = self.db.get_publish_approval(job_id)
+        if not ok:
+            raise ProtocolError(INTERNAL_ERROR, f"Failed to reject job {job_id}")
+        return {
+            "job_id": job_id,
+            "status": (approval or {}).get("status") or "rejected",
+            "decided_by": (approval or {}).get("decided_by"),
+            "decided_at": (approval or {}).get("decided_at"),
+        }
+
+    def on_publishing_publish(self, params: dict | None) -> dict[str, Any]:
+        """Publish a job through the protected approval loop.
+
+        ALL gates (QA, checksum, approval, idempotency, auth, duplicate
+        prevention) are enforced by PublishingEngine.publish_with_approval.
+        This handler only forwards parameters; it never relaxes a gate.
+        Public visibility is allowed only through the same approval gate —
+        autonomous public publishing is never triggered here.
+        """
+        params = params or {}
+        job_id = params.get("job_id")
+        if not job_id:
+            raise ProtocolError(INVALID_PARAMS, "Missing required param: job_id")
+        visibility = str(params.get("visibility") or self.config.publish_default_visibility).lower()
+        if visibility not in ("private", "unlisted", "public"):
+            raise ProtocolError(
+                INVALID_PARAMS,
+                f"Invalid visibility {visibility!r}; expected private, unlisted or public",
+            )
+        platform = str(params.get("platform") or "youtube").lower()
+        scheduled_time = params.get("scheduled_time")
+        dry_run = bool(params.get("dry_run", False))
+        force_retry = bool(params.get("force_retry", False))
+        media_path = params.get("media_path")
+
+        engine = self._publishing_engine()
+        try:
+            result = engine.publish_job(
+                job_id=job_id,
+                platform=platform,
+                visibility=visibility,
+                scheduled_time=scheduled_time if scheduled_time else None,
+                dry_run=dry_run,
+                force_retry=force_retry,
+                media_path=media_path if media_path else None,
+                require_approval=not dry_run,
+            )
+        except ValueError as exc:
+            raise ProtocolError(INVALID_PARAMS, str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001 — ambiguous remote results fail closed
+            raise ProtocolError(INTERNAL_ERROR, f"Publish failed: {exc}") from exc
+
+        payload = result.model_dump(mode="json")
+        # Surface a concise action result for the UI alongside the full record.
+        return {
+            "success": bool(result.success),
+            "status": str(result.status.value) if result.status else "UNKNOWN",
+            "job_id": job_id,
+            "platform": platform,
+            "visibility": visibility,
+            "dry_run": dry_run,
+            "remote_video_id": result.receipt.remote_video_id if result.receipt else None,
+            "remote_url": result.receipt.remote_url if result.receipt else None,
+            "idempotency_key": result.receipt.idempotency_key if result.receipt else None,
+            "published_at": result.receipt.published_at if result.receipt else None,
+            "error_code": result.error.error_code if result.error else None,
+            "error_message": result.error.message if result.error else None,
+            "result": payload,
+        }
+
+    # ------------------------------------------------------------------
+    # M4 — analytics control surface
+    # ------------------------------------------------------------------
+    def _analytics_engine(self):
+        from autopilot.core.analytics import AnalyticsEngine
+
+        return AnalyticsEngine(config=self.config, db=self.db)
+
+    def on_analytics_status(self, params: dict | None) -> dict[str, Any]:
+        """Read-only analytics state: provider, publication counts, sync state."""
+        from autopilot.cli.main import _learning_health
+
+        published_jobs = self.db.list_published_jobs()
+        perf_rows: list[dict] = []
+        try:
+            with self.db._connect() as conn:
+                row = conn.execute(
+                    "SELECT COUNT(DISTINCT job_id) AS n FROM analytics_snapshots"
+                ).fetchone()
+                snap_jobs = int(row["n"]) if row else 0
+                row = conn.execute("SELECT COUNT(*) AS n FROM analytics_snapshots").fetchone()
+                snapshots = int(row["n"]) if row else 0
+                row = conn.execute(
+                    "SELECT observed_at FROM analytics_snapshots ORDER BY observed_at DESC LIMIT 1"
+                ).fetchone()
+                last_observed = row["observed_at"] if row else None
+        except Exception:  # noqa: BLE001
+            snap_jobs, snapshots, last_observed = 0, 0, None
+
+        try:
+            with self.db._connect() as conn:
+                rows = conn.execute(
+                    "SELECT DISTINCT job_id FROM publish_records ORDER BY created_at DESC LIMIT 25"
+                ).fetchall()
+                perf_rows = [dict(r) for r in rows]
+        except Exception:  # noqa: BLE001
+            perf_rows = []
+
+        return {
+            "status": "AVAILABLE",
+            "default_provider": self.config.analytics_default_provider,
+            "published_job_count": len(perf_rows),
+            "jobs_with_snapshots": snap_jobs,
+            "snapshot_count": snapshots,
+            "last_observed_at": last_observed,
+            "has_published_jobs": len(perf_rows) > 0,
+            "learning": _learning_health(self.db),
+            "youtube": self._youtube_auth_status(),
+        }
+
+    def on_analytics_sync(self, params: dict | None) -> dict[str, Any]:
+        """Sync analytics for one job or all published jobs via the existing engine."""
+        params = params or {}
+        job_id = params.get("job_id")
+        platform = params.get("platform")
+        provider = params.get("provider")
+        window = str(params.get("window") or "lifetime")
+        sync_all = bool(params.get("sync_all", False))
+        limit = self._int_param(params, "limit", default=25, minimum=1, maximum=200)
+        dry_run = bool(params.get("dry_run", False))
+
+        engine = self._analytics_engine()
+        try:
+            if sync_all or not job_id:
+                result = engine.sync_all(
+                    platform=platform,
+                    provider_name=provider,
+                    window=window,
+                    limit=limit,
+                    dry_run=dry_run,
+                )
+            else:
+                result = engine.sync_job(
+                    job_id=str(job_id),
+                    platform=platform,
+                    provider_name=provider,
+                    window=window,
+                    dry_run=dry_run,
+                )
+        except ValueError as exc:
+            raise ProtocolError(INVALID_PARAMS, str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001 — sync failures surface as errors
+            raise ProtocolError(INTERNAL_ERROR, f"Analytics sync failed: {exc}") from exc
+        return result
+
+    def on_analytics_snapshots(self, params: dict | None) -> dict[str, Any]:
+        """List stored analytics snapshots for a job (real stored data only)."""
+        params = params or {}
+        job_id = params.get("job_id")
+        if not job_id:
+            raise ProtocolError(INVALID_PARAMS, "Missing required param: job_id")
+        perf = self.db.get_content_performance(job_id)
+        if perf is None:
+            return {"found": False, "job_id": job_id, "snapshots": []}
+        return {
+            "found": True,
+            "job_id": job_id,
+            "topic": perf.topic,
+            "platform": perf.platform,
+            "remote_id": perf.remote_id,
+            "published_at": perf.published_at,
+            "publication_receipt_id": perf.publication_receipt_id,
+            "snapshots": [s.model_dump(mode="json") for s in perf.snapshot_history],
+            "latest_snapshot": (
+                perf.latest_snapshot.model_dump(mode="json") if perf.latest_snapshot else None
+            ),
+        }
+
+    def on_analytics_report(self, params: dict | None) -> dict[str, Any]:
+        """Backend performance report + optional channel attribution."""
+        params = params or {}
+        job_id = params.get("job_id")
+        platform = params.get("platform")
+        channel_id = params.get("channel_id")
+        limit = self._int_param(params, "limit", default=20, minimum=1, maximum=200)
+
+        engine = self._analytics_engine()
+        report = engine.get_performance_report(job_id=job_id, platform=platform, limit=limit)
+        attribution = None
+        if channel_id:
+            attribution = engine.attribute_channel_performance(channel_id)
+        return {
+            "report": report,
+            "channel_attribution": attribution,
+            "rows": len(report),
+            "note": (
+                "Only jobs with stored analytics snapshots are included."
+                if not report
+                else None
+            ),
+        }
+
+    # ------------------------------------------------------------------
+    # M4 — strategy control surface
+    # ------------------------------------------------------------------
+    def _strategy_manager(self):
+        from autopilot.core.feedback import StrategyManager
+
+        return StrategyManager(self.db)
+
+    def _learning_engine(self):
+        from autopilot.core.learning import LearningEngine
+
+        return LearningEngine(config=self.config, db=self.db)
+
+    def on_strategy_status(self, params: dict | None) -> dict[str, Any]:
+        """Read-only strategy + learning state for a channel."""
+        params = params or {}
+        channel_id = str(params.get("channel_id") or "default")
+
+        from autopilot.cli.main import _learning_health
+
+        manager = self._strategy_manager()
+        active = manager.get_active_strategy(channel_id=channel_id)
+        learning = _learning_health(self.db)
+        runs = self.db.list_learning_runs(channel_id=channel_id, limit=1)
+        last_run = runs[0] if runs else None
+
+        return {
+            "status": "AVAILABLE",
+            "channel_id": channel_id,
+            "active_strategy": active.model_dump(mode="json") if active else None,
+            "active_strategy_version": active.version_id if active else None,
+            "learning": learning,
+            "last_learning_run": (
+                {
+                    "run_id": last_run.get("run_id"),
+                    "status": last_run.get("status"),
+                    "observations_used": last_run.get("observations_used"),
+                    "resulting_strategy_version": last_run.get("resulting_strategy_version"),
+                    "input_fingerprint": last_run.get("input_fingerprint"),
+                    "completed_at": last_run.get("completed_at"),
+                }
+                if last_run
+                else None
+            ),
+            "bounds": {
+                "min_samples": self.config.learning_min_samples,
+                "min_category_observations": self.config.learning_min_category_observations,
+                "window_days": self.config.learning_window_days,
+                "max_weight_delta": self.config.strategy_max_weight_delta,
+                "max_params_per_update": self.config.strategy_max_params_per_update,
+                "weight_floor": self.config.strategy_weight_floor,
+                "weight_ceiling": self.config.strategy_weight_ceiling,
+                "min_age_days": self.config.strategy_min_age_days,
+            },
+            "learning_boundary": (
+                "Learning only adjusts niche_weights, consumes stored analytics, "
+                "never publishes and never alters publishing policy."
+            ),
+        }
+
+    def on_strategy_show(self, params: dict | None) -> dict[str, Any]:
+        """Show a strategy version with its ancestry and learning runs."""
+        params = params or {}
+        version_id = params.get("version_id")
+        channel_id = str(params.get("channel_id") or "default")
+        manager = self._strategy_manager()
+
+        if not version_id:
+            active = manager.get_active_strategy(channel_id=channel_id)
+            version_id = active.version_id if active else None
+        if not version_id:
+            return {"found": False, "version_id": None}
+
+        strategy = self.db.get_strategy_version(version_id)
+        ancestry = self.db.get_strategy_ancestor_chain(version_id)
+        runs = self.db.list_learning_runs_for_strategy(version_id, limit=10)
+        return {
+            "found": strategy is not None,
+            "version_id": version_id,
+            "strategy": strategy.model_dump(mode="json") if strategy else None,
+            "ancestry": ancestry,
+            "learning_runs": [
+                {k: v for k, v in r.items() if k not in ("category_signals_json", "deltas_json", "observation_ids_json")}
+                for r in runs
+            ],
+            "is_active": bool(strategy and strategy.status.value == "active"),
+        }
+
+    def on_strategy_learn(self, params: dict | None) -> dict[str, Any]:
+        """Run one bounded, idempotent learning cycle via LearningEngine."""
+        params = params or {}
+        channel_id = str(params.get("channel_id") or "default")
+        dry_run = bool(params.get("dry_run", False))
+        min_samples = params.get("min_samples")
+        window_days = params.get("window_days")
+
+        engine = self._learning_engine()
+        try:
+            summary = engine.update_strategy(
+                channel_id=channel_id,
+                dry_run=dry_run,
+                min_samples=int(min_samples) if min_samples is not None else None,
+                window_days=int(window_days) if window_days is not None else None,
+            )
+        except ValueError as exc:
+            raise ProtocolError(INVALID_PARAMS, str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise ProtocolError(INTERNAL_ERROR, f"Learning run failed: {exc}") from exc
+        return summary.model_dump(mode="json")
+
+    # ------------------------------------------------------------------
+    # M4 — autonomous public publishing switch (read-only)
+    # ------------------------------------------------------------------
+    def on_autonomy_publish_status(self, params: dict | None) -> dict[str, Any]:
+        """Read-only status of the autonomous public publishing switch.
+
+        The backend is authoritative. There is no desktop mutation path: the
+        switch reflects the backend configuration only, and defaults to OFF.
+        """
+        enabled = bool(self.config.autonomy_auto_publish)
+        return {
+            "enabled": enabled,
+            "state": "ENABLED" if enabled else "DISABLED",
+            "label": (
+                "AUTONOMOUS PUBLIC PUBLISHING ENABLED"
+                if enabled
+                else "AUTONOMOUS PUBLIC PUBLISHING DISABLED"
+            ),
+            "default": False,
+            "controlled_by": "backend",
+            "guardrails": [
+                "QA PASS required",
+                "artifact + checksum validation",
+                "supported target",
+                "authenticated account",
+                "idempotency + duplicate prevention",
+                "channel/daily limits + cooldown",
+                "policy gate + visibility policy",
+                "failure handling + kill switch",
+            ],
+            "boundary": (
+                "Autonomous public publishing is disabled by default and can only "
+                "be enabled through the backend configuration. This control "
+                "surface never flips the switch and never bypasses approval."
+            ),
+        }
+
+    # ------------------------------------------------------------------
+    # M4 — helpers
     # ------------------------------------------------------------------
     def _schema_version(self) -> Optional[int]:
         try:

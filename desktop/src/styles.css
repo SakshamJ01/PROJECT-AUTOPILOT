@@ -502,6 +502,18 @@ tbody tr:hover {
   color: var(--info);
 }
 
+.banner-bad {
+  background: rgba(229, 72, 77, 0.12);
+  border: 1px solid var(--bad);
+  color: var(--bad);
+}
+
+/* M4 — disabled rows / published jobs */
+
+.queue-table tbody tr.row-disabled td {
+  opacity: 0.55;
+}
+
 /* Stage timeline (Production) */
 
 .stage-timeline {

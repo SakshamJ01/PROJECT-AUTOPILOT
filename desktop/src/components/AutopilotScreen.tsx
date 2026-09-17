@@ -1,5 +1,6 @@
 import { useState } from "react";
 import {
+  useAnalyticsStatusQuery,
   useAutonomyProposalsQuery,
   useAutonomyRunMutation,
   useAutonomyStatusQuery,
@@ -212,6 +213,46 @@ function LimitsCard({ status }: { status: AutonomyStatus }) {
   );
 }
 
+function M4Strip({ status }: { status: AutonomyStatus }) {
+  const { data: analytics } = useAnalyticsStatusQuery();
+  const learning = status.learning as {
+    status: string;
+    current_strategy_version: string | null;
+    last_learning_run: {
+      run_id: string | null;
+      status: string | null;
+      resulting_strategy_version: string | null;
+    } | null;
+  };
+  const rows: Array<[string, string]> = [
+    ["Active strategy", status.active_strategy_version ?? "—"],
+    [
+      "Analytics synced",
+      analytics?.last_observed_at
+        ? new Date(analytics.last_observed_at).toLocaleString()
+        : "never",
+    ],
+    [
+      "Last learning run",
+      learning.last_learning_run
+        ? `${learning.last_learning_run.status} → ${
+            learning.last_learning_run.resulting_strategy_version ?? "no change"
+          }`
+        : "none",
+    ],
+  ];
+  return (
+    <dl className="kv" style={{ padding: "10px 14px 0" }}>
+      {rows.map(([k, v]) => (
+        <div key={k} className="kv-row">
+          <dt>{k}</dt>
+          <dd className="small">{v}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
 function ActivityCard({ status }: { status: AutonomyStatus }) {
   const a = status.activity;
   const counts: Array<[string, number]> = [
@@ -220,6 +261,7 @@ function ActivityCard({ status }: { status: AutonomyStatus }) {
     ["Queued", a.proposal_counts.queued],
     ["Rejected", a.proposal_counts.rejected],
     ["Ready to publish", a.ready_to_publish],
+    ["Published", a.published],
     ["Produced today", a.produced_today],
     ["Queued today", a.queued_today],
   ];
@@ -237,6 +279,7 @@ function ActivityCard({ status }: { status: AutonomyStatus }) {
           </div>
         ))}
       </div>
+      <M4Strip status={status} />
       <h4 className="drawer-subtitle">Recent cycles</h4>
       {a.recent_runs.length === 0 ? (
         <p className="muted small" style={{ padding: "0 14px" }}>
