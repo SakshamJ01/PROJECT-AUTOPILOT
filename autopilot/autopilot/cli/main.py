@@ -2020,6 +2020,29 @@ def _schedule_engine():
     return ScheduleEngine()
 
 
+def _parse_schedule_run_stages(cycle_summary_json) -> str:
+    """Render combined operation-loop stage summaries for ``schedule inspect``."""
+    import json
+
+    if not cycle_summary_json:
+        return ""
+    try:
+        data = json.loads(cycle_summary_json) if isinstance(cycle_summary_json, str) else dict(cycle_summary_json)
+    except Exception:
+        return ""
+    if not isinstance(data, dict) or "operation_mode" not in data:
+        return ""
+    parts = []
+    l3, l4 = data.get("level3"), data.get("level4")
+    if isinstance(l3, dict):
+        parts.append(f"L3 run={l3.get('run_id')} status={l3.get('status')} queued={l3.get('jobs_queued')}")
+    if isinstance(l4, dict):
+        parts.append(f"L4 run={l4.get('run_id')} status={l4.get('status')} ready_to_publish={l4.get('jobs_ready_to_publish')}")
+    if data.get("level4_skipped_reason"):
+        parts.append(f"skipped: {data['level4_skipped_reason']}")
+    return "; ".join(parts)
+
+
 def run_schedule_list(channel_id: str | None = None, output_json: bool = False) -> int:
     import json
 
@@ -2033,13 +2056,15 @@ def run_schedule_list(channel_id: str | None = None, output_json: bool = False) 
             print("(no schedules)")
         for s in schedules:
             state = "ENABLED" if s.enabled else "DISABLED"
-            print(f"[{s.schedule_id}] {s.cadence.value:<8} L{s.autonomy_level} {state:<8} channel={s.channel_id} next_run_at={s.next_run_at} runs={s.total_runs} failures={s.consecutive_failures}")
+            mode = s.operation_mode or ("level4" if s.autonomy_level >= 4 else "level3")
+            print(f"[{s.schedule_id}] {s.cadence.value:<8} L{s.autonomy_level} {mode:<17} {state:<8} channel={s.channel_id} next_run_at={s.next_run_at} runs={s.total_runs} failures={s.consecutive_failures}")
     return 0
 
 
 def run_schedule_create(
     channel_id: str = "default",
     level: int = 3,
+    mode: str | None = None,
     cadence: str = "daily",
     days: list[str] | None = None,
     timezone: str = "UTC",
@@ -2055,6 +2080,7 @@ def run_schedule_create(
         schedule = engine.create_schedule(
             channel_id=channel_id,
             autonomy_level=level,
+            operation_mode=mode,
             cadence=cadence,
             days_of_week=days,
             timezone=timezone,
@@ -2074,6 +2100,7 @@ def run_schedule_create(
         print(f"=== SCHEDULE CREATED [{schedule.schedule_id}] ===")
         print(f"Channel ID:       {schedule.channel_id}")
         print(f"Autonomy Level:   {schedule.autonomy_level}")
+        print(f"Operation Mode:   {schedule.operation_mode}")
         print(f"Cadence:          {schedule.cadence.value} {schedule.days_of_week or ''}")
         print(f"Timezone:         {schedule.timezone}")
         print(f"Max Items / Run:  {schedule.max_items_per_run}")
@@ -2160,6 +2187,7 @@ def run_schedule_inspect(schedule_id: str, limit: int = 20, output_json: bool = 
         print(f"=== SCHEDULE [{s['schedule_id']}] ===")
         print(f"Channel ID:        {s['channel_id']}")
         print(f"Autonomy Level:    {s['autonomy_level']}")
+        print(f"Operation Mode:    {s.get('operation_mode') or ('level4' if s['autonomy_level'] >= 4 else 'level3')}")
         print(f"Cadence:           {s['cadence']} {s['days_of_week'] or ''}")
         print(f"Timezone:          {s['timezone']}")
         print(f"Enabled:           {s['enabled']}")
@@ -2175,6 +2203,9 @@ def run_schedule_inspect(schedule_id: str, limit: int = 20, output_json: bool = 
         print(f"\nRecent Runs ({len(data['runs'])}):")
         for r in data["runs"]:
             print(f"  [{r['run_id']}] {r['status']:<9} cycle={r['cycle_run_id'] or '-'} publish_calls={r['publish_calls']} completed_at={r['completed_at']}")
+            stages = _parse_schedule_run_stages(r.get("cycle_summary_json"))
+            if stages:
+                print(f"      stages: {stages}")
     return 0
 
 
@@ -2197,14 +2228,49 @@ def run_schedule_run_now(schedule_id: str, output_json: bool = False) -> int:
         print(f"Schedule:       {result.schedule_id}")
         print(f"Channel ID:     {result.channel_id}")
         print(f"Autonomy Level: {result.autonomy_level}")
+        print(f"Operation Mode: {result.operation_mode}")
         print(f"Status:         {result.status}")
         print(f"Cycle Run ID:   {result.cycle_run_id or '-'}")
         print(f"Cycle Status:   {result.cycle_status or '-'}")
+        if result.level3_run_id or result.level4_run_id:
+            print(f"L3:             run={result.level3_run_id or '-'} status={result.level3_status or '-'} queued={result.level3_jobs_queued}")
+            print(f"L4:             run={result.level4_run_id or '-'} status={result.level4_status or '-'} ready_to_publish={result.level4_jobs_ready_to_publish}")
         print(f"Next Run At:    {result.next_run_at or '-'}")
         print(f"Publish Calls:  {result.publish_calls}")
         if result.error_message:
             print(f"Error:          {result.error_message}")
     return 0 if result.status in ("completed", "blocked") else 1
+
+
+def run_schedule_loop(
+    poll: float = 60.0,
+    max_iterations: int | None = None,
+    limit: int = 10,
+    output_json: bool = False,
+) -> int:
+    """Portable in-process ticker: repeatedly execute due schedules until stopped.
+
+    Contains no production/queue/provider logic — every tick delegates to the
+    existing ScheduleEngine.run_due, preserving leases, overlap protection, and
+    the READY_TO_PUBLISH boundary. Bounded by ``--max-iterations`` when given.
+    """
+    import json
+
+    engine = _schedule_engine()
+    result = engine.run_loop(
+        poll_interval=poll,
+        max_iterations=max_iterations,
+        max_runs_per_tick=limit,
+    )
+    if output_json:
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        print("=== SCHEDULE LOOP (ticker) ===")
+        print(f"Iterations:          {result['iterations']}")
+        print(f"Total Executions:    {len(result['summaries'])}")
+        for r in result["summaries"]:
+            print(f"  [{r.schedule_id}] {r.operation_mode} {r.status}: cycle={r.cycle_run_id or '-'} ({r.cycle_status or '-'}) PublishCalls={r.publish_calls} next_run_at={r.next_run_at}")
+    return 0 if all(r.status in ("completed", "blocked") for r in result["summaries"]) else 1
 
 
 def run_schedule_run_due(limit: int = 10, output_json: bool = False) -> int:
@@ -2219,7 +2285,7 @@ def run_schedule_run_due(limit: int = 10, output_json: bool = False) -> int:
         if not results:
             print("(no due schedules)")
         for r in results:
-            print(f"[{r.schedule_id}] L{r.autonomy_level} {r.status}: cycle={r.cycle_run_id or '-'} ({r.cycle_status or '-'}) PublishCalls={r.publish_calls} next_run_at={r.next_run_at}")
+            print(f"[{r.schedule_id}] L{r.autonomy_level} {r.operation_mode} {r.status}: cycle={r.cycle_run_id or '-'} ({r.cycle_status or '-'}) PublishCalls={r.publish_calls} next_run_at={r.next_run_at}")
     return 0 if all(r.status in ("completed", "blocked") for r in results) else 1
 
 
@@ -2722,6 +2788,7 @@ def build_parser():
     sub_schedule_create = sub_schedule.add_parser("create", help="Create a recurring schedule")
     sub_schedule_create.add_argument("--channel", default="default", help="Target channel ID")
     sub_schedule_create.add_argument("--level", type=int, default=3, choices=[3, 4], help="Autonomy level (3=Guarded Auto-Queue, 4=Guarded Auto-Produce)")
+    sub_schedule_create.add_argument("--mode", default=None, choices=["level3", "level4", "level3_then_level4"], help="Operation mode (how a run uses the level; default derives from --level: level3 | level4 | level3_then_level4 full content-factory loop)")
     sub_schedule_create.add_argument("--cadence", default="daily", choices=["hourly", "daily", "weekly", "weekdays"], help="Recurrence cadence")
     sub_schedule_create.add_argument("--days", default=None, help="Comma-separated days of week (mon,tue,...) for weekly cadence")
     sub_schedule_create.add_argument("--timezone", default="UTC", help="IANA timezone name (default: UTC)")
@@ -2754,6 +2821,12 @@ def build_parser():
     sub_schedule_inspect.add_argument("--id", required=True, help="Schedule ID")
     sub_schedule_inspect.add_argument("--limit", type=int, default=20, help="Number of recent runs to show")
     sub_schedule_inspect.add_argument("--json", action="store_true", help="Output machine-readable JSON")
+
+    sub_schedule_loop = sub_schedule.add_parser("loop", help="Run the portable in-process ticker: repeatedly execute due schedules until interrupted (Ctrl+C)")
+    sub_schedule_loop.add_argument("--poll", type=float, default=60.0, help="Polling interval in seconds between ticks (default: 60)")
+    sub_schedule_loop.add_argument("--max-iterations", type=int, default=None, help="Stop after this many ticks (default: run until interrupted)")
+    sub_schedule_loop.add_argument("--limit", type=int, default=10, help="Maximum number of schedules to execute per tick")
+    sub_schedule_loop.add_argument("--json", action="store_true", help="Output machine-readable JSON result")
 
     # Milestone 10 / M10 — Multi-Channel Scaling & Channel Profiles subparsers
     sub_parser_channel = sub.add_parser("channel", help="Multi-Channel Profile Management (Milestone 10)")
@@ -3053,6 +3126,7 @@ def main() -> int:
             return run_schedule_create(
                 channel_id=args.channel,
                 level=args.level,
+                mode=args.mode,
                 cadence=args.cadence,
                 days=days,
                 timezone=args.timezone,
@@ -3073,6 +3147,13 @@ def main() -> int:
             return run_schedule_run_due(limit=args.limit, output_json=args.json)
         elif args.schedule_action == "inspect":
             return run_schedule_inspect(schedule_id=args.id, limit=args.limit, output_json=args.json)
+        elif args.schedule_action == "loop":
+            return run_schedule_loop(
+                poll=args.poll,
+                max_iterations=args.max_iterations,
+                limit=args.limit,
+                output_json=args.json,
+            )
         else:
             sub_parser_schedule.print_help()
             return 1

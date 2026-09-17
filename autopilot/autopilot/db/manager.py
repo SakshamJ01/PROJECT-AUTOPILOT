@@ -5,10 +5,10 @@ from __future__ import annotations
 import sqlite3
 import json
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-DB_SCHEMA_VERSION = 7
+DB_SCHEMA_VERSION = 9
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -537,6 +537,47 @@ CREATE TABLE IF NOT EXISTS publish_approvals (
 );
 CREATE INDEX IF NOT EXISTS idx_publish_approvals_job ON publish_approvals(job_id);
 CREATE INDEX IF NOT EXISTS idx_publish_approvals_status ON publish_approvals(status);
+
+-- Phase 3: Recurring Schedule Orchestration
+CREATE TABLE IF NOT EXISTS autonomy_schedules (
+    schedule_id TEXT PRIMARY KEY,
+    channel_id TEXT NOT NULL DEFAULT 'default',
+    autonomy_level INTEGER NOT NULL DEFAULT 3,
+    operation_mode TEXT, -- how a run consumes autonomy_level: level3 | level4 | level3_then_level4 (null -> derived)
+    enabled INTEGER NOT NULL DEFAULT 1,
+    cadence TEXT NOT NULL DEFAULT 'daily', -- hourly | daily | weekly | weekdays
+    days_of_week TEXT DEFAULT '[]', -- JSON list: mon..sun (honored for weekly/weekdays)
+    timezone TEXT NOT NULL DEFAULT 'UTC', -- IANA timezone name
+    max_items_per_run INTEGER NOT NULL DEFAULT 10,
+    dry_run INTEGER NOT NULL DEFAULT 0,
+    policy TEXT NOT NULL DEFAULT 'local_only', -- Level 4 production policy tier
+    next_run_at TEXT,
+    last_run_at TEXT,
+    last_run_id TEXT,
+    last_run_status TEXT,
+    total_runs INTEGER NOT NULL DEFAULT 0,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    leased_by TEXT,
+    lease_until TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_schedules_due ON autonomy_schedules(enabled, next_run_at);
+
+CREATE TABLE IF NOT EXISTS autonomy_schedule_runs (
+    run_id TEXT PRIMARY KEY,
+    schedule_id TEXT NOT NULL,
+    channel_id TEXT NOT NULL DEFAULT 'default',
+    autonomy_level INTEGER NOT NULL,
+    cycle_run_id TEXT,
+    status TEXT NOT NULL, -- completed | failed | skipped
+    error_message TEXT,
+    cycle_summary_json TEXT DEFAULT '{}',
+    publish_calls INTEGER NOT NULL DEFAULT 0,
+    started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_schedule_runs_schedule ON autonomy_schedule_runs(schedule_id);
 """
 
 
@@ -604,6 +645,14 @@ class DBManager:
                 cols = [row["name"] for row in cur.fetchall()]
                 if cols and "channel_id" not in cols:
                     conn.execute("ALTER TABLE idea_proposals ADD COLUMN channel_id TEXT DEFAULT 'default'")
+            except Exception:
+                pass
+
+            try:
+                cur = conn.execute("PRAGMA table_info(autonomy_schedules)")
+                cols = [row["name"] for row in cur.fetchall()]
+                if cols and "operation_mode" not in cols:
+                    conn.execute("ALTER TABLE autonomy_schedules ADD COLUMN operation_mode TEXT")
             except Exception:
                 pass
 
@@ -1958,6 +2007,270 @@ class DBManager:
     def list_autonomy_runs(self, limit: int = 20) -> list[dict]:
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM autonomy_runs ORDER BY started_at DESC LIMIT ?", (limit,)).fetchall()
+            return [dict(r) for r in rows]
+
+    # =====================================================================
+    # Phase 3: Recurring schedule persistence & atomic orchestration
+    # =====================================================================
+
+    @staticmethod
+    def _coerce_dt(value: str) -> datetime:
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+        return datetime.fromisoformat(value)
+
+    def create_schedule(
+        self,
+        schedule_id: str,
+        channel_id: str = "default",
+        autonomy_level: int = 3,
+        operation_mode: Optional[str] = None,
+        cadence: str = "daily",
+        timezone_name: str = "UTC",
+        days_of_week: Optional[list] = None,
+        max_items_per_run: int = 10,
+        dry_run: bool = False,
+        policy: str = "local_only",
+        enabled: bool = True,
+        next_run_at: Optional[str] = None,
+        created_at: Optional[str] = None,
+        updated_at: Optional[str] = None,
+    ) -> bool:
+        """Insert a schedule. Returns True if newly inserted, False if the id already existed."""
+        now = datetime.now(timezone.utc).isoformat()
+        created_at = created_at or now
+        updated_at = updated_at or now
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT OR IGNORE INTO autonomy_schedules (
+                    schedule_id, channel_id, autonomy_level, operation_mode, enabled, cadence, days_of_week,
+                    timezone, max_items_per_run, dry_run, policy, next_run_at,
+                    last_run_at, last_run_id, last_run_status, total_runs, consecutive_failures,
+                    leased_by, lease_until, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 0, 0, NULL, NULL, ?, ?)
+                """,
+                (
+                    schedule_id,
+                    channel_id,
+                    int(autonomy_level),
+                    operation_mode,
+                    1 if enabled else 0,
+                    cadence,
+                    json.dumps(days_of_week or []),
+                    timezone_name,
+                    int(max_items_per_run),
+                    1 if dry_run else 0,
+                    policy,
+                    next_run_at,
+                    created_at,
+                    updated_at,
+                ),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
+    def get_schedule(self, schedule_id: str) -> Optional[dict]:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM autonomy_schedules WHERE schedule_id = ?", (schedule_id,)).fetchone()
+            return dict(row) if row else None
+
+    def list_schedules(self, channel_id: Optional[str] = None, enabled: Optional[bool] = None) -> list[dict]:
+        where, params = [], []
+        if channel_id is not None:
+            where.append("channel_id = ?")
+            params.append(channel_id)
+        if enabled is not None:
+            where.append("enabled = ?")
+            params.append(1 if enabled else 0)
+        sql = "SELECT * FROM autonomy_schedules"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY datetime(next_run_at) ASC, schedule_id ASC"
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+            return [dict(r) for r in rows]
+
+    def update_schedule(self, schedule_id: str, **fields) -> bool:
+        """Update allowed schedule columns; always refreshes updated_at."""
+        allowed = {
+            "channel_id", "autonomy_level", "operation_mode", "enabled", "cadence", "days_of_week",
+            "timezone", "max_items_per_run", "dry_run", "policy", "next_run_at",
+        }
+        sets = ["updated_at = ?"]
+        params: list = [datetime.now(timezone.utc).isoformat()]
+        for key, value in fields.items():
+            if key not in allowed:
+                raise ValueError(f"Unsupported schedule field: {key}")
+            sets.append(f"{key} = ?")
+            if isinstance(value, bool):
+                params.append(1 if value else 0)
+            elif isinstance(value, (list, dict)):
+                params.append(json.dumps(value))
+            else:
+                params.append(value)
+        params.append(schedule_id)
+        with self._connect() as conn:
+            cur = conn.execute(
+                f"UPDATE autonomy_schedules SET {', '.join(sets)} WHERE schedule_id = ?", params
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
+    def delete_schedule(self, schedule_id: str) -> bool:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM autonomy_schedule_runs WHERE schedule_id = ?", (schedule_id,))
+            cur = conn.execute("DELETE FROM autonomy_schedules WHERE schedule_id = ?", (schedule_id,))
+            conn.commit()
+            return cur.rowcount > 0
+
+    def count_due_schedules(self, now_iso: Optional[str] = None) -> int:
+        now_iso = now_iso or datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT count(*) as cnt FROM autonomy_schedules
+                WHERE enabled = 1 AND next_run_at IS NOT NULL
+                  AND datetime(next_run_at) <= datetime(?)
+                  AND (lease_until IS NULL OR datetime(lease_until) < datetime(?))
+                """,
+                (now_iso, now_iso),
+            ).fetchone()
+            return int(row["cnt"])
+
+    def claim_due_schedule(self, worker_id: str, lease_duration_sec: int = 300, now_iso: Optional[str] = None) -> Optional[dict]:
+        """Atomically claim the oldest due, enabled, un-leased schedule.
+
+        Overlap protection relies on this atomic BEGIN IMMEDIATE claim plus the
+        lease fields; concurrent runners can never claim the same schedule.
+        """
+        now_iso = now_iso or datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute(
+                    """
+                    SELECT * FROM autonomy_schedules
+                    WHERE enabled = 1 AND next_run_at IS NOT NULL
+                      AND datetime(next_run_at) <= datetime(?)
+                      AND (lease_until IS NULL OR datetime(lease_until) < datetime(?))
+                    ORDER BY datetime(next_run_at) ASC, schedule_id ASC
+                    LIMIT 1
+                    """,
+                    (now_iso, now_iso),
+                ).fetchone()
+                if row is None:
+                    conn.rollback()
+                    return None
+                lease_until = (self._coerce_dt(now_iso) + timedelta(seconds=int(lease_duration_sec))).isoformat()
+                conn.execute(
+                    "UPDATE autonomy_schedules SET leased_by = ?, lease_until = ?, updated_at = ? WHERE schedule_id = ?",
+                    (worker_id, lease_until, now_iso, row["schedule_id"]),
+                )
+                conn.commit()
+                return dict(row)
+            except Exception:
+                conn.rollback()
+                raise
+
+    def claim_schedule_by_id(
+        self,
+        schedule_id: str,
+        worker_id: str,
+        lease_duration_sec: int = 300,
+        now_iso: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Atomically claim a specific schedule (used by run-now) if not leased."""
+        now_iso = now_iso or datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute(
+                    "SELECT * FROM autonomy_schedules WHERE schedule_id = ?", (schedule_id,)
+                ).fetchone()
+                if row is None:
+                    conn.rollback()
+                    return None
+                if row["lease_until"] and self._coerce_dt(row["lease_until"]) >= self._coerce_dt(now_iso):
+                    conn.rollback()
+                    return None
+                if row["enabled"] != 1:
+                    conn.rollback()
+                    return None
+                lease_until = (self._coerce_dt(now_iso) + timedelta(seconds=int(lease_duration_sec))).isoformat()
+                conn.execute(
+                    "UPDATE autonomy_schedules SET leased_by = ?, lease_until = ?, updated_at = ? WHERE schedule_id = ?",
+                    (worker_id, lease_until, now_iso, schedule_id),
+                )
+                conn.commit()
+                return dict(row)
+            except Exception:
+                conn.rollback()
+                raise
+
+    def complete_schedule_run(
+        self,
+        schedule_id: str,
+        worker_id: str,
+        run_id: str,
+        channel_id: str,
+        autonomy_level: int,
+        cycle_run_id: Optional[str],
+        run_status: str,
+        error_message: Optional[str],
+        cycle_summary_json: str,
+        publish_calls: int,
+        next_run_at: str,
+        started_at: str,
+        completed_at: str,
+        consecutive_failures: int,
+    ) -> bool:
+        """Record a schedule run and advance/release the schedule in one transaction.
+
+        Idempotent on run_id (INSERT OR IGNORE) and safe on re-release: the schedule
+        UPDATE only matches while the caller still holds the lease, so a duplicate
+        call after release is a no-op (restart safety, no double-run accounting).
+        """
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO autonomy_schedule_runs (
+                        run_id, schedule_id, channel_id, autonomy_level, cycle_run_id, status,
+                        error_message, cycle_summary_json, publish_calls, started_at, completed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id, schedule_id, channel_id, int(autonomy_level), cycle_run_id, run_status,
+                        error_message, cycle_summary_json, int(publish_calls), started_at, completed_at,
+                    ),
+                )
+                upd = conn.execute(
+                    """
+                    UPDATE autonomy_schedules
+                    SET next_run_at = ?, last_run_at = ?, last_run_id = ?, last_run_status = ?,
+                        total_runs = total_runs + 1, consecutive_failures = ?,
+                        leased_by = NULL, lease_until = NULL, updated_at = ?
+                    WHERE schedule_id = ? AND leased_by = ?
+                    """,
+                    (
+                        next_run_at, completed_at, run_id, run_status, int(consecutive_failures),
+                        completed_at, schedule_id, worker_id,
+                    ),
+                )
+                conn.commit()
+                return upd.rowcount > 0
+            except Exception:
+                conn.rollback()
+                raise
+
+    def list_schedule_runs(self, schedule_id: str, limit: int = 20) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM autonomy_schedule_runs WHERE schedule_id = ? ORDER BY started_at DESC LIMIT ?",
+                (schedule_id, limit),
+            ).fetchall()
             return [dict(r) for r in rows]
 
     def record_trend_signal(self, signal, run_id: Optional[str] = None) -> None:

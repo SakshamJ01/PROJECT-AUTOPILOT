@@ -1335,6 +1335,123 @@ class AutoProduceSummary(BaseModel):
 
 
 # =====================================================================
+# Phase 3: Scheduling Contracts
+# =====================================================================
+
+class ScheduleCadence(str, Enum):
+    HOURLY = "hourly"
+    DAILY = "daily"
+    WEEKLY = "weekly"
+    WEEKDAYS = "weekdays"
+
+
+WEEKDAY_NAMES: List[str] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+
+class OperationMode(str, Enum):
+    """How a single scheduled operation uses the granted autonomy level.
+
+    Explicit operator control: a schedule may use *less* than its granted
+    autonomy level, but never more.  ``level3_then_level4`` runs the full
+    content-factory path (discovery -> queue -> production -> QA) inside one
+    scheduled operation, sequencing the existing Level 3 and Level 4 engines.
+    """
+
+    LEVEL_3_ONLY = "level3"
+    LEVEL_4_ONLY = "level4"
+    LEVEL_3_THEN_4 = "level3_then_level4"
+
+
+def derive_operation_mode(autonomy_level: int) -> str:
+    """Default operation mode for a granted autonomy level (backward compatible)."""
+    return OperationMode.LEVEL_4_ONLY.value if int(autonomy_level) >= 4 else OperationMode.LEVEL_3_ONLY.value
+
+
+def validate_operation_mode(operation_mode: Optional[str], autonomy_level: int) -> str:
+    """Validate mode/level consistency. Returns the resolved mode string.
+
+    ``operation_mode`` None -> derived from ``autonomy_level`` (legacy default).
+    Level 4 modes require the Level 4 grant; Level 3-only is allowed under either
+    grant (an operator may deliberately run discovery-only on a Level 4 channel).
+    """
+    if operation_mode is None:
+        return derive_operation_mode(autonomy_level)
+    try:
+        mode = OperationMode(str(operation_mode).strip().lower())
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid operation_mode {operation_mode!r}; expected one of {[m.value for m in OperationMode]}"
+        ) from exc
+    if mode in (OperationMode.LEVEL_4_ONLY, OperationMode.LEVEL_3_THEN_4) and int(autonomy_level) < 4:
+        raise ValueError(
+            f"operation_mode {mode.value!r} requires autonomy_level 4 (guarded auto-produce grant)"
+        )
+    return mode.value
+
+
+class AutonomySchedule(BaseModel):
+    """Persisted recurring schedule for a channel's autonomy cycle.
+
+    The scheduler itself is a thin orchestrator: it only decides *when* a
+    cycle runs, claims the due schedule atomically, invokes the existing
+    Level 3 (run_cycle) or Level 4 (run_auto_produce_cycle) engine, and
+    records/advances the schedule. It never re-implements cycle logic and
+    never invokes a public publisher.
+
+    ``operation_mode`` pins how a run consumes ``autonomy_level``; it is the
+    explicit operator control required by the autonomous operation loop.
+    """
+
+    schedule_id: str
+    channel_id: str = "default"
+    autonomy_level: int = 3
+    operation_mode: Optional[str] = None
+    enabled: bool = True
+    cadence: ScheduleCadence = ScheduleCadence.DAILY
+    days_of_week: List[str] = Field(default_factory=list)
+    timezone: str = "UTC"
+    max_items_per_run: int = Field(default=10, ge=1)
+    dry_run: bool = False
+    policy: str = "local_only"
+    next_run_at: Optional[str] = None
+    last_run_at: Optional[str] = None
+    last_run_id: Optional[str] = None
+    last_run_status: Optional[str] = None
+    total_runs: int = Field(default=0, ge=0)
+    consecutive_failures: int = Field(default=0, ge=0)
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
+class ScheduleRunSummary(BaseModel):
+    """Outcome of a single scheduled operation execution (run-now or run-due).
+
+    ``cycle_run_id``/``cycle_status`` always describe the *terminal* stage so
+    existing callers keep working; the stage-level fields carry the full
+    picture for combined (level3_then_level4) operation-loop runs.
+    """
+
+    run_id: str
+    schedule_id: str
+    channel_id: str = "default"
+    autonomy_level: int
+    operation_mode: str = "level3"
+    status: str
+    cycle_run_id: Optional[str] = None
+    cycle_status: Optional[str] = None
+    level3_run_id: Optional[str] = None
+    level3_status: Optional[str] = None
+    level3_jobs_queued: int = 0
+    level4_run_id: Optional[str] = None
+    level4_status: Optional[str] = None
+    level4_jobs_ready_to_publish: int = 0
+    next_run_at: Optional[str] = None
+    publish_calls: int = 0
+    error_message: Optional[str] = None
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
+# =====================================================================
 # Milestone 10: Multi-Channel Scaling & Channel Profiles Contracts
 # =====================================================================
 

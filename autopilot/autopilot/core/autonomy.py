@@ -578,9 +578,13 @@ class AutonomyEngine:
                 summary.jobs_producing += 1
                 try:
                     effective_overrides = dict(provider_overrides or {})
-                    if policy != "mock" and "policy" not in effective_overrides:
-                        # Fail-closed: a non-mock operator policy must never let a
-                        # queued item silently fall back to mock providers.
+                    if "policy" not in effective_overrides:
+                        # Pin the operator-selected policy tier onto every claimed
+                        # item.  This is fail-closed for real tiers (a queued item
+                        # must never silently fall back to mock providers) AND
+                        # closes the deterministic-test hole: without it, a
+                        # Level 3-queued item (no policy in its payload) under a
+                        # "mock" tier would resolve real providers.
                         effective_overrides["policy"] = policy
                     result = worker.process_claimed_item(
                         claimed,
