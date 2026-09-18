@@ -464,6 +464,8 @@ export interface ReadyPublishItem {
   published_at: string | null;
   idempotency_key: string | null;
   publication_count: number;
+  publishable?: boolean;
+  publishability_reason?: string | null;
 }
 
 export interface ReadyList {

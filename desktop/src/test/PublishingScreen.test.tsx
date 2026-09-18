@@ -395,4 +395,49 @@ describe("Publishing screen", () => {
     );
     expect(screen.queryByRole("button", { name: /kill switch/i })).not.toBeInTheDocument();
   });
+
+  it("unpublishable job displays readiness badge and disables publish button with reason", async () => {
+    mockAll({
+      approval_status: null,
+      publishable: false,
+      publishability_reason: "Explicit operator approval is required before publishing.",
+    });
+
+    renderScreen();
+
+    // Table displays AWAITING APPROVAL readiness badge
+    await waitFor(() => expect(screen.getByText("AWAITING APPROVAL")).toBeInTheDocument());
+
+    // Inspect the job
+    fireEvent.click(screen.getByText("Inspect"));
+
+    // Check warning message and disabled publish button
+    await waitFor(() =>
+      expect(
+        screen.getByText(/Explicit operator approval is required before publishing/),
+      ).toBeInTheDocument(),
+    );
+    const publishBtn = screen.getByRole("button", { name: /Publish job-ready-1/i });
+    expect(publishBtn).toBeDisabled();
+  });
+
+  it("genuinely publishable job displays READY badge and enables publish button", async () => {
+    mockAll({
+      approval_status: "approved",
+      checksum_matches: true,
+      publishable: true,
+      publishability_reason: null,
+    });
+
+    renderScreen();
+
+    await waitFor(() => expect(screen.getByText("READY")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByText("Inspect"));
+
+    await waitFor(() => {
+      const publishBtn = screen.getByRole("button", { name: /Publish job-ready-1/i });
+      expect(publishBtn).not.toBeDisabled();
+    });
+  });
 });

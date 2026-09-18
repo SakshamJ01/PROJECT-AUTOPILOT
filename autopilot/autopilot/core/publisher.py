@@ -257,6 +257,217 @@ class PublishingEngine:
         db.bind_publish_approval(job_id, media_checksum, str(platform).lower())
         return None
 
+    def evaluate_job_publishability(
+        self,
+        job_id: str,
+        platform: str = "youtube",
+    ) -> Dict[str, Any]:
+        """Authoritatively evaluate whether a job satisfies all publication gates.
+
+        Reuses the exact publisher gate rules in a read-only manner without
+        mutating the database or executing a publication.
+        """
+        job = self.db.get_job(job_id)
+        if not job:
+            return {
+                "publishable": False,
+                "reason": f"Job '{job_id}' not found.",
+                "job": None,
+                "media_path": None,
+                "media_checksum": None,
+                "qa_receipt": None,
+                "approval": None,
+                "published": False,
+            }
+
+        job_status = (job.get("status") or "").upper()
+        ready_states = {WorkflowState.APPROVED.value.upper(), WorkflowState.READY.value.upper()}
+        if job_status not in ready_states:
+            return {
+                "publishable": False,
+                "reason": f"Job '{job_id}' is in state '{job.get('status')}'; explicit operator approval requires READY_TO_PUBLISH (APPROVED).",
+                "job": job,
+                "media_path": None,
+                "media_checksum": None,
+                "qa_receipt": None,
+                "approval": None,
+                "published": False,
+            }
+
+        publications = self.db.get_publications_for_job(job_id)
+        is_published = any(
+            str(p.get("status")).upper() in ("SUCCESS", "PUBLISHED")
+            for p in publications
+        ) or job_status == WorkflowState.PUBLISHED.value.upper()
+        if is_published:
+            return {
+                "publishable": False,
+                "reason": f"Job '{job_id}' has already been published.",
+                "job": job,
+                "media_path": None,
+                "media_checksum": None,
+                "qa_receipt": None,
+                "approval": None,
+                "published": True,
+            }
+
+        media = self._resolve_media_file(job_id)
+        if not media or not media.exists() or not media.is_file() or media.stat().st_size == 0:
+            return {
+                "publishable": False,
+                "reason": f"No rendered media file found for job '{job_id}'.",
+                "job": job,
+                "media_path": str(media) if media else None,
+                "media_checksum": None,
+                "qa_receipt": None,
+                "approval": None,
+                "published": False,
+            }
+
+        media_checksum = compute_file_sha256(media)
+
+        qa_receipt = self._load_qa_receipt(job_id, self.db)
+        if not qa_receipt:
+            return {
+                "publishable": False,
+                "reason": f"No QA receipt found for job '{job_id}'. All videos must pass QA before publishing.",
+                "job": job,
+                "media_path": str(media),
+                "media_checksum": media_checksum,
+                "qa_receipt": None,
+                "approval": None,
+                "published": False,
+            }
+
+        qa_status = str(qa_receipt.get("status") or "").upper()
+        qa_publish_allowed = bool(qa_receipt.get("publish_allowed", False))
+        if qa_status in (QAStatus.BLOCK.value.upper(), "FAIL") or not qa_publish_allowed:
+            return {
+                "publishable": False,
+                "reason": f"Publishing blocked by QA Gate. QA Status: {qa_status}, Publish Allowed: {qa_publish_allowed}.",
+                "job": job,
+                "media_path": str(media),
+                "media_checksum": media_checksum,
+                "qa_receipt": qa_receipt,
+                "approval": None,
+                "published": False,
+            }
+
+        qa_checksum = qa_receipt.get("media_checksum_sha256")
+        if qa_checksum and media_checksum != qa_checksum:
+            return {
+                "publishable": False,
+                "reason": (
+                    f"Media SHA-256 on disk ({media_checksum[:12]}...) does not match "
+                    f"QA receipt checksum ({qa_checksum[:12]}...). Video may have been modified post-QA."
+                ),
+                "job": job,
+                "media_path": str(media),
+                "media_checksum": media_checksum,
+                "qa_receipt": qa_receipt,
+                "approval": None,
+                "published": False,
+            }
+
+        approval = self.db.get_publish_approval(job_id)
+        if approval is None:
+            return {
+                "publishable": False,
+                "reason": f"No approval record for job '{job_id}'. Explicit operator approval is required before publishing.",
+                "job": job,
+                "media_path": str(media),
+                "media_checksum": media_checksum,
+                "qa_receipt": qa_receipt,
+                "approval": None,
+                "published": False,
+            }
+
+        if approval.get("status") != "approved":
+            return {
+                "publishable": False,
+                "reason": (
+                    f"Publication for job '{job_id}' is {approval.get('status')}. "
+                    f"Explicit operator approval is required before publishing."
+                ),
+                "job": job,
+                "media_path": str(media),
+                "media_checksum": media_checksum,
+                "qa_receipt": qa_receipt,
+                "approval": approval,
+                "published": False,
+            }
+
+        job_channel = (job.get("channel_id") or "default").lower()
+        approval_channel = (approval.get("channel_id") or "default").lower()
+        if approval_channel != job_channel:
+            return {
+                "publishable": False,
+                "reason": f"Approval channel '{approval_channel}' does not match job channel '{job_channel}' for job '{job_id}'.",
+                "job": job,
+                "media_path": str(media),
+                "media_checksum": media_checksum,
+                "qa_receipt": qa_receipt,
+                "approval": approval,
+                "published": False,
+            }
+
+        approval_platform = (approval.get("platform") or "").lower()
+        if approval_platform and approval_platform != str(platform).lower():
+            return {
+                "publishable": False,
+                "reason": f"Approval platform '{approval_platform}' does not match requested platform '{platform}' for job '{job_id}'.",
+                "job": job,
+                "media_path": str(media),
+                "media_checksum": media_checksum,
+                "qa_receipt": qa_receipt,
+                "approval": approval,
+                "published": False,
+            }
+
+        bound_checksum = approval.get("media_checksum_sha256")
+        if bound_checksum and bound_checksum != media_checksum:
+            return {
+                "publishable": False,
+                "reason": (
+                    f"Approved artifact for job '{job_id}' no longer matches current media file "
+                    f"(SHA-256 changed post-approval: {bound_checksum[:12]}... != {media_checksum[:12]}...). "
+                    f"The approval was invalidated; re-approve the new artifact."
+                ),
+                "job": job,
+                "media_path": str(media),
+                "media_checksum": media_checksum,
+                "qa_receipt": qa_receipt,
+                "approval": approval,
+                "published": False,
+            }
+
+        return {
+            "publishable": True,
+            "reason": None,
+            "job": job,
+            "media_path": str(media),
+            "media_checksum": media_checksum,
+            "qa_receipt": qa_receipt,
+            "approval": approval,
+            "published": False,
+        }
+
+    def is_job_publishable(self, job_id: str, platform: str = "youtube") -> bool:
+        """Return True if the job satisfies all publication gates and can be published."""
+        return bool(self.evaluate_job_publishability(job_id, platform=platform)["publishable"])
+
+    def count_publishable_jobs(self, channel_id: Optional[str] = None, platform: str = "youtube") -> int:
+        """Count jobs that satisfy all publication gates and are genuinely publishable."""
+        candidate_jobs = self.db.list_jobs_by_status("APPROVED", limit=1000)
+        if channel_id:
+            candidate_jobs = [j for j in candidate_jobs if j.get("channel_id") == channel_id]
+        count = 0
+        for job in candidate_jobs:
+            if self.is_job_publishable(job["job_id"], platform=platform):
+                count += 1
+        return count
+
+
     def publish_job(
         self,
         job_id: str,

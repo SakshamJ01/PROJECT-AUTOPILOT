@@ -287,7 +287,15 @@ def test_list_ready_seeded(monkeypatch, tmp_path):
     assert item["media_checksum_sha256"]
     assert item["approval_status"] is None
     assert item["published"] is False
-    assert res["summary"]["ready_to_publish"] == 1
+    assert item["publishable"] is False
+    # Not yet approved -> true ready_to_publish count is 0
+    assert res["summary"]["ready_to_publish"] == 0
+
+    # Once approved, publishable becomes True and ready_to_publish count becomes 1
+    h.dispatch("publishing.approve", {"job_id": "job-ready-1"})
+    res_approved = h.dispatch("publishing.list_ready", {"limit": 10})
+    assert res_approved["summary"]["ready_to_publish"] == 1
+    assert res_approved["items"][0]["publishable"] is True
 
 
 # ---------------------------------------------------------------------------

@@ -3472,6 +3472,7 @@ class DBManager:
         counts = {r["status"]: r["n"] for r in approvals}
         job_counts = {r["status"]: r["n"] for r in jobs}
         return {
+            "ready": 0,
             "awaiting_approval": counts.get("pending", 0),
             "approved": counts.get("approved", 0),
             "rejected": counts.get("rejected", 0),

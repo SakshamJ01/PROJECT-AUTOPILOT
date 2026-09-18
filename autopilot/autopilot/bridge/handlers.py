@@ -191,7 +191,7 @@ class BridgeHandlers:
             "autonomy_auto_publish_enabled": effective_auto_publish(self.config, self.db),
             "publishing": {
                 "status": "AVAILABLE",
-                "counts": self.db.get_publish_health_counts(),
+                "counts": self._publish_health()["counts"],
             },
             "channels": self._channel_counts(),
             "providers": self._provider_status(),
@@ -540,7 +540,8 @@ class BridgeHandlers:
             if key in proposal_counts:
                 proposal_counts[key] += 1
 
-        pub_counts = self.db.get_publish_health_counts()
+        pub_health = self._publish_health()
+        pub_counts = pub_health["counts"]
 
         try:
             strategy = StrategyManager(self.db).get_active_strategy()
@@ -1000,10 +1001,13 @@ class BridgeHandlers:
     def _publish_health(self) -> dict[str, Any]:
         from autopilot.cli.main import _learning_health
 
+        engine = self._publishing_engine()
+        ready_to_publish_count = engine.count_publishable_jobs()
         counts = self.db.get_publish_health_counts()
+        counts["ready"] = ready_to_publish_count
         return {
             "counts": counts,
-            "ready_to_publish": self.db.count_jobs_by_status("APPROVED"),
+            "ready_to_publish": ready_to_publish_count,
             "published": counts.get("published", 0),
             "publish_failures": counts.get("publish_failures", 0),
             "awaiting_approval": counts.get("awaiting_approval", 0),
@@ -1036,6 +1040,7 @@ class BridgeHandlers:
         params = params or {}
         limit = self._int_param(params, "limit", default=50, minimum=1, maximum=500)
         channel_id = params.get("channel_id")
+        ready_only = bool(params.get("ready_only", False))
 
         engine = self._publishing_engine()
         ready_jobs = self.db.list_jobs_by_status("APPROVED", limit=limit)
@@ -1054,6 +1059,7 @@ class BridgeHandlers:
                 str(p.get("status")).upper() in ("SUCCESS", "PUBLISHED")
                 for p in publications
             )
+            eval_res = engine.evaluate_job_publishability(job_id)
             items.append(
                 {
                     "job_id": job_id,
@@ -1076,8 +1082,12 @@ class BridgeHandlers:
                     "published_at": (publications[0] if publications else {}).get("created_at"),
                     "idempotency_key": (publications[0] if publications else {}).get("idempotency_key"),
                     "publication_count": len(publications),
+                    "publishable": eval_res["publishable"],
+                    "publishability_reason": eval_res["reason"],
                 }
             )
+        if ready_only:
+            items = [item for item in items if item["publishable"]]
         return {
             "items": items,
             "summary": self._publish_health(),
@@ -1114,6 +1124,8 @@ class BridgeHandlers:
         if qa:
             qa_status = qa.get("status") or ("PASS" if qa.get("publish_allowed") else "BLOCK")
 
+        eval_res = engine.evaluate_job_publishability(job_id)
+
         return {
             "found": job is not None,
             "job_id": job_id,
@@ -1126,16 +1138,10 @@ class BridgeHandlers:
             "approval_history": history,
             "publications": publications,
             "publish_attempts": attempts,
-            "publishable": (
-                job is not None
-                and str(job.get("status")).upper() == "APPROVED"
-                and bool(qa)
-                and bool(qa.get("publish_allowed"))
-                and bool(checksum)
-                and approval is not None
-                and approval.get("status") == "approved"
-            ),
+            "publishable": eval_res["publishable"],
+            "publishability_reason": eval_res["reason"],
         }
+
 
     def on_publishing_approve(self, params: dict | None) -> dict[str, Any]:
         """Create/record an explicit operator approval for a job.

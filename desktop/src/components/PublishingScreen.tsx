@@ -141,10 +141,12 @@ function PublishForm({
   item,
   onSubmit,
   submitting,
+  canPublish,
 }: {
   item: ReadyPublishItem;
   onSubmit: (visibility: PublishVisibility, dryRun: boolean) => void;
   submitting: boolean;
+  canPublish: boolean;
 }) {
   const [visibility, setVisibility] = useState<PublishVisibility>("private");
   const [dryRun, setDryRun] = useState(false);
@@ -187,7 +189,7 @@ function PublishForm({
         <button
           className="primary-btn"
           onClick={() => onSubmit(visibility, dryRun)}
-          disabled={submitting}
+          disabled={submitting || !canPublish}
           aria-label={`Publish ${item.job_id}`}
         >
           {submitting ? "Publishing…" : "Publish"}
@@ -258,8 +260,9 @@ function ReadyRow({ item }: { item: ReadyPublishItem }) {
   };
 
   const approved = item.approval_status === "approved";
-  const canPublish =
-    approved && item.qa_publish_allowed && item.checksum_matches && !item.published;
+  const canPublish = Boolean(
+    item.publishable ?? (approved && item.qa_publish_allowed && item.checksum_matches && !item.published)
+  );
 
   return (
     <>
@@ -295,6 +298,32 @@ function ReadyRow({ item }: { item: ReadyPublishItem }) {
           )}
         </td>
         <td>
+          <StatusBadge
+            label={
+              canPublish
+                ? "READY"
+                : item.published
+                ? "PUBLISHED"
+                : item.approval_status !== "approved"
+                ? (item.approval_status === "rejected" ? "REJECTED" : "AWAITING APPROVAL")
+                : (!item.qa_publish_allowed || !item.qa_status)
+                ? "QA BLOCKED"
+                : !item.checksum_matches
+                ? "CHECKSUM MISMATCH"
+                : "NOT READY"
+            }
+            tone={
+              canPublish
+                ? "ok"
+                : item.published
+                ? "info"
+                : item.approval_status !== "approved"
+                ? "warn"
+                : "bad"
+            }
+          />
+        </td>
+        <td>
           <div className="item-actions">
             <button
               className="ghost-btn"
@@ -326,17 +355,24 @@ function ReadyRow({ item }: { item: ReadyPublishItem }) {
       </tr>
       {expanded && !item.published ? (
         <tr>
-          <td colSpan={8}>
+          <td colSpan={9}>
             <PublishForm
               item={item}
               onSubmit={onPublish}
               submitting={publish.isPending}
+              canPublish={canPublish}
             />
             {!canPublish && !item.published ? (
               <div className="banner banner-warn small" style={{ margin: "0 14px 10px" }}>
-                {approved
-                  ? "Approved, but QA, checksum or media validation is not satisfied. The backend enforces every gate."
-                  : "Explicit operator approval is required before publishing."}
+                {!item.qa_publish_allowed || !item.qa_status
+                  ? "QA receipt is missing or blocked. Video must pass QA before it can be published."
+                  : !approved
+                  ? "Explicit operator approval is required before publishing."
+                  : !item.checksum_matches
+                  ? "Artifact checksum mismatch. Media artifact changed post-approval."
+                  : item.publishability_reason
+                  ? `Not publishable: ${item.publishability_reason}`
+                  : "Not publishable. All backend gates must be satisfied."}
               </div>
             ) : null}
             {confirmPublish ? (
@@ -349,7 +385,7 @@ function ReadyRow({ item }: { item: ReadyPublishItem }) {
       ) : null}
       {publish.data ? (
         <tr>
-          <td colSpan={8}>
+          <td colSpan={9}>
             <div
               className={
                 publish.data.success ? "banner banner-info" : "banner banner-warn"
@@ -370,7 +406,7 @@ function ReadyRow({ item }: { item: ReadyPublishItem }) {
       ) : null}
       {lastError ? (
         <tr>
-          <td colSpan={8}>
+          <td colSpan={9}>
             <div className="banner banner-warn" style={{ margin: "0 14px 10px" }}>
               {lastError}
             </div>
@@ -381,18 +417,31 @@ function ReadyRow({ item }: { item: ReadyPublishItem }) {
   );
 }
 
+
 export default function PublishingScreen() {
   const { data: status, isLoading: statusLoading } = usePublishingStatusQuery();
   const { data, isLoading, isError } = useReadyListQuery();
   const { data: auth } = useYouTubeAuthQuery();
   const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState<"all" | "ready" | "awaiting">("all");
 
-  const items = (data?.items ?? []).filter(
-    (i) =>
+  const allItems = data?.items ?? [];
+  const items = allItems.filter((i) => {
+    const matchesSearch =
       !search ||
       i.job_id.toLowerCase().includes(search.toLowerCase()) ||
-      (i.topic ?? "").toLowerCase().includes(search.toLowerCase()),
-  );
+      (i.topic ?? "").toLowerCase().includes(search.toLowerCase());
+    if (!matchesSearch) return false;
+
+    const approved = i.approval_status === "approved";
+    const canPublish = Boolean(
+      i.publishable ?? (approved && i.qa_publish_allowed && i.checksum_matches && !i.published)
+    );
+
+    if (filter === "ready") return canPublish;
+    if (filter === "awaiting") return i.approval_status !== "approved" && !i.published;
+    return true;
+  });
 
   if (statusLoading || isLoading) {
     return (
@@ -470,8 +519,36 @@ export default function PublishingScreen() {
       </div>
 
       <div className="card">
-        <div className="card-header">
-          <span>Ready to publish</span>
+        <div className="card-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "10px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
+            <span>Ready to publish</span>
+            <div className="item-actions" role="tablist" aria-label="Filter candidate jobs">
+              <button
+                className={filter === "all" ? "primary-btn" : "ghost-btn"}
+                style={{ padding: "3px 8px", fontSize: "12px" }}
+                onClick={() => setFilter("all")}
+                type="button"
+              >
+                All ({allItems.length})
+              </button>
+              <button
+                className={filter === "ready" ? "primary-btn" : "ghost-btn"}
+                style={{ padding: "3px 8px", fontSize: "12px" }}
+                onClick={() => setFilter("ready")}
+                type="button"
+              >
+                Ready ({summary.ready_to_publish})
+              </button>
+              <button
+                className={filter === "awaiting" ? "primary-btn" : "ghost-btn"}
+                style={{ padding: "3px 8px", fontSize: "12px" }}
+                onClick={() => setFilter("awaiting")}
+                type="button"
+              >
+                Awaiting approval ({summary.awaiting_approval})
+              </button>
+            </div>
+          </div>
           <input
             className="text-input"
             type="text"
@@ -498,9 +575,11 @@ export default function PublishingScreen() {
                 <th>Approval</th>
                 <th>Checksum</th>
                 <th>Publication</th>
+                <th>Readiness</th>
                 <th>Actions</th>
               </tr>
             </thead>
+
             <tbody>
               {items.map((i) => (
                 <ReadyRow key={i.job_id} item={i} />
