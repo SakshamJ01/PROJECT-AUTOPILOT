@@ -43,6 +43,11 @@ class BridgeClient:
         env = dict(os.environ)
         env["AUTOPILOT_DB_PATH"] = str(db_path)
         env["AUTOPILOT_ANALYTICS_DEFAULT_PROVIDER"] = "mock"
+        # Force an unauthenticated backend so switch tests are deterministic:
+        # a non-existent YT token path guarantees the auth probe fails closed.
+        env["AUTOPILOT_YOUTUBE_TOKEN_PATH"] = str(_REPO_ROOT / "credentials" / "no-such-token-m4.json")
+        env["YOUTUBE_TOKEN_PATH"] = str(_REPO_ROOT / "credentials" / "no-such-token-m4.json")
+        env["YOUTUBE_ACCESS_TOKEN"] = ""
         self.proc = subprocess.Popen(
             [sys.executable, "-u", "-m", "autopilot.bridge"],
             stdin=subprocess.PIPE,
@@ -734,13 +739,37 @@ def test_autonomy_publish_status_no_secrets(client):
     assert _collect_sensitive(frame) == []
 
 
-def test_autonomy_publish_status_read_only(client):
-    """There must be no set/mutate method for the switch on the bridge."""
+def test_autonomy_publish_switch_is_controlled(client):
+    """M6: the switch surface is backend-controlled (enable/disable methods)."""
     from autopilot.bridge.handlers import BridgeHandlers
 
     names = BridgeHandlers.METHOD_NAMES
-    assert not any("publish_status_set" in n or "publish_enable" in n for n in names)
     assert "autonomy.publish_status" in names
+    assert "autonomy.publish_enable" in names
+    assert "autonomy.publish_disable" in names
+
+    # Default is OFF. Enable fails CLOSED (no auth in the CI child process)
+    # and leaves the switch untouched; disable is an always-working,
+    # idempotent kill switch.
+    res = _result(client.call("autonomy.publish_enable"))
+    assert res["ok"] is False
+    assert res["changed"] is False
+    assert res["enabled"] is False
+    assert res["state"] == "DISABLED"
+    assert res["reason"]
+    assert res["prerequisites"]["ok"] is False
+    assert res["prerequisites"]["failed"]
+
+    status = _result(client.call("autonomy.publish_status"))
+    assert status["enabled"] is False
+
+    res = _result(client.call("autonomy.publish_disable"))
+    assert res["ok"] is True
+    assert res["changed"] is False
+    assert res["enabled"] is False
+    res2 = _result(client.call("autonomy.publish_disable"))
+    assert res2["ok"] is True
+    assert res2["changed"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -757,6 +786,8 @@ def test_autonomy_publish_status_read_only(client):
         "analytics.report",
         "strategy.status",
         "autonomy.publish_status",
+        "autonomy.publish_enable",
+        "autonomy.publish_disable",
     ],
 )
 def test_no_secret_leakage(client, method):

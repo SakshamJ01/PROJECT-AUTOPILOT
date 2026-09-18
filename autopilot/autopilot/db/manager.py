@@ -3479,6 +3479,32 @@ class DBManager:
             "publish_failures": job_counts.get("FAILED_PUBLISH", 0),
         }
 
+    def get_config_value(self, key: str) -> Optional[str]:
+        """Read a persisted runtime configuration value (config table).
+
+        Returns None when the key is absent (no row yet), so callers can fall
+        back to the env/default configuration. Never stores or returns secrets.
+        """
+        try:
+            with self._connect() as conn:
+                row = conn.execute("SELECT value FROM config WHERE key = ?", (key,)).fetchone()
+                return str(row["value"]) if row else None
+        except Exception:  # noqa: BLE001 — missing/migrating schema must not crash readers
+            return None
+
+    def set_config_value(self, key: str, value: str) -> None:
+        """Persist a runtime configuration override in the config table.
+
+        Idempotent upsert; the row's ``updated_at`` is refreshed so callers can
+        report when the value was last changed by the backend.
+        """
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO config (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP",
+                (key, value),
+            )
+
 
 # Alias for backward compatibility
 DatabaseManager = DBManager

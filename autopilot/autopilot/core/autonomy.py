@@ -35,6 +35,7 @@ from autopilot.core.ideation import IdeationEngine, DiversityFilter
 from autopilot.core.topic_scoring import TopicScorer
 from autopilot.core.feedback import FeedbackAnalyzer, StrategyManager
 from autopilot.core.channel import ChannelManager
+from autopilot.core.auto_publish import effective_auto_publish
 
 
 class PolicyGate:
@@ -996,7 +997,8 @@ class AutonomyEngine:
                 # into `autonomy_auto_publish` AND a previously approved approval
                 # record already exists (i.e. this run merely executes it).
                 pre_auth = self.db.get_publish_approval(job_id)
-                if self.config.autonomy_auto_publish and pre_auth and pre_auth.get("status") == "approved":
+                switch_on = effective_auto_publish(self.config, self.db)
+                if switch_on and pre_auth and pre_auth.get("status") == "approved":
                     from autopilot.core.publisher import PublishingEngine
                     pe = PublishingEngine(self.config, self.db)
                     pub_result = pe.publish_job(
@@ -1005,6 +1007,7 @@ class AutonomyEngine:
                         visibility=publish_visibility,
                         dry_run=dry_run,
                         require_approval=True,
+                        autonomous=True,
                     )
                     approval_status = "auto_approved"
                 else:

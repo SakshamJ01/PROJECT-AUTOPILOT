@@ -26,6 +26,12 @@ from autopilot.bridge.protocol import (
 from autopilot.core.config import Config
 from autopilot.core.publisher import compute_file_sha256
 from autopilot.db.manager import DBManager
+from autopilot.core.auto_publish import (
+    auto_publish_status,
+    effective_auto_publish,
+    enable_auto_publish,
+    disable_auto_publish,
+)
 
 
 # Canonical queue stage ordering for timeline display.
@@ -80,8 +86,10 @@ class BridgeHandlers:
         "strategy.status",
         "strategy.show",
         "strategy.learn",
-        # M4 — autonomous public publishing switch (read-only)
+        # M4/strategy — autonomous public publishing switch (M6: controlled)
         "autonomy.publish_status",
+        "autonomy.publish_enable",
+        "autonomy.publish_disable",
         "system.shutdown",
         "system.restart",
     )
@@ -180,7 +188,7 @@ class BridgeHandlers:
                 "max_ideas_per_cycle": self.config.autonomy_max_ideas_per_cycle,
                 "max_daily_jobs": self.config.autonomy_max_daily_jobs,
             },
-            "autonomy_auto_publish_enabled": bool(self.config.autonomy_auto_publish),
+            "autonomy_auto_publish_enabled": effective_auto_publish(self.config, self.db),
             "publishing": {
                 "status": "AVAILABLE",
                 "counts": self.db.get_publish_health_counts(),
@@ -1004,9 +1012,8 @@ class BridgeHandlers:
             "learning": _learning_health(self.db),
             "youtube": self._youtube_auth_status(),
             "default_visibility": self.config.publish_default_visibility,
-            # M4 hard boundary: autonomous public publishing is OFF by default
-            # and only the backend can flip it. This surface is read-only.
-            "autonomy_auto_publish_enabled": bool(self.config.autonomy_auto_publish),
+            # M6: the authoritative switch state (persisted override, else config).
+            "autonomy_auto_publish_enabled": effective_auto_publish(self.config, self.db),
         }
 
     def on_publishing_status(self, params: dict | None) -> dict[str, Any]:
@@ -1508,41 +1515,33 @@ class BridgeHandlers:
         return summary.model_dump(mode="json")
 
     # ------------------------------------------------------------------
-    # M4 — autonomous public publishing switch (read-only)
+    # M4/M6 — autonomous public publishing switch (backend-controlled)
     # ------------------------------------------------------------------
     def on_autonomy_publish_status(self, params: dict | None) -> dict[str, Any]:
         """Read-only status of the autonomous public publishing switch.
 
-        The backend is authoritative. There is no desktop mutation path: the
-        switch reflects the backend configuration only, and defaults to OFF.
+        The backend is authoritative. Reflects the persisted switch (or the
+        backend configuration before any explicit enable/disable), defaulting
+        to OFF. Never exposes tokens, OAuth paths or secrets.
         """
-        enabled = bool(self.config.autonomy_auto_publish)
-        return {
-            "enabled": enabled,
-            "state": "ENABLED" if enabled else "DISABLED",
-            "label": (
-                "AUTONOMOUS PUBLIC PUBLISHING ENABLED"
-                if enabled
-                else "AUTONOMOUS PUBLIC PUBLISHING DISABLED"
-            ),
-            "default": False,
-            "controlled_by": "backend",
-            "guardrails": [
-                "QA PASS required",
-                "artifact + checksum validation",
-                "supported target",
-                "authenticated account",
-                "idempotency + duplicate prevention",
-                "channel/daily limits + cooldown",
-                "policy gate + visibility policy",
-                "failure handling + kill switch",
-            ],
-            "boundary": (
-                "Autonomous public publishing is disabled by default and can only "
-                "be enabled through the backend configuration. This control "
-                "surface never flips the switch and never bypasses approval."
-            ),
-        }
+        return auto_publish_status(self.config, self.db)
+
+    def on_autonomy_publish_enable(self, params: dict | None) -> dict[str, Any]:
+        """Enable autonomous public publishing (fail-closed).
+
+        Every publishing/QA/approval/idempotency/limits/cooldown prerequisite
+        must verify first; otherwise the switch stays untouched and the result
+        names the failed prerequisite(s). Idempotent when already enabled.
+        """
+        return enable_auto_publish(self.config, self.db)
+
+    def on_autonomy_publish_disable(self, params: dict | None) -> dict[str, Any]:
+        """Disable autonomous public publishing — the kill switch.
+
+        Immediate, persistent, idempotent; stops any further autonomous public
+        publication at the final publish boundary.
+        """
+        return disable_auto_publish(self.config, self.db)
 
     # ------------------------------------------------------------------
     # M4 — helpers

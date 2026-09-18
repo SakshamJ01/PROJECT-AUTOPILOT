@@ -21,6 +21,7 @@ from autopilot.core.artifacts import job_artifact_dir, publish_path
 from autopilot.core.state_machine import WorkflowState
 from autopilot.db.manager import DBManager
 from autopilot.providers.contracts import REGISTRY, PublisherProvider
+from autopilot.core.auto_publish import effective_auto_publish
 from autopilot.core.contracts import (
     PublishRequest, PublishResult, PublishStatus,
     PublicationReceipt, PublishAttempt, PublishError,
@@ -268,6 +269,7 @@ class PublishingEngine:
         provider: Optional[PublisherProvider] = None,
         db_manager: Optional[DBManager] = None,
         require_approval: bool = False,
+        autonomous: bool = False,
     ) -> PublishResult:
         """Publish a QA-verified rendered job to the target platform."""
         db = db_manager or self.db
@@ -529,6 +531,36 @@ class PublishingEngine:
                     success=False,
                     status=PublishStatus.BLOCKED_APPROVAL,
                     error=gate_error,
+                    attempts=[],
+                )
+
+        # 7.6 AUTONOMY SWITCH FINAL BOUNDARY RECHECK.
+        # This is the last gate before any automated public publication. It is
+        # authoritative (reads the persisted switch, never an earlier-captured
+        # value) and scoped to autonomous PUBLIC cals only, so human/bridge
+        # publishes and dry runs are untouched.
+        if autonomous and not is_dry_run and target_visibility == PublishVisibility.PUBLIC:
+            switch_on = effective_auto_publish(self.config, db)
+            if not switch_on:
+                switch_error = PublishError(
+                    error_code="AUTONOMY_SWITCH_OFF",
+                    message=(
+                        "Autonomous public publishing was disabled (kill switch) "
+                        "before publication; approval remains intact."
+                    ),
+                    retryable=False,
+                )
+                db.record_error(
+                    job_id,
+                    stage="publish",
+                    error_type="AUTONOMY_SWITCH_OFF",
+                    message=switch_error.message,
+                    details={"error_code": switch_error.error_code, "platform": platform},
+                )
+                return PublishResult(
+                    success=False,
+                    status=PublishStatus.BLOCKED_AUTONOMY_SWITCH,
+                    error=switch_error,
                     attempts=[],
                 )
 

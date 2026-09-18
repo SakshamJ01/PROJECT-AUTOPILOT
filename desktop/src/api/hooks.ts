@@ -13,6 +13,7 @@ import type {
   AnalyticsSyncParams,
   ApprovalActionResult,
   AutonomyPublishStatus,
+  AutonomyPublishSwitchResult,
   AutonomyInspectProposal,
   AutonomyInspectRun,
   AutonomyProposal,
@@ -603,7 +604,7 @@ export function useStrategyLearnMutation() {
 }
 
 // =====================================================================
-// M4 — Autonomous public publishing switch (read-only)
+// M4 — Autonomous public publishing switch (M6: backend-controlled)
 // =====================================================================
 
 export function useAutonomyPublishStatusQuery() {
@@ -612,5 +613,37 @@ export function useAutonomyPublishStatusQuery() {
     queryFn: () => engineCall<AutonomyPublishStatus>("autonomy.publish_status"),
     refetchInterval: POLL.systemMs,
     retry: false,
+  });
+}
+
+const AUTONOMY_SWITCH_INVALIDATE = [
+  ["engine", "autonomy.publish_status"],
+  ["engine", "publishing.status"],
+  ["engine", "health.get"],
+] as const;
+
+export function useAutonomyPublishEnableMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => engineCall<AutonomyPublishSwitchResult>("autonomy.publish_enable"),
+    onSuccess: (res) => {
+      if (res.ok) {
+        queryClient.invalidateQueries({ queryKey: ["engine", "autonomy.publish_status"] });
+        queryClient.invalidateQueries({ queryKey: ["engine", "publishing.status"] });
+        queryClient.invalidateQueries({ queryKey: ["engine", "health.get"] });
+      }
+    },
+  });
+}
+
+export function useAutonomyPublishDisableMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => engineCall<AutonomyPublishSwitchResult>("autonomy.publish_disable"),
+    onSuccess: () => {
+      for (const key of AUTONOMY_SWITCH_INVALIDATE) {
+        queryClient.invalidateQueries({ queryKey: [...key] });
+      }
+    },
   });
 }

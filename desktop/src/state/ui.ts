@@ -26,7 +26,6 @@ interface UiState {
   severityFilter: SeverityFilter;
   logSearch: string;
   logAutoRefresh: boolean;
-  autonomyEnabled: boolean;
   notifications: Record<
     string,
     {
@@ -44,7 +43,6 @@ interface UiState {
   setSeverityFilter: (filter: SeverityFilter) => void;
   setLogSearch: (search: string) => void;
   setLogAutoRefresh: (on: boolean) => void;
-  setAutonomyEnabled: (enabled: boolean) => void;
   addNotification: (
     title: string,
     description: string,
@@ -61,7 +59,6 @@ export const useUiStore = create<UiState>((set, get) => ({
   severityFilter: "all",
   logSearch: "",
   logAutoRefresh: true,
-  autonomyEnabled: false,
   notifications: {},
 
   setPage: (page) => set({ page }),
@@ -70,7 +67,6 @@ export const useUiStore = create<UiState>((set, get) => ({
   setSeverityFilter: (filter) => set({ severityFilter: filter }),
   setLogSearch: (search) => set({ logSearch: search }),
   setLogAutoRefresh: (on) => set({ logAutoRefresh: on }),
-  setAutonomyEnabled: (enabled) => set({ autonomyEnabled: enabled }),
 
   addNotification: (title: string, description: string, severity?: SeverityFilter) => {
     const id = `${Date.now()}-${Math.random().toString(36).substring(2, 10)}`;

@@ -7,6 +7,7 @@ import {
   useReadyListQuery,
   useYouTubeAuthQuery,
   useAutonomyPublishStatusQuery,
+  useAutonomyPublishDisableMutation,
 } from "../api/hooks";
 import StatusBadge from "./StatusBadge";
 import type {
@@ -24,11 +25,17 @@ function toneForApproval(status: string | null): "ok" | "warn" | "bad" | "info" 
 
 function KillSwitchCard() {
   const { data, isLoading, isError } = useAutonomyPublishStatusQuery();
+  const disable = useAutonomyPublishDisableMutation();
+  const [confirming, setConfirming] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   if (isLoading) return null;
   if (isError || !data) return null;
-  const disabled = !data.enabled;
+  const on = data.enabled;
   return (
-    <div className={disabled ? "banner banner-warn" : "banner banner-bad"} role="status">
+    <div
+      className={on ? "banner banner-bad" : "banner banner-warn"}
+      role="status"
+    >
       <strong>{data.label}</strong>
       <div className="muted small" style={{ marginTop: "4px" }}>
         {data.boundary}
@@ -36,6 +43,56 @@ function KillSwitchCard() {
       <div className="muted small" style={{ marginTop: "6px" }}>
         Guardrails: {data.guardrails.join(" · ")}
       </div>
+      {on ? (
+        confirming ? (
+          <div style={{ marginTop: "8px" }}>
+            <p className="small" style={{ margin: 0 }}>
+              Kill switch — stops any further autonomous public publication
+              immediately. Existing approvals stay intact.
+            </p>
+            <div className="item-actions" style={{ marginTop: "8px" }}>
+              <button
+                className="danger-btn"
+                disabled={disable.isPending}
+                onClick={() => {
+                  setError(null);
+                  disable.mutate(undefined, {
+                    onSuccess: (res) => {
+                      if (!res.ok) setError(res.reason ?? "Cannot disable right now.");
+                      setConfirming(false);
+                    },
+                  });
+                }}
+              >
+                {disable.isPending ? "Disabling…" : "Confirm: disable autonomous publishing"}
+              </button>
+              <button
+                className="ghost-btn"
+                disabled={disable.isPending}
+                onClick={() => setConfirming(false)}
+              >
+                Cancel
+              </button>
+            </div>
+            {error ? (
+              <div className="muted small" style={{ marginTop: "6px" }}>
+                {error}
+              </div>
+            ) : null}
+          </div>
+        ) : (
+          <button
+            className="danger-btn"
+            style={{ marginTop: "8px" }}
+            onClick={() => {
+              setError(null);
+              setConfirming(true);
+            }}
+          >
+            Disable now (kill switch)
+          </button>
+        )
+      ) : null}
     </div>
   );
 }

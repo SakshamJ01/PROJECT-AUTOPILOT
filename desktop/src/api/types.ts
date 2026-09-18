@@ -764,8 +764,21 @@ export interface StrategyLearnResult {
 }
 
 // =====================================================================
-// M4 — Autonomous public publishing switch (read-only)
+// M4 — Autonomous public publishing switch (M6: backend-controlled)
 // =====================================================================
+
+export interface AutonomyPublishPrerequisite {
+  check: string;
+  ok: boolean;
+  message: string;
+}
+
+export interface AutonomyPublishPrereqs {
+  ok: boolean;
+  passed: string[];
+  failed: string[];
+  checks: AutonomyPublishPrerequisite[];
+}
 
 export interface AutonomyPublishStatus {
   enabled: boolean;
@@ -775,4 +788,22 @@ export interface AutonomyPublishStatus {
   controlled_by: string;
   guardrails: string[];
   boundary: string;
+  controlled_at: string | null;
+  timestamp: string;
+}
+
+export interface AutonomyPublishSwitchResult {
+  ok: boolean;
+  changed: boolean;
+  enabled: boolean;
+  state: "ENABLED" | "DISABLED";
+  label: string;
+  default: boolean;
+  controlled_by: string;
+  guardrails: string[];
+  boundary: string;
+  reason?: string;
+  prerequisites?: AutonomyPublishPrereqs;
+  controlled_at: string | null;
+  timestamp: string;
 }

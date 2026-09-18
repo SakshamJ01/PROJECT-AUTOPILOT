@@ -67,6 +67,18 @@ const jobInspect = {
   publications: [],
 };
 
+const switchStatus = {
+  enabled: false,
+  state: "DISABLED",
+  label: "AUTONOMOUS PUBLIC PUBLISHING DISABLED",
+  default: false,
+  controlled_by: "backend",
+  guardrails: ["QA PASS required"],
+  boundary: "Autonomous public publishing is disabled by default.",
+  controlled_at: null,
+  timestamp: "2026-09-18T00:00:00",
+};
+
 function renderDashboard() {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: 0 } },
@@ -91,6 +103,7 @@ describe("Dashboard polls the engine bridge", () => {
     (invoke as unknown as Mock).mockImplementation((_cmd: string, args: { method: string }) => {
       if (args.method === "health.get") return Promise.resolve(health);
       if (args.method === "queue.list") return Promise.resolve(queue);
+      if (args.method === "autonomy.publish_status") return Promise.resolve(switchStatus);
       return Promise.reject(new Error(`unexpected call ${args.method}`));
     });
 
@@ -118,6 +131,7 @@ describe("Dashboard polls the engine bridge", () => {
       if (args.method === "health.get") return Promise.resolve(health);
       if (args.method === "queue.list") return Promise.resolve(queue);
       if (args.method === "job.inspect") return Promise.resolve(jobInspect);
+      if (args.method === "autonomy.publish_status") return Promise.resolve(switchStatus);
       return Promise.reject(new Error(`unexpected call ${args.method}`));
     });
 

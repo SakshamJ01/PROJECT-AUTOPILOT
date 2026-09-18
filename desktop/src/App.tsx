@@ -10,7 +10,7 @@ import AnalyticsScreen from "./components/AnalyticsScreen";
 import StrategyScreen from "./components/StrategyScreen";
 import SettingsScreen from "./components/SettingsScreen";
 import JobDrawer from "./components/JobDrawer";
-import { useEngineStatusQuery } from "./api/hooks";
+import { useEngineStatusQuery, useAutonomyPublishStatusQuery } from "./api/hooks";
 import { useUiStore } from "./state/ui";
 import type { Page } from "./state/ui";
 
@@ -41,8 +41,12 @@ const SETTINGS_SECTIONS: ReadonlySet<Page> = new Set<Page>([
 export default function App() {
   const page = useUiStore((s) => s.page);
   const setPage = useUiStore((s) => s.setPage);
-  const autonomyEnabled = useUiStore((s) => s.autonomyEnabled);
   const { data: engineStatus, isError } = useEngineStatusQuery();
+  const { data: autonomyPublish } = useAutonomyPublishStatusQuery();
+
+  // The header badge derives from the backend-controlled switch, never from
+  // client state. Unknown/unreachable is treated as OFF (fail-closed display).
+  const autonomyPublishOn = autonomyPublish?.enabled === true;
 
   const reachable = !isError && engineStatus?.running !== false;
 
@@ -65,10 +69,14 @@ export default function App() {
           label={reachable ? "engine online" : "engine offline"}
           tone={reachable ? "ok" : "bad"}
         />
-        {/* Autonomy publish status badge — header bar (read-only display) */}
+        {/* Autonomy publish status badge — backend-derived display */}
         <StatusBadge
-          label={autonomyEnabled ? "AUTONOMOUS PUBLISHING: ON" : "AUTONOMOUS PUBLISHING: OFF"}
-          tone={autonomyEnabled ? "warn" : "ok"}
+          label={
+            autonomyPublishOn
+              ? "AUTONOMOUS PUBLISHING: ON"
+              : "AUTONOMOUS PUBLISHING: OFF"
+          }
+          tone={autonomyPublishOn ? "warn" : "ok"}
         />
       </header>
       <main className="app-main">

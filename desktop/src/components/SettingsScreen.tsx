@@ -1,6 +1,12 @@
+import { useState } from "react";
 import { useUiStore } from "../state/ui";
-import { useAutonomyPublishStatusQuery } from "../api/hooks";
+import {
+  useAutonomyPublishStatusQuery,
+  useAutonomyPublishEnableMutation,
+  useAutonomyPublishDisableMutation,
+} from "../api/hooks";
 import StatusBadge from "./StatusBadge";
+import type { AutonomyPublishSwitchResult } from "../api/types";
 
 const SETTINGS_SECTIONS = [
   { id: "general", label: "General" },
@@ -14,6 +20,13 @@ const SETTINGS_SECTIONS = [
 
 function AutonomousPublishingCard() {
   const { data, isLoading, isError } = useAutonomyPublishStatusQuery();
+  const enable = useAutonomyPublishEnableMutation();
+  const disable = useAutonomyPublishDisableMutation();
+  const [confirmAction, setConfirmAction] = useState<null | "enable" | "disable">(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const on = data?.enabled === true;
+  const enforcing = enable.isPending || disable.isPending;
 
   if (isLoading) {
     return (
@@ -26,8 +39,6 @@ function AutonomousPublishingCard() {
     );
   }
 
-  // The bridge exposes no mutation method for this switch, so there is nothing
-  // to act on here — the status is displayed exactly as the backend reports it.
   if (isError || !data) {
     return (
       <div className="card">
@@ -35,20 +46,47 @@ function AutonomousPublishingCard() {
           <span>Autonomous Public Publishing</span>
         </div>
         <div className="card-body muted">
-          Autonomous publishing status unavailable. The backend is authoritative;
-          the desktop never flips this switch.
+          Autonomous publishing status unavailable. Start the backend engine and
+          retry; this control never changes the switch itself.
         </div>
       </div>
     );
   }
+
+  const finalize = (res: AutonomyPublishSwitchResult | undefined) => {
+    if (!res?.ok) {
+      const failed = res?.prerequisites?.failed;
+      if (failed && failed.length > 0) {
+        setActionError(
+          `Cannot enable autonomous public publishing. Prerequisite(s) not met: ${failed.join(", ")}.`,
+        );
+      } else {
+        setActionError(
+          (res?.reason ?? undefined) ||
+            (confirmAction === "disable"
+              ? "Cannot disable the switch right now."
+              : "Cannot enable the switch right now."),
+        );
+      }
+    }
+    setConfirmAction(null);
+  };
+
+  const runAction = () => {
+    if (confirmAction === "enable") {
+      enable.mutate(undefined, { onSuccess: finalize });
+    } else if (confirmAction === "disable") {
+      disable.mutate(undefined, { onSuccess: finalize });
+    }
+  };
 
   return (
     <div className="card">
       <div className="card-header">
         <span>Autonomous Public Publishing</span>
         <StatusBadge
-          label={data.state === "ENABLED" ? "ENABLED" : "DISABLED"}
-          tone={data.enabled ? "bad" : "ok"}
+          label={on ? "ENABLED" : "DISABLED"}
+          tone={on ? "bad" : "ok"}
         />
       </div>
       <div className="card-body">
@@ -60,13 +98,93 @@ function AutonomousPublishingCard() {
         </p>
         <p className="muted small" style={{ marginTop: "6px" }}>
           Controlled by: {data.controlled_by} · default {data.default ? "ON" : "OFF"}
+          {data.controlled_at ? ` · last changed ${data.controlled_at}` : ""}
         </p>
         <p className="muted small" style={{ marginTop: "6px" }}>
           Guardrails: {data.guardrails.join(" · ")}
         </p>
-        <div className="banner banner-warn" style={{ marginTop: "10px" }}>
-          Read-only from the desktop. The bridge exposes no disable/enable or
-          kill-switch mutation for this switch, so this panel never changes it.
+
+        {actionError ? (
+          <div className="banner banner-warn" style={{ marginTop: "10px" }}>
+            {actionError}
+            {enable.data?.prerequisites?.failed ? (
+              <ul style={{ margin: "6px 0 0 0", paddingLeft: "18px" }}>
+                {enable.data.prerequisites.failed.map((name) => (
+                  <li key={name} className="small muted">
+                    {name}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+          </div>
+        ) : null}
+
+        <div style={{ marginTop: "12px" }}>
+          {on ? (
+            confirmAction === "disable" ? (
+              <div className="banner banner-warn" style={{ marginTop: "6px" }}>
+                <p style={{ margin: 0 }}>
+                  Disabling is the kill switch: it stops any further autonomous
+                  public publication immediately, at the final publish boundary.
+                  Approvals already granted stay intact.
+                </p>
+                <div className="item-actions" style={{ marginTop: "8px" }}>
+                  <button
+                    className="danger-btn"
+                    disabled={enforcing}
+                    onClick={runAction}
+                  >
+                    {enforcing ? "Disabling…" : "Confirm: disable autonomous publishing"}
+                  </button>
+                  <button className="ghost-btn" disabled={enforcing} onClick={() => setConfirmAction(null)}>
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                className="danger-btn"
+                disabled={enforcing}
+                onClick={() => {
+                  setActionError(null);
+                  setConfirmAction("disable");
+                }}
+              >
+                {enforcing ? "Working…" : "Disable (kill switch)"}
+              </button>
+            )
+          ) : confirmAction === "enable" ? (
+            <div className="banner banner-warn" style={{ marginTop: "6px" }}>
+              <p style={{ margin: 0 }}>
+                Enabling validates every publishing prerequisite first and fails
+                closed otherwise. The backend is authoritative; this confirmation
+                does not change state until the backend succeeds.
+              </p>
+              <div className="item-actions" style={{ marginTop: "8px" }}>
+                <button
+                  className="primary-btn"
+                  disabled={enforcing}
+                  onClick={runAction}
+                >
+                  {enforcing ? "Enabling…" : "Confirm: enable autonomous public publishing"}
+                </button>
+                <button className="ghost-btn" disabled={enforcing} onClick={() => setConfirmAction(null)}>
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              className="primary-btn"
+              disabled={enforcing}
+              onClick={() => {
+                setActionError(null);
+                setConfirmAction("enable");
+              }}
+            >
+              {enforcing ? "Working…" : "Enable autonomous public publishing"}
+            </button>
+          )}
         </div>
       </div>
     </div>

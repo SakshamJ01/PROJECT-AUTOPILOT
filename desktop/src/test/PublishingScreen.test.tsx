@@ -328,4 +328,71 @@ describe("Publishing screen", () => {
       expect(screen.getByText(/Public visibility requires explicit operator approval/)).toBeInTheDocument(),
     );
   });
+
+  it("kill switch disable requires confirmation and calls the backend", async () => {
+    const item = makeReadyItem();
+    let current = {
+      enabled: true,
+      state: "ENABLED",
+      label: "AUTONOMOUS PUBLIC PUBLISHING ENABLED",
+      default: false,
+      controlled_by: "backend",
+      guardrails: ["QA PASS required"],
+      boundary: "Autonomous public publishing is disabled by default.",
+      controlled_at: "2026-09-18T01:00:00",
+      timestamp: "2026-09-18T01:00:01",
+    };
+    (invoke as unknown as Mock).mockImplementation((_cmd: string, args: { method: string }) => {
+      if (args.method === "publishing.status")
+        return Promise.resolve({ ...baseSummary, status: "AVAILABLE", publish_boundary: "x" });
+      if (args.method === "publishing.list_ready")
+        return Promise.resolve({ items: [item], summary: baseSummary });
+      if (args.method === "youtube.auth_status") return Promise.resolve(authStatus);
+      if (args.method === "autonomy.publish_status") return Promise.resolve(current);
+      if (args.method === "autonomy.publish_disable") {
+        current = {
+          ...switchStatus,
+          controlled_at: "2026-09-18T02:00:00",
+          timestamp: "2026-09-18T02:00:01",
+        };
+        return Promise.resolve({
+          ok: true,
+          changed: true,
+          enabled: false,
+          state: "DISABLED",
+          label: "AUTONOMOUS PUBLIC PUBLISHING DISABLED",
+          default: false,
+          controlled_by: "backend",
+          guardrails: [],
+          boundary: "",
+          controlled_at: "2026-09-18T02:00:00",
+          timestamp: "2026-09-18T02:00:01",
+        });
+      }
+      return Promise.reject(new Error(`unexpected ${args.method}`));
+    });
+
+    renderScreen();
+
+    await waitFor(() =>
+      expect(screen.getByText(/AUTONOMOUS PUBLIC PUBLISHING ENABLED/)).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /kill switch/i }));
+    expect(invoke).not.toHaveBeenCalledWith(
+      "engine_call",
+      expect.objectContaining({ method: "autonomy.publish_disable" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Confirm: disable autonomous publishing/ }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "engine_call",
+        expect.objectContaining({ method: "autonomy.publish_disable" }),
+      );
+    });
+    await waitFor(() =>
+      expect(screen.getByText(/AUTONOMOUS PUBLIC PUBLISHING DISABLED/)).toBeInTheDocument(),
+    );
+    expect(screen.queryByRole("button", { name: /kill switch/i })).not.toBeInTheDocument();
+  });
 });
