@@ -8,6 +8,7 @@ import SchedulerScreen from "./components/SchedulerScreen";
 import PublishingScreen from "./components/PublishingScreen";
 import AnalyticsScreen from "./components/AnalyticsScreen";
 import StrategyScreen from "./components/StrategyScreen";
+import SettingsScreen from "./components/SettingsScreen";
 import JobDrawer from "./components/JobDrawer";
 import { useEngineStatusQuery } from "./api/hooks";
 import { useUiStore } from "./state/ui";
@@ -22,12 +23,25 @@ const PAGES: Array<{ id: Page; label: string }> = [
   { id: "publishing", label: "Publishing" },
   { id: "analytics", label: "Analytics" },
   { id: "strategy", label: "Strategy" },
+  { id: "settings", label: "Settings" },
   { id: "system", label: "System & Logs" },
 ];
+
+// Settings sections have no dedicated screen of their own; the Settings screen
+// stays mounted while a section is selected.
+const SETTINGS_SECTIONS: ReadonlySet<Page> = new Set<Page>([
+  "settings",
+  "general",
+  "autonomy",
+  "publishing_safety",
+  "providers",
+  "storage",
+]);
 
 export default function App() {
   const page = useUiStore((s) => s.page);
   const setPage = useUiStore((s) => s.setPage);
+  const autonomyEnabled = useUiStore((s) => s.autonomyEnabled);
   const { data: engineStatus, isError } = useEngineStatusQuery();
 
   const reachable = !isError && engineStatus?.running !== false;
@@ -51,6 +65,11 @@ export default function App() {
           label={reachable ? "engine online" : "engine offline"}
           tone={reachable ? "ok" : "bad"}
         />
+        {/* Autonomy publish status badge — header bar (read-only display) */}
+        <StatusBadge
+          label={autonomyEnabled ? "AUTONOMOUS PUBLISHING: ON" : "AUTONOMOUS PUBLISHING: OFF"}
+          tone={autonomyEnabled ? "warn" : "ok"}
+        />
       </header>
       <main className="app-main">
         {!reachable ? (
@@ -67,6 +86,7 @@ export default function App() {
         {page === "publishing" ? <PublishingScreen /> : null}
         {page === "analytics" ? <AnalyticsScreen /> : null}
         {page === "strategy" ? <StrategyScreen /> : null}
+        {SETTINGS_SECTIONS.has(page) ? <SettingsScreen /> : null}
         {page === "system" ? <SystemPanel /> : null}
       </main>
       <JobDrawer />
