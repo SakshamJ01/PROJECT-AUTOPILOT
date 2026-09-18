@@ -49,25 +49,127 @@ struct EngineInternal {
     child: Mutex<Child>,
     stdin: Mutex<ChildStdin>,
     pending: Mutex<HashMap<u64, Sender<Result<Value, String>>>>,
+    next_id: AtomicU64,
 }
 
+#[derive(Clone)]
 pub struct Engine {
     internal: Arc<EngineInternal>,
-    next_id: AtomicU64,
     app: Option<AppHandle>,
+}
+
+use std::path::{Path, PathBuf};
+
+fn find_project_root() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(cur) = std::env::current_dir() {
+        candidates.push(cur);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            candidates.push(parent.to_path_buf());
+        }
+    }
+
+    for start_dir in candidates {
+        let mut dir = start_dir.as_path();
+        for _ in 0..10 {
+            if dir.join("autopilot").join("bridge").join("__main__.py").is_file() {
+                return Some(dir.to_path_buf());
+            }
+            if dir.join("autopilot").join("autopilot").join("bridge").join("__main__.py").is_file() {
+                return Some(dir.join("autopilot"));
+            }
+            match dir.parent() {
+                Some(p) => dir = p,
+                None => break,
+            }
+        }
+    }
+    None
+}
+
+fn resolve_python(root: Option<&Path>) -> String {
+    if let Ok(custom) = std::env::var("AUTOPILOT_PYTHON") {
+        if !custom.trim().is_empty() {
+            return custom;
+        }
+    }
+
+    if let Some(r) = root {
+        #[cfg(target_os = "windows")]
+        let venvs = [
+            r.join(".venv").join("Scripts").join("python.exe"),
+            r.join("venv").join("Scripts").join("python.exe"),
+        ];
+        #[cfg(not(target_os = "windows"))]
+        let venvs = [
+            r.join(".venv").join("bin").join("python"),
+            r.join("venv").join("bin").join("python"),
+        ];
+
+        for venv in &venvs {
+            if venv.is_file() {
+                return venv.to_string_lossy().to_string();
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let common_paths = [
+            r"C:\Python314\python.exe",
+            r"C:\Python313\python.exe",
+            r"C:\Python312\python.exe",
+            r"C:\Python311\python.exe",
+            r"C:\Python310\python.exe",
+        ];
+        for p in &common_paths {
+            if Path::new(p).is_file() {
+                return (*p).to_string();
+            }
+        }
+    }
+
+    "python".to_string()
 }
 
 impl Engine {
     pub fn spawn(app: Option<AppHandle>) -> Result<Self, String> {
-        let python_cmd = std::env::var("AUTOPILOT_PYTHON").unwrap_or_else(|_| "python".to_string());
+        let project_root = find_project_root();
+        let python_cmd = resolve_python(project_root.as_deref());
 
         let mut cmd = Command::new(&python_cmd);
         cmd.arg("-u").arg("-m").arg("autopilot.bridge");
+
+        if let Some(ref root) = project_root {
+            cmd.current_dir(root);
+            let pythonpath = match std::env::var("PYTHONPATH") {
+                Ok(existing) if !existing.is_empty() => {
+                    #[cfg(target_os = "windows")]
+                    {
+                        format!("{};{}", root.display(), existing)
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        format!("{}:{}", root.display(), existing)
+                    }
+                }
+                _ => root.display().to_string(),
+            };
+            cmd.env("PYTHONPATH", pythonpath);
+        }
+
         if let Ok(db) = std::env::var("AUTOPILOT_DB_PATH") {
             cmd.env("AUTOPILOT_DB_PATH", db);
         }
         if let Ok(artifacts) = std::env::var("AUTOPILOT_ARTIFACTS_DIR") {
             cmd.env("AUTOPILOT_ARTIFACTS_DIR", artifacts);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
         }
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -82,11 +184,11 @@ impl Engine {
             child: Mutex::new(child),
             stdin: Mutex::new(stdin),
             pending: Mutex::new(HashMap::new()),
+            next_id: AtomicU64::new(0),
         });
 
         let engine = Engine {
             internal,
-            next_id: AtomicU64::new(0),
             app,
         };
 
@@ -147,7 +249,7 @@ impl Engine {
     }
 
     pub fn call(&self, method: &str, params: Option<Value>) -> Result<Value, String> {
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let id = self.internal.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = channel::<Result<Value, String>>();
 
         {
@@ -212,8 +314,134 @@ pub fn pid(&self) -> Option<u32> {
     }
 }
 
-impl Drop for Engine {
+impl Drop for EngineInternal {
     fn drop(&mut self) {
-        let _ = self.shutdown();
+        let request = json!({ "jsonrpc": "2.0", "id": Value::Null, "method": "system.shutdown" });
+        if let Ok(mut stdin) = self.stdin.lock() {
+            let line = format!("{request}\n");
+            let _ = stdin.write_all(line.as_bytes()).and_then(|_| stdin.flush());
+        }
+
+        if let Ok(mut child) = self.child.lock() {
+            let deadline = std::time::Instant::now() + SHUTDOWN_GRACE;
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) => {
+                        if std::time::Instant::now() >= deadline {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(25));
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rpc_frame_success_deserialization() {
+        let raw = r#"{"jsonrpc":"2.0","id":42,"result":{"status":"ok"}}"#;
+        let frame: RpcFrame = serde_json::from_str(raw).expect("valid frame");
+        assert_eq!(frame.id, Some(42));
+        assert!(frame.error.is_none());
+        assert_eq!(frame.result, Some(json!({"status": "ok"})));
+    }
+
+    #[test]
+    fn test_rpc_frame_error_deserialization() {
+        let raw = r#"{"jsonrpc":"2.0","id":99,"error":{"code":-32600,"message":"Invalid Request"}}"#;
+        let frame: RpcFrame = serde_json::from_str(raw).expect("valid error frame");
+        assert_eq!(frame.id, Some(99));
+        assert!(frame.result.is_none());
+        let err = frame.error.expect("error present");
+        assert_eq!(err.code, -32600);
+        assert_eq!(err.message, "Invalid Request");
+    }
+
+    #[test]
+    fn test_rpc_frame_event_deserialization() {
+        let raw = r#"{"jsonrpc":"2.0","method":"job.progress","params":{"job_id":"j1","pct":50}}"#;
+        let frame: RpcFrame = serde_json::from_str(raw).expect("valid event frame");
+        assert_eq!(frame.id, None);
+        assert_eq!(frame.method, Some("job.progress".to_string()));
+        assert_eq!(frame.params, Some(json!({"job_id":"j1","pct":50})));
+    }
+
+    #[test]
+    fn test_concurrent_pending_routing() {
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let mut rxs = Vec::new();
+
+        for id in 0..10u64 {
+            let (tx, rx) = channel::<Result<Value, String>>();
+            pending.lock().unwrap().insert(id, tx);
+            rxs.push((id, rx));
+        }
+
+        // Fulfill in reverse order to ensure non-blocking multiplexing
+        for (id, _) in rxs.iter().rev() {
+            if let Some(tx) = pending.lock().unwrap().remove(id) {
+                let _ = tx.send(Ok(json!({ "id": id })));
+            }
+        }
+
+        for (id, rx) in rxs {
+            let res = rx.recv_timeout(Duration::from_millis(100)).expect("received");
+            assert_eq!(res, Ok(json!({ "id": id })));
+        }
+    }
+
+    #[test]
+    fn test_find_project_root_locates_autopilot() {
+        let root = find_project_root();
+        assert!(root.is_some(), "should find project root");
+        let path = root.unwrap();
+        assert!(path.join("autopilot").join("bridge").join("__main__.py").is_file());
+    }
+
+    #[test]
+    fn test_resolve_python_prefers_custom_env() {
+        std::env::set_var("AUTOPILOT_PYTHON", "my_custom_python_executable");
+        let resolved = resolve_python(None);
+        std::env::remove_var("AUTOPILOT_PYTHON");
+        assert_eq!(resolved, "my_custom_python_executable");
+    }
+
+    #[test]
+    fn test_engine_clone_drop_safety() {
+        let mut child = Command::new("cmd")
+            .arg("/c")
+            .arg("exit 0")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn dummy");
+        let stdin = child.stdin.take().expect("stdin available");
+        let internal = Arc::new(EngineInternal {
+            child: Mutex::new(child),
+            stdin: Mutex::new(stdin),
+            pending: Mutex::new(HashMap::new()),
+            next_id: AtomicU64::new(0),
+        });
+        let engine = Engine {
+            internal: Arc::clone(&internal),
+            app: None,
+        };
+        assert_eq!(Arc::strong_count(&internal), 2);
+        {
+            let clone = engine.clone();
+            assert_eq!(Arc::strong_count(&internal), 3);
+            drop(clone);
+        }
+        assert_eq!(Arc::strong_count(&internal), 2);
     }
 }

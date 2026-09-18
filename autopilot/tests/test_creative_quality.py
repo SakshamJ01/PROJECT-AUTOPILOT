@@ -69,6 +69,7 @@ class TestCreativeQuality(unittest.TestCase):
 
     def test_multi_scene_render_with_badges_and_captions(self):
         r = FFmpegRenderer()
+        fixture_img = Path(__file__).parent.parent / "autopilot" / "providers" / "fixture_image.png"
         plan = RenderPlan(
             plan_id="p-creative-test",
             content_id="c-creative-test",
@@ -78,7 +79,7 @@ class TestCreativeQuality(unittest.TestCase):
                 {
                     "scene_id": "scene-01",
                     "duration_sec": 2.0,
-                    "asset_path": "",
+                    "asset_path": str(fixture_img),
                     "audio_path": "",
                     "on_screen_text": "1956: BIRTH OF AI",
                     "narration": "In 1956, researchers coined the term artificial intelligence.",
@@ -86,7 +87,7 @@ class TestCreativeQuality(unittest.TestCase):
                 {
                     "scene_id": "scene-02",
                     "duration_sec": 2.0,
-                    "asset_path": "",
+                    "asset_path": str(fixture_img),
                     "audio_path": "",
                     "on_screen_text": "FACT 02",
                     "narration": "Modern neural networks learn from billions of data points.",

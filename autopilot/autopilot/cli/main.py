@@ -24,42 +24,49 @@ _POLICY_PROVIDER_MAP: dict[str, dict[str, str]] = {
         "llm": "openai_compatible",      # Ollama / local OpenAI-compatible endpoint
         "research": "wikipedia",          # Wikipedia (no external paid API)
         "tts": "kokoro",                  # Kokoro ONNX (local)
+        "asset": "openverse",             # Real openverse asset provider
         "production_engine": "moneyprinterturbo",
     },
     "cheap_first": {
         "llm": "openrouter",
         "research": "combined",
         "tts": "kokoro",
+        "asset": "openverse",
         "production_engine": "moneyprinterturbo",
     },
     "quality_first": {
         "llm": "gemini",
         "research": "combined",
         "tts": "kokoro",
+        "asset": "openverse",
         "production_engine": "moneyprinterturbo",
     },
     "ollama": {
         "llm": "ollama",
         "research": "wikipedia",
         "tts": "kokoro",
+        "asset": "openverse",
         "production_engine": "moneyprinterturbo",
     },
     "gemini": {
         "llm": "gemini",
         "research": "combined",
         "tts": "kokoro",
+        "asset": "openverse",
         "production_engine": "moneyprinterturbo",
     },
     "openrouter": {
         "llm": "openrouter",
         "research": "combined",
         "tts": "kokoro",
+        "asset": "openverse",
         "production_engine": "moneyprinterturbo",
     },
 }
 
 # Provider values that indicate a mock / no-op was selected.
 _MOCK_PROVIDER_VALUES = frozenset({"mock", "mock_search", "none", ""})
+_MOCK_ASSET_VALUES = frozenset({"mock", "local", "none", ""})
 
 
 def resolve_providers_for_policy(
@@ -118,6 +125,34 @@ def resolve_providers_for_policy(
         tts_provider = tier["tts"]
 
     return llm_provider, research_provider, tts_provider, production_engine
+
+
+def resolve_asset_provider_for_policy(
+    policy: str,
+    asset_provider: str,
+    *,
+    asset_explicit: bool = False,
+) -> str:
+    """Resolve asset provider according to production policy.
+
+    Under production policies (like ``local_only``, ``cheap_first``, ``quality_first``),
+    defaults to real asset discovery (e.g. ``openverse``) instead of offline test fixtures.
+    """
+    tier = _POLICY_PROVIDER_MAP.get(policy)
+    if tier is None:
+        return asset_provider
+
+    if asset_explicit and asset_provider in ("mock", "none"):
+        raise ValueError(
+            f"Policy '{policy}' forbids mock asset providers. "
+            f"Got --asset-provider={asset_provider!r}."
+        )
+
+    # If asset_provider is mock or defaulted to local in a production policy, resolve to tier default
+    if asset_provider in _MOCK_ASSET_VALUES:
+        return tier.get("asset", "openverse")
+
+    return asset_provider
 
 
 

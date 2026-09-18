@@ -14,6 +14,12 @@ from autopilot.core.config import CONFIG
 from autopilot.core.ffmpeg_runner import FFmpegRunner
 
 
+def _escape_filter_path(p: Path) -> str:
+    """Escape path for use in FFmpeg filter parameters without quotes."""
+    s = str(p.resolve()).replace("\\", "/")
+    return s.replace(":", "\\\\:")
+
+
 def get_system_font() -> Optional[str]:
     """Locate an available system TTF font for drawtext filter."""
     if Path("C:/Windows/Fonts/arial.ttf").exists():
@@ -25,8 +31,8 @@ def get_system_font() -> Optional[str]:
     return None
 
 
-def format_caption(text: str, max_chars: int = 28) -> str:
-    """Format narration text into max 2 readable caption lines for short-form video."""
+def format_caption(text: str, max_chars: int = 24) -> str:
+    """Format narration text into max 2 readable caption lines for short-form 9:16 portrait video."""
     words = text.split()
     lines = []
     curr: list[str] = []
@@ -59,31 +65,17 @@ class FFmpegRenderer:
         out = Path(out_path)
         out.parent.mkdir(parents=True, exist_ok=True)
         scenes = plan.scenes or []
-        image_path = None
-        for s in scenes:
+        if not scenes:
+            raise RuntimeError(f"Render plan '{plan.plan_id}' has no scenes.")
+
+        for idx, s in enumerate(scenes):
             ap = s.get("asset_path") or s.get("normalized_path")
-            if ap and Path(ap).exists():
-                image_path = str(ap)
-                break
+            if not ap or not Path(ap).exists():
+                raise RuntimeError(
+                    f"Missing required visual asset for scene '{s.get('scene_id', idx)}' in job '{plan.job_id}': {ap}"
+                )
 
-        if not image_path:
-            image_path = str(CONFIG.get_artifacts_dir() / "providers" / "fixtures" / "fixture_image.png")
-            if not Path(image_path).exists():
-                image_path = str(Path(__file__).resolve().parent.parent / "providers" / "fixture_image.png")
-
-        voice_path = None
-        for s in scenes:
-            ap = s.get("audio_path")
-            if ap and Path(ap).exists():
-                voice_path = str(ap)
-                break
-        if not voice_path:
-            import glob
-            voice_files = glob.glob(str(CONFIG.get_artifacts_dir() / "jobs" / plan.job_id / "voice" / "*.wav"))
-            if voice_files:
-                voice_path = voice_files[0]
-
-        duration = sum(s.get("duration_sec", 5) for s in scenes) if scenes else 5.0
+        duration = sum(s.get("duration_sec", 5) for s in scenes)
         font = get_system_font()
 
         # Multi-scene render: render segments with motion, badges, and kinetic captions, then concatenate
@@ -93,7 +85,7 @@ class FFmpegRenderer:
         for idx, s in enumerate(scenes):
             seg_path = segment_dir / f"seg_{idx}.mp4"
             ap = s.get("asset_path") or s.get("normalized_path")
-            scene_image = str(ap) if ap and Path(ap).exists() else image_path
+            scene_image = str(ap)
             scene_voice = None
             for s2 in scenes:
                 ap2 = s2.get("audio_path")
@@ -136,8 +128,11 @@ class FFmpegRenderer:
                     clean_badge = re.sub(r"[:]+", " - ", str(badge))
                     clean_badge = re.sub(r"[^\w\s\-]", "", clean_badge).upper().strip()
                     if clean_badge:
+                        badge_file = segment_dir / f"badge_{idx}.txt"
+                        badge_file.write_text(clean_badge, encoding="utf-8")
+                        esc_badge_path = _escape_filter_path(badge_file)
                         extra_filters.append(
-                            f"drawtext=fontfile={font}:text='{clean_badge}':fontsize=36:fontcolor=yellow:box=1:boxcolor=black@0.65:boxborderw=10:x=(w-text_w)/2:y=280"
+                            f"drawtext=fontfile={font}:textfile={esc_badge_path}:fontsize=36:fontcolor=yellow:box=1:boxcolor=black@0.65:boxborderw=10:x=(w-text_w)/2:y=280"
                         )
 
                 # Kinetic caption overlay
@@ -145,11 +140,12 @@ class FFmpegRenderer:
                 if narration:
                     clean_narration = str(narration).replace(":", " - ").replace("'", "")
                     cap = format_caption(clean_narration).upper()
-                    # In FFmpeg drawtext inline string, newline must be escaped as literal \n
-                    cap_escaped = cap.replace("\n", "\\n").replace("%", "")
-                    if cap_escaped:
+                    if cap.strip():
+                        cap_file = segment_dir / f"caption_{idx}.txt"
+                        cap_file.write_text(cap, encoding="utf-8")
+                        esc_cap_path = _escape_filter_path(cap_file)
                         extra_filters.append(
-                            f"drawtext=fontfile={font}:text='{cap_escaped}':fontsize=44:fontcolor=white:borderw=4:bordercolor=black:line_spacing=12:x=(w-text_w)/2:y=1380"
+                            f"drawtext=fontfile={font}:textfile={esc_cap_path}:fontsize=42:fontcolor=white:borderw=4:bordercolor=black:line_spacing=14:x=(w-text_w)/2:y=1380"
                         )
 
             v_filter_full = v_base
@@ -157,11 +153,11 @@ class FFmpegRenderer:
                 v_filter_full += "," + ",".join(extra_filters)
             v_filter_full += f"[v{idx}]"
 
-            # Audio filter: apply loudnorm on voice for professional social loudness
+            # Audio filter: apply DC-blocking highpass and loudnorm on voice, format to 44.1kHz stereo for clean AAC encoding
             if scene_voice and Path(scene_voice).exists():
-                a_filter = f"[{audio_input_index}:a]loudnorm=I=-18:LRA=11:TP=-1.5,adelay=0|0[a{idx}]"
+                a_filter = f"[{audio_input_index}:a]highpass=f=60,loudnorm=I=-18:LRA=11:TP=-1.5,aformat=sample_rates=44100:channel_layouts=stereo[a{idx}]"
             else:
-                a_filter = f"[{audio_input_index}:a]adelay=0|0[a{idx}]"
+                a_filter = f"[{audio_input_index}:a]aformat=sample_rates=44100:channel_layouts=stereo[a{idx}]"
 
             seg_cmd.extend([
                 "-filter_complex",
@@ -174,15 +170,16 @@ class FFmpegRenderer:
                 "-preset", "ultrafast",
                 "-crf", "23",
                 "-c:a", "aac",
-                "-b:a", "128k",
+                "-b:a", "192k",
+                "-ar", "44100",
+                "-ac", "2",
                 "-r", "25",
                 "-threads", "2",
                 str(seg_path),
             ])
             seg_res = subprocess.run(seg_cmd, capture_output=True, text=True)
             if seg_res.returncode != 0:
-                if len(scenes) > 1:
-                    raise RuntimeError(f"Segment {idx} render failed (exit code {seg_res.returncode}): {seg_res.stderr}")
+                raise RuntimeError(f"Segment {idx} render failed (exit code {seg_res.returncode}): {seg_res.stderr}")
             segments.append(str(seg_path))
 
         if len(segments) > 1:
@@ -199,121 +196,41 @@ class FFmpegRenderer:
                 "-map", "[outv]", "-map", "[outa]",
                 "-t", str(duration),
                 "-pix_fmt", "yuv420p", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
-                "-c:a", "aac", "-b:a", "128k", "-r", "25", "-threads", "2",
+                "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2", "-r", "25", "-threads", "2",
                 str(out),
             ]
             result = subprocess.run(concat_cmd, capture_output=True, text=True)
-        else:
-            # Single scene render
-            cmd = ["ffmpeg", "-y"]
-            is_video_asset = str(image_path).lower().endswith((".mp4", ".mov", ".mkv", ".webm"))
-            if is_video_asset:
-                cmd.extend(["-stream_loop", "-1", "-i", image_path])
-            else:
-                cmd.extend(["-loop", "1", "-i", image_path])
-            if voice_path and Path(voice_path).exists():
-                cmd.extend(["-i", voice_path])
-            else:
-                cmd.extend(["-f", "lavfi", "-i", "anullsrc=r=22050:cl=mono"])
-
-            frames = max(25, int(math.ceil(duration * 25)))
-            if is_video_asset:
-                v_base = "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,format=yuv420p"
-            else:
-                v_base = f"[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,zoompan=z='min(zoom+0.0008,1.08)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={frames}:s=1080x1920:fps=25,format=yuv420p"
-
-            extra_filters = []
-            if font and scenes:
-                badge = scenes[0].get("on_screen_text")
-                if badge:
-                    clean_badge = re.sub(r"[:]+", " - ", str(badge))
-                    clean_badge = re.sub(r"[^\w\s\-]", "", clean_badge).upper().strip()
-                    if clean_badge:
-                        extra_filters.append(
-                            f"drawtext=fontfile={font}:text='{clean_badge}':fontsize=36:fontcolor=yellow:box=1:boxcolor=black@0.65:boxborderw=10:x=(w-text_w)/2:y=280"
-                        )
-                narration = scenes[0].get("narration") or scenes[0].get("caption_text")
-                if narration:
-                    clean_narration = str(narration).replace(":", " - ").replace("'", "")
-                    cap = format_caption(clean_narration).upper()
-                    cap_escaped = cap.replace("\n", "\\n").replace("%", "")
-                    if cap_escaped:
-                        extra_filters.append(
-                            f"drawtext=fontfile={font}:text='{cap_escaped}':fontsize=44:fontcolor=white:borderw=4:bordercolor=black:line_spacing=12:x=(w-text_w)/2:y=1380"
-                        )
-
-            v_filter_full = v_base
-            if extra_filters:
-                v_filter_full += "," + ",".join(extra_filters)
-            v_filter_full += "[v]"
-
-            if voice_path and Path(voice_path).exists():
-                a_filter = "[1:a]loudnorm=I=-18:LRA=11:TP=-1.5,adelay=0|0[aout]"
-            else:
-                a_filter = "[1:a]adelay=0|0[aout]"
-
-            cmd.extend([
-                "-filter_complex",
-                f"{v_filter_full};{a_filter}",
-                "-map", "[v]",
-                "-map", "[aout]",
-                "-t", str(duration),
-                "-pix_fmt", "yuv420p",
-                "-c:v", "libx264",
-                "-preset", "ultrafast",
-                "-crf", "23",
-                "-c:a", "aac",
-                "-b:a", "128k",
-                "-r", "25",
-                "-threads", "2",
-                str(out),
-            ])
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            if result.returncode != 0:
-                cmd_fallback = [
-                    "ffmpeg", "-y",
-                    "-loop", "1", "-i", image_path,
-                    "-f", "lavfi", "-i", "anullsrc=r=22050:cl=mono",
-                    "-t", str(duration),
-                    "-pix_fmt", "yuv420p", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
-                    "-c:a", "aac", "-b:a", "128k", "-r", "25", "-threads", "2",
-                    str(out),
-                ]
-                result = subprocess.run(cmd_fallback, capture_output=True, text=True)
-        # Verify render actually produced the output file
-        if result.returncode != 0 or not out.exists():
-            if len(scenes) > 1:
+            if result.returncode != 0 or not out.exists():
                 raise RuntimeError(
-                    f"Multi-scene render failed (exit code {result.returncode}): {result.stderr or 'Output file not created.'}"
+                    f"Multi-scene render concatenation failed (exit code {result.returncode}): {result.stderr or 'Output file not created.'}"
                 )
-            # Last-resort single-scene fallback using first available scene
-            fallback_image = image_path
-            fallback_voice = voice_path
-            # Use first scene duration as safe fallback
-            fb_dur = scenes[0].get("duration_sec", 5) if scenes else 5.0
-            cmd_fb = [
-                "ffmpeg", "-y",
-                "-loop", "1", "-i", fallback_image,
-                "-f", "lavfi", "-i", "anullsrc=r=22050:cl=mono",
-                "-t", str(fb_dur),
-                "-pix_fmt", "yuv420p", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
-                "-c:a", "aac", "-b:a", "32k", "-r", "25", "-threads", "2",
-                str(out),
-            ]
-            if fallback_voice and Path(fallback_voice).exists():
-                cmd_fb = [
-                    "ffmpeg", "-y",
-                    "-loop", "1", "-i", fallback_image,
-                    "-i", fallback_voice,
-                    "-filter_complex", "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,format=yuv420p[v];[1:a]adelay=0|0[aout]",
-                    "-map", "[v]", "-map", "[aout]",
-                    "-t", str(fb_dur),
-                    "-pix_fmt", "yuv420p", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
-                    "-c:a", "aac", "-b:a", "32k", "-r", "25", "-threads", "2",
-                    str(out),
-                ]
-            result = subprocess.run(cmd_fb, capture_output=True, text=True)
-        # Note: caption/text overlay omitted in MVP for simplicity; can be added via drawtext filter
+        elif len(segments) == 1:
+            import shutil
+            shutil.copy2(segments[0], str(out))
+        else:
+            raise RuntimeError(f"No segments rendered for plan {plan.plan_id}")
+
+        # Post-render audio stream integrity validation
+        probe_cmd = [
+            "ffprobe", "-v", "error",
+            "-show_entries", "stream=codec_name,sample_rate,channels",
+            "-of", "json",
+            str(out),
+        ]
+        probe_res = subprocess.run(probe_cmd, capture_output=True, text=True)
+        if probe_res.returncode == 0 and probe_res.stdout:
+            try:
+                streams = json.loads(probe_res.stdout).get("streams", [])
+                a_stream = next((s for s in streams if s.get("codec_name") == "aac"), None)
+                if not a_stream:
+                    raise RuntimeError(f"Render output '{out}' missing AAC audio stream")
+                sr = int(a_stream.get("sample_rate", 0))
+                if sr < 16000 or sr > 48000:
+                    raise RuntimeError(f"Render output '{out}' has invalid audio sample rate: {sr} Hz (expected 44100 Hz / 48000 Hz)")
+            except Exception as e:
+                if "invalid audio sample rate" in str(e) or "missing AAC audio stream" in str(e):
+                    raise
+
         checksum = hashlib.sha256(out.read_bytes()).hexdigest() if out.exists() else None
         output = RenderOutput(
             output_path=str(out),

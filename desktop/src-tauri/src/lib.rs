@@ -5,12 +5,15 @@ use serde_json::{json, Value};
 use tauri::Manager;
 
 #[tauri::command]
-fn engine_call(
+async fn engine_call(
     state: tauri::State<'_, Engine>,
     method: String,
     params: Option<Value>,
 ) -> Result<Value, String> {
-    state.call(&method, params)
+    let engine = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || engine.call(&method, params))
+        .await
+        .map_err(|e| format!("engine call worker error: {e}"))?
 }
 
 #[tauri::command]

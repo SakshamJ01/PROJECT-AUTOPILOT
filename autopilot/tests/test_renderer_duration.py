@@ -31,11 +31,10 @@ class TestRendererDuration(unittest.TestCase):
         from autopilot.core.renderer import FFmpegRenderer
         from autopilot.core.contracts import RenderPlan
         r = FFmpegRenderer()
-        # Use a minimal dummy render plan with one scene and fixture image
+        fixture_img = Path(__file__).parent.parent / "autopilot" / "providers" / "fixture_image.png"
         plan = RenderPlan(plan_id="p-check", content_id="c-check", job_id="check-job", profile="vertical_short",
-                          scenes=[{"scene_id":"s1","duration_sec":2.0,"asset_path":"","audio_path":""}])
+                          scenes=[{"scene_id":"s1","duration_sec":2.0,"asset_path":str(fixture_img),"audio_path":""}])
         out_path = "autopilot/artifacts/jobs/check-job/render/test_checksum.mp4"
-        # The fixture image exists; this should produce a file with checksum
         result = r.render(plan, out_path)
         self.assertIsNotNone(result.checksum_sha256)
         self.assertTrue(len(result.checksum_sha256) == 64)
@@ -43,15 +42,16 @@ class TestRendererDuration(unittest.TestCase):
 
     def test_multi_scene_render_execution(self):
         r = FFmpegRenderer()
+        fixture_img = Path(__file__).parent.parent / "autopilot" / "providers" / "fixture_image.png"
         plan = RenderPlan(
             plan_id="p-multi",
             content_id="c-multi",
             job_id="multi-job",
             profile="vertical_short",
             scenes=[
-                {"scene_id": "s1", "duration_sec": 2.0, "asset_path": "", "audio_path": ""},
-                {"scene_id": "s2", "duration_sec": 2.0, "asset_path": "", "audio_path": ""},
-                {"scene_id": "s3", "duration_sec": 2.0, "asset_path": "", "audio_path": ""},
+                {"scene_id": "s1", "duration_sec": 2.0, "asset_path": str(fixture_img), "audio_path": ""},
+                {"scene_id": "s2", "duration_sec": 2.0, "asset_path": str(fixture_img), "audio_path": ""},
+                {"scene_id": "s3", "duration_sec": 2.0, "asset_path": str(fixture_img), "audio_path": ""},
             ],
         )
         out_path = "autopilot/artifacts/jobs/multi-job/render/final.mp4"
@@ -63,14 +63,15 @@ class TestRendererDuration(unittest.TestCase):
     def test_multi_scene_failure_raises_runtime_error(self):
         from unittest.mock import patch, MagicMock
         r = FFmpegRenderer()
+        fixture_img = Path(__file__).parent.parent / "autopilot" / "providers" / "fixture_image.png"
         plan = RenderPlan(
             plan_id="p-fail",
             content_id="c-fail",
             job_id="fail-job",
             profile="vertical_short",
             scenes=[
-                {"scene_id": "s1", "duration_sec": 3.0, "asset_path": "", "audio_path": ""},
-                {"scene_id": "s2", "duration_sec": 3.0, "asset_path": "", "audio_path": ""},
+                {"scene_id": "s1", "duration_sec": 3.0, "asset_path": str(fixture_img), "audio_path": ""},
+                {"scene_id": "s2", "duration_sec": 3.0, "asset_path": str(fixture_img), "audio_path": ""},
             ],
         )
         out_path = "autopilot/artifacts/jobs/fail-job/render/final.mp4"

@@ -133,7 +133,7 @@ class LocalWorker:
         # The CLI path runs resolve_providers_for_policy; the queue/worker path must too.
         policy = payload.get("policy", "local_only")
         if policy not in ("mock",):
-            from autopilot.cli.main import resolve_providers_for_policy
+            from autopilot.cli.main import resolve_providers_for_policy, resolve_asset_provider_for_policy
             try:
                 llm_provider, research_provider, tts_provider, production_engine = resolve_providers_for_policy(
                     policy=policy,
@@ -141,6 +141,10 @@ class LocalWorker:
                     research_provider=research_provider,
                     tts_provider=tts_provider,
                     production_engine=production_engine,
+                )
+                asset_provider = resolve_asset_provider_for_policy(
+                    policy=policy,
+                    asset_provider=asset_provider,
                 )
             except ValueError:
                 # Policy forbids mock but no explicit real provider was given;
