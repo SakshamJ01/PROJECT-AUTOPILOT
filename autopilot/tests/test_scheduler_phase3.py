@@ -43,6 +43,19 @@ from autopilot.db.manager import DBManager
 NOW = datetime(2026, 9, 16, 10, 0, 0, tzinfo=timezone.utc)  # Wednesday
 
 
+class _FrozenDatetime(datetime):
+    """Fix `datetime.now` so enable/disable re-advance logic is deterministic.
+
+    ScheduleEngine.enable_schedule re-advances a backdated next_run_at against
+    ``datetime.now()``; the tests pin a fixed NOW, so the wall clock must be
+    frozen for the duration of the operation or the suite is time-dependent.
+    """
+
+    @classmethod
+    def now(cls, tz=None):
+        return NOW if tz is None else NOW.astimezone(tz)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -554,7 +567,8 @@ def test_schedule_enable_disable(tmp_path, db):
     assert engine.run_due(now=NOW, worker_id="w1") == []
     eng.run_cycle.assert_not_called()
 
-    enabled = engine.enable_schedule("s-tog")
+    with patch("autopilot.core.scheduler.datetime", _FrozenDatetime):
+        enabled = engine.enable_schedule("s-tog")
     assert enabled.enabled is True
     assert db.get_schedule("s-tog")["enabled"] == 1
     assert db.count_due_schedules(NOW.isoformat()) == 0  # backdated next_run_at re-advanced on enable
