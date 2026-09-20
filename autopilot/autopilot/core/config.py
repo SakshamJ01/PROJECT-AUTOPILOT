@@ -25,6 +25,12 @@ class Config(BaseModel):
     default_production_engine: str = "moneyprinterturbo"
     moneyprinter_endpoint: str = "http://127.0.0.1:8080"
     moneyprinter_cli_path: Optional[str] = None
+    # MoneyPrinterTurbo local API lifecycle (desktop runtime). Autopilot probes
+    # the API first and only starts the local service when it is not already
+    # running, so a manually-started service is never duplicated.
+    moneyprinter_home: Optional[str] = None
+    moneyprinter_autostart: bool = True
+    moneyprinter_startup_timeout_seconds: float = 60.0
     whisper_model_size: str = "base"
 
     # LLM & Local Ollama configurations
@@ -193,6 +199,9 @@ class Config(BaseModel):
             "AUTOPILOT_PRODUCTION_ENGINE": "default_production_engine",
             "MONEYPRINTER_ENDPOINT": "moneyprinter_endpoint",
             "MONEYPRINTER_CLI_PATH": "moneyprinter_cli_path",
+            "MONEYPRINTER_HOME": "moneyprinter_home",
+            "MONEYPRINTER_AUTOSTART": "moneyprinter_autostart",
+            "MONEYPRINTER_STARTUP_TIMEOUT_SECONDS": "moneyprinter_startup_timeout_seconds",
             "AUTOPILOT_WHISPER_MODEL_SIZE": "whisper_model_size",
             "OLLAMA_ENDPOINT": "ollama_endpoint",
             "OLLAMA_BASE_URL": "ollama_endpoint",
@@ -226,11 +235,11 @@ class Config(BaseModel):
         for env_key, field_name in env_map.items():
             val = os.environ.get(env_key)
             if val is not None:
-                if field_name in ("openverse_enabled", "rights_policy_allow_partial", "synthetic_smoke_enabled", "qa_strict_mode", "publish_dry_run_default", "autonomy_auto_publish", "ollama_think"):
+                if field_name in ("openverse_enabled", "rights_policy_allow_partial", "synthetic_smoke_enabled", "qa_strict_mode", "publish_dry_run_default", "autonomy_auto_publish", "ollama_think", "moneyprinter_autostart"):
                     data[field_name] = val.lower() in ("1", "true", "yes")
                 elif field_name in ("openverse_max_results", "asset_target_width", "asset_target_height", "asset_max_download_bytes", "asset_max_redirects", "qa_caption_max_line_length", "qa_caption_max_lines", "publish_max_retries", "publish_chunk_size_bytes", "queue_default_priority", "queue_max_attempts", "queue_max_concurrency", "queue_max_queued_jobs", "analytics_sync_interval_hours", "analytics_cache_ttl_seconds", "analytics_batch_size", "autonomy_level", "autonomy_max_ideas_per_cycle", "autonomy_max_auto_queue_per_cycle", "autonomy_max_daily_jobs", "autonomy_topic_cooldown_days", "ollama_num_predict", "learning_min_samples", "learning_min_category_observations", "learning_window_days", "learning_full_confidence_samples", "strategy_max_params_per_update", "strategy_min_age_days"):
                     data[field_name] = int(val)
-                elif field_name in ("openverse_timeout", "qa_loudness_target_lufs", "qa_max_silence_duration_sec", "qa_silence_threshold_db", "qa_max_black_duration_sec", "qa_max_freeze_duration_sec", "qa_duration_tolerance_sec", "qa_duration_tolerance_pct", "qa_fps_target", "publish_timeout_seconds", "queue_lease_duration_seconds", "queue_poll_interval_seconds", "queue_retry_backoff_base_seconds", "autonomy_similarity_threshold", "autonomy_min_score_threshold", "ollama_timeout", "ollama_idle_timeout", "learning_recency_weight", "strategy_max_weight_delta", "strategy_weight_floor", "strategy_weight_ceiling", "strategy_influence_scale"):
+                elif field_name in ("openverse_timeout", "qa_loudness_target_lufs", "qa_max_silence_duration_sec", "qa_silence_threshold_db", "qa_max_black_duration_sec", "qa_max_freeze_duration_sec", "qa_duration_tolerance_sec", "qa_duration_tolerance_pct", "qa_fps_target", "publish_timeout_seconds", "queue_lease_duration_seconds", "queue_poll_interval_seconds", "queue_retry_backoff_base_seconds", "autonomy_similarity_threshold", "autonomy_min_score_threshold", "ollama_timeout", "ollama_idle_timeout", "learning_recency_weight", "strategy_max_weight_delta", "strategy_weight_floor", "strategy_weight_ceiling", "strategy_influence_scale", "moneyprinter_startup_timeout_seconds"):
                     data[field_name] = float(val)
                 else:
                     data[field_name] = val

@@ -148,7 +148,9 @@ def test_moneyprinter_build_task_payload_shape():
 # 6. Current task polling shape & 7. Task success state
 def test_moneyprinter_generate_task_submit_polling_and_success(tmp_path):
     """Tests full generation lifecycle: POST /api/v1/videos -> GET /api/v1/tasks/{id} polling -> state=1 success."""
-    adapter = MoneyPrinterTurboAdapter(endpoint="http://127.0.0.1:8080", poll_interval_seconds=0.01)
+    # autostart=False keeps these adapter-contract tests hermetic; the service
+    # lifecycle (probe/spawn/readiness) is covered by test_moneyprinter_runtime.py.
+    adapter = MoneyPrinterTurboAdapter(endpoint="http://127.0.0.1:8080", poll_interval_seconds=0.01, autostart=False)
 
     out_file = tmp_path / "final.mp4"
     temp_rendered = tmp_path / "temp_render.mp4"
@@ -225,7 +227,7 @@ def test_moneyprinter_generate_task_submit_polling_and_success(tmp_path):
 # 8. Task failure state
 def test_moneyprinter_generate_fails_when_task_fails(tmp_path):
     """When MPT task reports state=-1 (failure), adapter must raise clear RuntimeError without fallback."""
-    adapter = MoneyPrinterTurboAdapter(endpoint="http://127.0.0.1:8080", poll_interval_seconds=0.01)
+    adapter = MoneyPrinterTurboAdapter(endpoint="http://127.0.0.1:8080", poll_interval_seconds=0.01, autostart=False)
 
     out_file = tmp_path / "final.mp4"
     req = ProductionRequest(
@@ -275,7 +277,7 @@ def test_moneyprinter_generate_fails_when_task_fails(tmp_path):
 # 9. No FFmpeg fallback & 10. No mock fallback
 def test_moneyprinter_no_ffmpeg_or_mock_fallback_when_unavailable():
     """When MoneyPrinterTurbo is offline, generate() must fail closed with ProductionEngineUnavailableError."""
-    adapter = MoneyPrinterTurboAdapter(endpoint="http://127.0.0.1:59999")
+    adapter = MoneyPrinterTurboAdapter(endpoint="http://127.0.0.1:59999", autostart=False)
     req = ProductionRequest(
         job_id="test-job-002",
         content_id="test-job-002",

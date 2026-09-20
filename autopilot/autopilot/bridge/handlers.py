@@ -11,6 +11,7 @@ import os
 import platform
 import sqlite3
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -53,6 +54,8 @@ class BridgeHandlers:
         "production.start",
         "production.cancel",
         "production.retry",
+        "production.engine.status",
+        "production.engine.ensure",
         "autonomy.status",
         "autonomy.run",
         "autonomy.proposals",
@@ -288,6 +291,24 @@ class BridgeHandlers:
     # ------------------------------------------------------------------
     # production control
     # ------------------------------------------------------------------
+    def on_production_engine_status(self, params: dict | None) -> dict[str, Any]:
+        """Read-only MoneyPrinterTurbo readiness probe (never starts anything)."""
+        from autopilot.core.moneyprinter_runtime import get_runtime
+
+        return get_runtime().status()
+
+    def on_production_engine_ensure(self, params: dict | None) -> dict[str, Any]:
+        """Ensure the MoneyPrinterTurbo API service is running before a render.
+
+        Probes first (a manually-started service is reused, never duplicated),
+        auto-starts the local service when needed, and waits for the
+        ``/api/v1/tasks?page=1&page_size=1`` readiness endpoint with a bounded
+        timeout. Never falls back to another engine.
+        """
+        from autopilot.core.moneyprinter_runtime import ensure_moneyprinter_running
+
+        return ensure_moneyprinter_running()
+
     def on_production_start(self, params: dict | None) -> dict[str, Any]:
         """Enqueue and synchronously execute a production pipeline job.
 
@@ -396,7 +417,14 @@ class BridgeHandlers:
         return {"cancelled": ok, "queue_id": queue_id}
 
     def on_production_retry(self, params: dict | None) -> dict[str, Any]:
-        """Retry a failed/blocked/cancelled queue item by job_id or queue_id."""
+        """Retry a failed/blocked/cancelled queue item by job_id or queue_id.
+
+        Resets the item under the existing retry eligibility rules, atomically
+        claims it, and re-runs it through the same canonical
+        ``LocalWorker.process_claimed_item`` path used by ``production.start``.
+        Execution runs on a daemon thread so the bridge stays responsive; the
+        worker owns lease renewal and all terminal status writes.
+        """
         params = params or {}
         job_id = params.get("job_id")
         queue_id = params.get("queue_id")
@@ -409,8 +437,89 @@ class BridgeHandlers:
             if item is None:
                 raise ProtocolError(INVALID_PARAMS, f"No queue item for job_id={job_id}")
             queue_id = item["queue_id"]
+
+        # 1. Reset under the existing retry eligibility rules (only
+        #    failed/dead_letter/cancelled/blocked/retry_wait are eligible).
         ok = self.db.retry_queue_item(queue_id)
-        return {"retried": ok, "queue_id": queue_id}
+        if not ok:
+            return {"retried": False, "queue_id": queue_id}
+
+        # 2. Atomically claim the freshly reset item — the same claim path as
+        #    production.start — so it cannot be produced twice concurrently.
+        claimed = self.db.claim_queue_item(
+            queue_id=queue_id,
+            worker_id=f"desktop-{os.getpid()}",
+            lease_duration_sec=3600,
+        )
+        if claimed is None:
+            # Rare race: a polling worker claimed it between reset and claim.
+            # It is queued and will be produced by that worker, so the retry
+            # still succeeds rather than stranding the item.
+            return {"retried": True, "queue_id": queue_id, "status": "queued"}
+
+        # 3. Reconstruct provider overrides from the persisted payload so the
+        #    retry uses exactly the providers the job originally requested.
+        provider_overrides = self._retry_provider_overrides(claimed)
+
+        # 4. Re-run through the canonical worker path on a daemon thread.
+        threading.Thread(
+            target=self._run_retry_production,
+            args=(claimed, provider_overrides),
+            name=f"retry-{queue_id}",
+            daemon=True,
+        ).start()
+
+        return {"retried": True, "queue_id": queue_id, "status": "running"}
+
+    @staticmethod
+    def _retry_provider_overrides(claimed: dict) -> dict[str, str]:
+        """Rebuild the provider_overrides dict from a claimed queue item.
+
+        Mirrors how ``production.start`` builds overrides from request params:
+        short provider keys (``llm``, ``research``, ``tts``, ``asset``,
+        ``production_engine``) plus the persisted ``policy``.
+        """
+        payload_raw = claimed.get("payload_json") or "{}"
+        try:
+            payload = _json.loads(payload_raw) if isinstance(payload_raw, str) else payload_raw
+        except Exception:  # noqa: BLE001
+            payload = {}
+        overrides: dict[str, str] = {}
+        for key in ("llm", "research", "tts", "asset", "production_engine"):
+            val = payload.get(f"{key}_provider")
+            if val is not None:
+                overrides[key] = val
+        policy = payload.get("policy")
+        if policy is not None:
+            overrides["policy"] = policy
+        return overrides
+
+    def _run_retry_production(self, claimed: dict, provider_overrides: dict[str, str]) -> None:
+        """Execute a retried item through the canonical worker path.
+
+        Never raises: ``process_claimed_item`` owns all terminal status writes,
+        and any residual failure marks the item non-retryable, exactly like the
+        error path of ``production.start``.
+        """
+        from autopilot.core.worker import LocalWorker
+
+        queue_id = claimed["queue_id"]
+        try:
+            worker = LocalWorker(
+                worker_id=f"desktop-{os.getpid()}",
+                config=self.config,
+                db=self.db,
+            )
+            worker.process_claimed_item(
+                claimed,
+                provider_overrides=provider_overrides or None,
+                force_auto_publish=False,  # desktop production never publishes
+            )
+        except Exception as exc:  # noqa: BLE001 — must not crash the retry thread
+            try:
+                self.db.fail_queue_item(queue_id, str(exc), retryable=False)
+            except Exception:  # noqa: BLE001 — best-effort terminal status
+                pass
 
     # ------------------------------------------------------------------
     # helpers — queue enrichment

@@ -35,6 +35,7 @@ class MoneyPrinterTurboAdapter:
         cli_path: Optional[str] = None,
         timeout_seconds: int = 300,
         poll_interval_seconds: float = 1.0,
+        autostart: Optional[bool] = None,
     ):
         from autopilot.core.config import CONFIG
 
@@ -47,6 +48,11 @@ class MoneyPrinterTurboAdapter:
         self.cli_path = cli_path or os.environ.get("MONEYPRINTER_CLI_PATH", None)
         self.timeout_seconds = timeout_seconds
         self.poll_interval_seconds = poll_interval_seconds
+        # Auto-start the local MoneyPrinterTurbo API service when it is not
+        # already running (desktop runtime). Defaults to the config flag.
+        self.autostart = (
+            autostart if autostart is not None else bool(getattr(CONFIG, "moneyprinter_autostart", True))
+        )
         self.logger = StructuredLogger(stage="production_moneyprinter")
 
     @property
@@ -141,6 +147,21 @@ class MoneyPrinterTurboAdapter:
         """Invoke MoneyPrinterTurbo to assemble and render the production video."""
         out_file = Path(request.output_path)
         out_file.parent.mkdir(parents=True, exist_ok=True)
+
+        # Desktop runtime: make sure the local MoneyPrinterTurbo API service is
+        # actually up before rendering. Probes first (a manually-started service
+        # is reused, never duplicated) and auto-starts the local service when it
+        # is configured to. Never falls back to another engine.
+        if self.autostart:
+            from autopilot.core.moneyprinter_runtime import ensure_moneyprinter_running
+
+            mpt = ensure_moneyprinter_running()
+            if not mpt.get("running"):
+                raise ProductionEngineUnavailableError(
+                    f"Production engine 'moneyprinterturbo' could not be started. "
+                    f"{mpt.get('error', 'MoneyPrinterTurbo API service is not running.')} "
+                    f"(endpoint: {self.endpoint}; legacy fallback via --production-engine ffmpeg)"
+                )
 
         # Fail loudly if engine is unavailable — NO SILENT FALLBACK!
         health = self.health_check()

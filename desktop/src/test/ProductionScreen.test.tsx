@@ -188,8 +188,19 @@ describe("Production screen", () => {
   it("validates the start form and calls production.start", async () => {
     mockQueueAndInspect();
     let startedWith: Record<string, unknown> | null = null;
+    const engineRunning = {
+      engine: "moneyprinterturbo",
+      version: "v1.3.6",
+      running: true,
+      managed: true,
+      mode: "http_api",
+      endpoint: "http://127.0.0.1:8080",
+      pid: 1234,
+    };
     (invoke as unknown as Mock).mockImplementation((_cmd: string, args: { method: string; params?: Record<string, unknown> }) => {
       if (args.method === "queue.list") return Promise.resolve({ items: [], summary });
+      if (args.method === "production.engine.status") return Promise.resolve(engineRunning);
+      if (args.method === "production.engine.ensure") return Promise.resolve(engineRunning);
       if (args.method === "production.start") {
         startedWith = args.params ?? null;
         return Promise.resolve({
@@ -222,6 +233,48 @@ describe("Production screen", () => {
       // M2 never enables publishing from the desktop.
       expect((startedWith as Record<string, unknown>).auto_publish ?? false).toBe(false);
     });
+  });
+
+  it("surfaces a clear error when the production engine cannot start", async () => {
+    mockQueueAndInspect();
+    const engineDown = {
+      engine: "moneyprinterturbo",
+      version: "v1.3.6",
+      running: false,
+      managed: false,
+      mode: "not_installed",
+      endpoint: "http://127.0.0.1:8080",
+      error: "MoneyPrinterTurbo v1.3.6 was not found on this machine.",
+    };
+    let ensureCalled = false;
+    let startedWith: Record<string, unknown> | null = null;
+    (invoke as unknown as Mock).mockImplementation((_cmd: string, args: { method: string; params?: Record<string, unknown> }) => {
+      if (args.method === "queue.list") return Promise.resolve({ items: [], summary });
+      if (args.method === "production.engine.status") return Promise.resolve(engineDown);
+      if (args.method === "production.engine.ensure") {
+        ensureCalled = true;
+        return Promise.resolve(engineDown);
+      }
+      if (args.method === "production.start") {
+        startedWith = args.params ?? null;
+        return Promise.resolve({ queue_id: "q", job_id: "j", status: "succeeded", media_path: null, qa_status: null, error: null });
+      }
+      return Promise.reject(new Error(`unexpected ${args.method}`));
+    });
+
+    renderScreen();
+    const button = await screen.findByText("Start production");
+    fireEvent.change(screen.getByLabelText("Production topic"), {
+      target: { value: "Deep dive into WebAssembly" },
+    });
+    fireEvent.click(button);
+
+    // The engine ensure runs first and must report the failure clearly...
+    await waitFor(() => expect(ensureCalled).toBe(true));
+    expect(await screen.findByText(/Production engine unavailable/i)).toBeInTheDocument();
+    expect(screen.getByText(/was not found on this machine/i)).toBeInTheDocument();
+    // ...and production.start must never be attempted.
+    expect(startedWith).toBeNull();
   });
 
   it("shows the empty state when there are no jobs", async () => {

@@ -24,6 +24,7 @@ import type {
   JobInspect,
   LogEntry,
   ProductionActionResult,
+  ProductionEngineStatus,
   ProductionStartResult,
   ProposalActionResponse,
   PublishActionResult,
@@ -165,6 +166,31 @@ export function useProductionRetryMutation() {
       engineCall<ProductionActionResult>("production.retry", params),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["engine", "queue.list"] });
+    },
+  });
+}
+
+export function useProductionEngineStatusQuery(enabled = true) {
+  return useQuery({
+    queryKey: ["engine", "production.engine.status"],
+    queryFn: () => engineCall<ProductionEngineStatus>("production.engine.status"),
+    // Probe the API more often while the service is down so readiness is
+    // picked up promptly without hammering it while it is healthy.
+    refetchInterval: (query) => {
+      const status = query.state.data as ProductionEngineStatus | undefined;
+      return status?.running ? POLL.systemMs : POLL.engineMs;
+    },
+    retry: false,
+    enabled,
+  });
+}
+
+export function useProductionEngineEnsureMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => engineCall<ProductionEngineStatus>("production.engine.ensure"),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["engine", "production.engine.status"] });
     },
   });
 }

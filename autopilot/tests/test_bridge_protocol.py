@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -309,10 +310,14 @@ def test_production_cancel_non_cancellable_status(seeded_db):
         cli.close()
 
 
-def test_production_retry_after_cancel(client):
-    client.call("production.cancel", {"queue_id": "q-1"})
+def test_production_retry_non_retryable_status(client):
+    """A queued item is not retryable — reset returns false, state unchanged.
+
+    Guards the existing eligibility rules: retry only applies to terminal
+    failed/dead_letter/cancelled/blocked/retry_wait states.
+    """
     res = client.call("production.retry", {"job_id": "job-1"})["result"]
-    assert res["retried"] is True
+    assert res["retried"] is False
     assert res["queue_id"] == "q-1"
     later = client.call("queue.list")["result"]
     item = next(i for i in later["items"] if i["queue_id"] == "q-1")
@@ -430,6 +435,369 @@ def test_production_start_blocks_mock_under_local_only(tmp_path, monkeypatch):
     })
     assert captured["overrides"]["policy"] == "local_only"
     assert captured["overrides"]["llm"] == "mock"  # worker will reject silently with resolve_providers_for_policy
+
+
+# ---------------------------------------------------------------------------
+# Production retry — retry must actually re-run the job through the same
+# canonical LocalWorker.process_claimed_item path used by production.start,
+# not merely reset the queue row and leave it queued indefinitely.
+# ---------------------------------------------------------------------------
+
+def _seed_terminal_item(db, status, *, queue_id="q-retry", job_id="job-retry", payload=None):
+    """Enqueue an item and drive it to a terminal status via the real DB API."""
+    payload = payload or {
+        "topic": "Quantum Computing Basics",
+        "channel_id": "chan1",
+        "policy": "local_only",
+        "profile": "short_vertical",
+        "auto_publish": False,
+    }
+    db.create_job(job_id, channel_id="chan1", topic=payload.get("topic", ""))
+    db.enqueue_item(
+        queue_id=queue_id,
+        job_id=job_id,
+        priority=3,
+        channel_id="chan1",
+        payload=payload,
+    )
+    if status == "failed":
+        db.fail_queue_item(queue_id, "render exceeded budget", retryable=False)
+    elif status == "retry_wait":
+        db.fail_queue_item(queue_id, "transient blip", retryable=True)
+    elif status == "cancelled":
+        db.cancel_queue_item(queue_id)
+    elif status == "blocked":
+        db.block_queue_item(queue_id, "rights gate rejected")
+    elif status == "succeeded":
+        db.complete_queue_item(queue_id)
+    return queue_id
+
+
+def _wait_for(predicate, timeout: float = 10.0) -> bool:
+    """Poll ``predicate`` until it is true or ``timeout`` seconds elapse."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return bool(predicate())
+
+
+@pytest.fixture()
+def retry_bridge(tmp_path, monkeypatch):
+    """Handler-level bridge with LocalWorker stubbed to a recorder.
+
+    Yields ``(handlers, db, captured, done, behaviour)``. ``done`` is set once
+    the retried item has been through ``process_claimed_item``, so tests can
+    wait deterministically for the daemon execution thread. Set
+    ``behaviour["mode"] = "raise"`` to make the worker raise.
+    """
+    import autopilot.core.worker as worker_module
+    from autopilot.bridge.handlers import BridgeHandlers
+    from autopilot.core.config import Config
+    from autopilot.db.manager import DBManager
+
+    monkeypatch.setenv("AUTOPILOT_DB_PATH", str(tmp_path / "retry.db"))
+    db = DBManager(tmp_path / "retry.db")
+    db.init_schema()
+
+    captured: dict = {}
+    done = threading.Event()
+    behaviour: dict = {"mode": "complete", "exc": RuntimeError("boom")}
+
+    class FakeWorker:
+        def __init__(self, worker_id, config, db):
+            captured["worker_id"] = worker_id
+
+        def process_claimed_item(self, claimed, provider_overrides=None, force_auto_publish=None):
+            captured["claimed"] = claimed
+            captured["provider_overrides"] = provider_overrides
+            captured["force_auto_publish"] = force_auto_publish
+            try:
+                if behaviour["mode"] == "raise":
+                    raise behaviour["exc"]
+                db.complete_queue_item(claimed["queue_id"])  # mirror the real worker
+                return {
+                    "queue_id": claimed["queue_id"],
+                    "job_id": claimed["job_id"],
+                    "status": "succeeded",
+                    "media_path": "/tmp/out.mp4",
+                    "qa_status": "APPROVED",
+                    "error": None,
+                }
+            finally:
+                done.set()
+
+    monkeypatch.setattr(worker_module, "LocalWorker", FakeWorker)
+    handlers = BridgeHandlers(Config(), db)
+    yield handlers, db, captured, done, behaviour
+
+
+def test_production_retry_after_cancel_proceeds_to_production(retry_bridge):
+    """Cancel then retry actually re-runs the job instead of leaving it queued."""
+    handlers, db, captured, done, _ = retry_bridge
+    _seed_terminal_item(db, "cancelled")
+
+    res = handlers.dispatch("production.retry", {"queue_id": "q-retry"})
+
+    # Item was claimed (running) before the response returned...
+    assert res == {"retried": True, "queue_id": "q-retry", "status": "running"}
+    claimed = db.get_queue_item("q-retry")
+    assert claimed["status"] == "running"
+    assert claimed["attempt_count"] == 1
+    assert claimed["worker_id"] == captured["worker_id"]
+
+    # ...and the canonical worker path executes it to completion.
+    assert done.wait(timeout=10)
+    assert db.get_queue_item("q-retry")["status"] == "succeeded"
+    assert captured["claimed"]["queue_id"] == "q-retry"
+    assert captured["force_auto_publish"] is False
+
+
+def test_production_retry_failed_item_proceeds_to_production(retry_bridge):
+    """A failed job is re-run through the canonical worker path."""
+    handlers, db, captured, done, _ = retry_bridge
+    _seed_terminal_item(db, "failed", queue_id="q-fail", job_id="job-fail")
+    assert db.get_queue_item("q-fail")["status"] == "failed"
+
+    res = handlers.dispatch("production.retry", {"job_id": "job-fail"})
+
+    assert res["retried"] is True
+    assert done.wait(timeout=10)
+    assert db.get_queue_item("q-fail")["status"] == "succeeded"
+    assert captured["claimed"]["job_id"] == "job-fail"
+
+
+def test_production_retry_wait_item_escapes_backoff_window(retry_bridge):
+    """A retry_wait item whose backoff window has not opened still proceeds.
+
+    Before the fix the item would sit in retry_wait until next_retry_at; the
+    retry must reset the backoff and re-run immediately.
+    """
+    handlers, db, captured, done, _ = retry_bridge
+    _seed_terminal_item(db, "retry_wait", queue_id="q-wait", job_id="job-wait")
+    waited = db.get_queue_item("q-wait")
+    assert waited["status"] == "retry_wait"
+    assert waited["next_retry_at"] is not None  # backoff window still closed
+
+    res = handlers.dispatch("production.retry", {"queue_id": "q-wait"})
+
+    assert res["retried"] is True
+    assert done.wait(timeout=10)
+    assert db.get_queue_item("q-wait")["status"] == "succeeded"
+    assert captured["claimed"]["queue_id"] == "q-wait"
+
+
+def test_production_retry_blocked_item_proceeds_to_production(retry_bridge):
+    handlers, db, captured, done, _ = retry_bridge
+    _seed_terminal_item(db, "blocked", queue_id="q-blk", job_id="job-blk")
+
+    res = handlers.dispatch("production.retry", {"queue_id": "q-blk"})
+
+    assert res["retried"] is True
+    assert done.wait(timeout=10)
+    assert db.get_queue_item("q-blk")["status"] == "succeeded"
+
+
+def test_production_retry_preserves_eligibility_rules(retry_bridge):
+    """Non-retryable statuses are never re-run: queued, running, succeeded."""
+    handlers, db, captured, done, behaviour = retry_bridge
+    behaviour["mode"] = "raise"  # would fail loudly if any execution happened
+
+    # queued
+    _seed_terminal_item(db, "queued", queue_id="q-queued", job_id="job-queued")
+    assert handlers.dispatch("production.retry", {"queue_id": "q-queued"})["retried"] is False
+    assert db.get_queue_item("q-queued")["status"] == "queued"
+
+    # succeeded
+    _seed_terminal_item(db, "succeeded", queue_id="q-ok", job_id="job-ok")
+    assert handlers.dispatch("production.retry", {"queue_id": "q-ok"})["retried"] is False
+    assert db.get_queue_item("q-ok")["status"] == "succeeded"
+
+    # running (lease held by another worker)
+    _seed_terminal_item(db, "queued", queue_id="q-run", job_id="job-run")
+    db.claim_queue_item("q-run", worker_id="other-worker", lease_duration_sec=3600)
+    assert handlers.dispatch("production.retry", {"queue_id": "q-run"})["retried"] is False
+    assert db.get_queue_item("q-run")["status"] == "running"
+
+    assert not done.wait(timeout=1.0)  # no worker execution at all
+    assert captured == {}
+
+
+def test_production_retry_reconstructs_provider_overrides(retry_bridge):
+    """Provider selections persisted in the payload are rebuilt for the worker."""
+    handlers, db, captured, done, _ = retry_bridge
+    payload = {
+        "topic": "Rust performance",
+        "channel_id": "chan1",
+        "policy": "cheap_first",
+        "profile": "short_vertical",
+        "auto_publish": False,
+        # Persisted with the "{key}_provider" convention production.start uses.
+        "llm_provider": "openai_compatible",
+        "research_provider": "wikipedia",
+        "tts_provider": "kokoro",
+        "asset_provider": "openverse",
+        "production_engine_provider": "ffmpeg",
+    }
+    _seed_terminal_item(db, "failed", queue_id="q-prov", job_id="job-prov", payload=payload)
+
+    handlers.dispatch("production.retry", {"queue_id": "q-prov"})
+
+    assert done.wait(timeout=10)
+    overrides = captured["provider_overrides"]
+    # Short keys + policy, exactly as production.start builds them.
+    assert overrides == {
+        "llm": "openai_compatible",
+        "research": "wikipedia",
+        "tts": "kokoro",
+        "asset": "openverse",
+        "production_engine": "ffmpeg",
+        "policy": "cheap_first",
+    }
+    # Persisted payload is untouched (no provider data invented or dropped).
+    item = db.get_queue_item("q-prov")
+    assert item["payload"]["tts_provider"] == "kokoro"
+
+
+def test_production_retry_forces_auto_publish_false(retry_bridge):
+    """Even a payload requesting auto_publish never publishes from desktop."""
+    handlers, db, captured, done, _ = retry_bridge
+    payload = {
+        "topic": "Rust performance",
+        "channel_id": "chan1",
+        "policy": "local_only",
+        "profile": "short_vertical",
+        "auto_publish": True,
+    }
+    _seed_terminal_item(db, "failed", queue_id="q-pub", job_id="job-pub", payload=payload)
+
+    handlers.dispatch("production.retry", {"queue_id": "q-pub"})
+
+    assert done.wait(timeout=10)
+    assert captured["force_auto_publish"] is False
+
+
+def test_production_retry_claim_race_leaves_item_queued(retry_bridge, monkeypatch):
+    """If a polling worker wins the item, retry returns queued, not an error."""
+    handlers, db, captured, done, _ = retry_bridge
+    _seed_terminal_item(db, "failed", queue_id="q-race", job_id="job-race")
+
+    monkeypatch.setattr(db, "claim_queue_item", lambda **kwargs: None)
+
+    res = handlers.dispatch("production.retry", {"queue_id": "q-race"})
+
+    assert res == {"retried": True, "queue_id": "q-race", "status": "queued"}
+    assert db.get_queue_item("q-race")["status"] == "queued"
+    assert not done.wait(timeout=1.0)  # bridge did not race the other worker
+
+
+def test_production_retry_worker_error_fails_item_without_crashing(retry_bridge):
+    """A worker failure marks the item failed (non-retryable); the thread survives."""
+    handlers, db, captured, done, behaviour = retry_bridge
+    behaviour["mode"] = "raise"
+    _seed_terminal_item(db, "failed", queue_id="q-err", job_id="job-err")
+
+    res = handlers.dispatch("production.retry", {"queue_id": "q-err"})
+
+    assert res["retried"] is True
+    # The worker raised; the handler's error path writes the terminal status
+    # after the worker returns, so poll for it rather than racing the thread.
+    assert done.wait(timeout=10)
+    assert _wait_for(lambda: db.get_queue_item("q-err")["status"] == "failed")
+    item = db.get_queue_item("q-err")
+    assert item["status"] == "failed"
+    assert "boom" in item["last_error"]
+
+
+def test_production_retry_missing_params(retry_bridge):
+    """Retry still requires a job_id or queue_id."""
+    handlers, db, captured, done, _ = retry_bridge
+    from autopilot.bridge.protocol import ProtocolError
+
+    with pytest.raises(ProtocolError):
+        handlers.dispatch("production.retry", None)
+    with pytest.raises(ProtocolError):
+        handlers.dispatch("production.retry", {"job_id": "ghost-job"})
+    assert not done.wait(timeout=1.0)
+    assert captured == {}
+
+
+# ---------------------------------------------------------------------------
+# Production engine lifecycle — the desktop must be able to ensure the
+# MoneyPrinterTurbo API service is running before a render begins.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def engine_handlers(tmp_path, monkeypatch):
+    """Bridge handlers with the MPT runtime fully stubbed (no real service)."""
+    from autopilot.bridge.handlers import BridgeHandlers
+    from autopilot.core.config import Config
+    from autopilot.db.manager import DBManager
+
+    monkeypatch.setenv("AUTOPILOT_DB_PATH", str(tmp_path / "engine.db"))
+    db = DBManager(tmp_path / "engine.db")
+    db.init_schema()
+    return BridgeHandlers(Config(), db)
+
+
+def test_production_engine_status_is_read_only(engine_handlers, monkeypatch):
+    """status() probes but must never spawn a service."""
+    import autopilot.core.moneyprinter_runtime as rt
+
+    calls = {"spawn": False}
+    monkeypatch.setattr(
+        rt.MoneyPrinterRuntime, "is_service_running", lambda self: True
+    )
+    monkeypatch.setattr(
+        rt.subprocess, "Popen", lambda *a, **k: calls.__setitem__("spawn", True)
+    )
+
+    res = engine_handlers.dispatch("production.engine.status", None)
+
+    assert res["running"] is True
+    assert res["engine"] == "moneyprinterturbo"
+    assert res["version"] == "v1.3.6"
+    assert res["mode"] == "http_api"
+    assert calls["spawn"] is False  # status never starts anything
+
+
+def test_production_engine_ensure_reuses_running_service(engine_handlers, monkeypatch):
+    """ensure() returns already_running and does not spawn a duplicate."""
+    import autopilot.core.moneyprinter_runtime as rt
+
+    monkeypatch.setattr(rt.MoneyPrinterRuntime, "is_service_running", lambda self: True)
+    monkeypatch.setattr(rt.subprocess, "Popen", lambda *a, **k: pytest.fail("must not spawn"))
+
+    res = engine_handlers.dispatch("production.engine.ensure", None)
+
+    assert res["running"] is True
+    assert res["mode"] == "already_running"
+
+
+def test_production_engine_ensure_reports_startup_failure(engine_handlers, monkeypatch):
+    """A service that cannot start yields a clear error, never a silent fallback."""
+    import autopilot.core.moneyprinter_runtime as rt
+
+    monkeypatch.setattr(rt.MoneyPrinterRuntime, "is_service_running", lambda self: False)
+    monkeypatch.setattr(rt, "find_moneyprinter_home", lambda root=None: None)
+
+    res = engine_handlers.dispatch("production.engine.ensure", None)
+
+    assert res["running"] is False
+    assert res["mode"] == "not_installed"
+    assert res["error"]
+
+
+def test_production_engine_methods_are_registered():
+    """Both methods must be dispatchable via the bridge method registry."""
+    from autopilot.bridge.handlers import BridgeHandlers
+
+    assert "production.engine.status" in BridgeHandlers.METHOD_NAMES
+    assert "production.engine.ensure" in BridgeHandlers.METHOD_NAMES
+    assert hasattr(BridgeHandlers, "on_production_engine_status")
+    assert hasattr(BridgeHandlers, "on_production_engine_ensure")
 
 
 def test_events_tail(client):

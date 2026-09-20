@@ -171,6 +171,23 @@ export interface ProductionActionResult {
   cancelled?: boolean;
   retried?: boolean;
   queue_id: string;
+  /** Present for production.retry: the item status after the retry (e.g. "running"). */
+  status?: string;
+}
+
+export interface ProductionEngineStatus {
+  engine: string;
+  version: string;
+  /** True only when the MoneyPrinterTurbo API answers the readiness endpoint. */
+  running: boolean;
+  endpoint: string;
+  /** True when this Autopilot process owns the service child. */
+  managed: boolean;
+  mode: string;
+  pid?: number | null;
+  home?: string | null;
+  /** Populated when the service could not be started. */
+  error?: string | null;
 }
 
 // ---------------------------------------------------------------------------

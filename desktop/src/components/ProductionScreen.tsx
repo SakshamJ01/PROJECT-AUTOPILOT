@@ -2,6 +2,8 @@ import { useMemo, useState } from "react";
 import {
   useJobInspectQuery,
   useProductionCancelMutation,
+  useProductionEngineEnsureMutation,
+  useProductionEngineStatusQuery,
   useProductionRetryMutation,
   useProductionStartMutation,
   useQueueQuery,
@@ -235,8 +237,70 @@ function ProductionDetail({ item }: { item: QueueItem }) {
   );
 }
 
+type EnsureMutation = ReturnType<typeof useProductionEngineEnsureMutation>;
+
+function ProductionEngineCard({ ensure }: { ensure: EnsureMutation }) {
+  const status = useProductionEngineStatusQuery();
+  const [dismissed, setDismissed] = useState(false);
+
+  const data = status.data;
+  const error = ensure.isError
+    ? ((ensure.error as Error)?.message ?? "Failed to start the production engine")
+    : ensure.data && !ensure.data.running
+      ? (ensure.data.error ?? "MoneyPrinterTurbo is not running")
+      : null;
+
+  if (error && !dismissed) {
+    return (
+      <div className="banner banner-warn">
+        <strong>Production engine unavailable:</strong> {error}
+        <div className="start-form-actions">
+          <button
+            className="primary-btn"
+            type="button"
+            disabled={ensure.isPending}
+            onClick={() => {
+              setDismissed(false);
+              ensure.mutate();
+            }}
+          >
+            {ensure.isPending ? "Starting engine…" : "Retry engine startup"}
+          </button>
+          <button type="button" onClick={() => setDismissed(true)}>
+            Dismiss
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (!data) return null;
+  const tone = data.running ? "ok" : "warn";
+  const label = data.running
+    ? `Production engine ready — ${data.engine} ${data.version}${data.managed ? ` (pid ${data.pid})` : ""}`
+    : `Production engine not running — ${data.engine} ${data.version} will start on next production`;
+  return (
+    <div className={`banner banner-${tone === "ok" ? "info" : "warn"}`}>
+      {label}
+      {!data.running ? (
+        <div className="start-form-actions">
+          <button
+            className="primary-btn"
+            type="button"
+            disabled={ensure.isPending}
+            onClick={() => ensure.mutate()}
+          >
+            {ensure.isPending ? "Starting engine…" : "Start engine now"}
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function StartForm({ onDone }: { onDone: () => void }) {
   const mutation = useProductionStartMutation();
+  const ensure = useProductionEngineEnsureMutation();
   const [topic, setTopic] = useState("");
   const [channel, setChannel] = useState("default");
   const [policy, setPolicy] = useState<(typeof POLICIES)[number]>("local_only");
@@ -245,15 +309,23 @@ function StartForm({ onDone }: { onDone: () => void }) {
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!topic.trim()) return;
-    mutation.mutate(
-      { topic: topic.trim(), channel, policy, profile },
-      {
-        onSuccess: () => {
-          setTopic("");
-          onDone();
+    // Guarantee the MoneyPrinterTurbo service is up before the render stage;
+    // its error is surfaced in the engine card rather than mid-pipeline.
+    const runStart = () =>
+      mutation.mutate(
+        { topic: topic.trim(), channel, policy, profile },
+        {
+          onSuccess: () => {
+            setTopic("");
+            onDone();
+          },
         },
-      },
-    );
+      );
+    if (!ensure.data?.running) {
+      ensure.mutate(undefined, { onSuccess: (res) => res.running && runStart() });
+    } else {
+      runStart();
+    }
   };
 
   return (
@@ -316,10 +388,19 @@ function StartForm({ onDone }: { onDone: () => void }) {
           Runs the full production pipeline on the local engine. Publishing is
           never enabled from the desktop.
         </p>
-        <button className="primary-btn" type="submit" disabled={!topic.trim() || mutation.isPending}>
-          {mutation.isPending ? "Starting…" : "Start production"}
+        <button
+          className="primary-btn"
+          type="submit"
+          disabled={!topic.trim() || mutation.isPending || ensure.isPending}
+        >
+          {mutation.isPending
+            ? "Starting…"
+            : ensure.isPending
+              ? "Preparing engine…"
+              : "Start production"}
         </button>
       </div>
+      <ProductionEngineCard ensure={ensure} />
       {mutation.isError ? (
         <div className="banner banner-warn">
           {(mutation.error as Error)?.message ?? "Failed to start production"}
