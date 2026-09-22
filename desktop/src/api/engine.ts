@@ -32,4 +32,6 @@ export const POLL = {
   activityMs: 2000,
   logsMs: 2000,
   systemMs: 8000,
+  // MoneyPrinterTurbo readiness probe — quicker while the service is down.
+  engineMs: 5000,
 } as const;
