@@ -152,6 +152,26 @@ class TestArtifactPaths:
         assert (d / "media").exists()
         assert (d / "script").exists()
 
+    def test_job_artifact_dir_windows_safe(self, tmp_path, monkeypatch):
+        """job_artifact_dir must create a valid directory even when job_id
+        contains Windows‑invalid characters such as ?."""
+        from autopilot.core import artifacts
+        monkeypatch.setattr(CONFIG, "artifacts_dir", tmp_path)
+
+        job_id = "prod-Why-Is-the-Sky-Blue?-8c5e6c8"
+        d = artifacts.job_artifact_dir(job_id)
+
+        # Directory must exist and be named with a safe replacement, not "?"
+        assert d.exists()
+        assert not any(c in d.name for c in "><:\"/\\|?*")
+        # The original job_id must be recoverable / preserved elsewhere;
+        # here we just verify the on-disk name is safe.
+        assert "?" not in d.name
+
+        # Subdirectories must also exist
+        assert (d / "media").exists()
+        assert (d / "render").exists()
+
 
 class TestHealthCommands:
     def test_ffmpeg_check(self):
