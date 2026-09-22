@@ -5,8 +5,11 @@ page metadata preservation, and normalized ResearchEvidenceRecord output.
 from __future__ import annotations
 import asyncio
 import hashlib
+import importlib.util
 import json
 import logging
+import sys
+import threading
 import urllib.parse
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -15,6 +18,66 @@ from autopilot.core.contracts import ResearchEvidenceRecord, ResearchProviderPro
 from autopilot.providers.contracts import ProviderHealth, CapabilityMetadata, CostUsageMetadata, ProviderErrorType
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Guarded Crawl4AI import.
+#
+# ``import crawl4ai`` can block indefinitely on some Windows setups while its
+# numpy C-extension loads (observed live in the desktop bridge as a 40-minute
+# RESEARCH-stage hang with zero DB progress). To guarantee that a Research job
+# can NEVER hang on this provider, the import is performed inside a bounded
+# daemon thread. If it does not finish within ``timeout`` we treat Crawl4AI as
+# unavailable (fail-closed) and the caller proceeds without it. The daemon
+# thread (if left blocked) cannot stall the pipeline because nothing waits on
+# it again, and the result is cached for the process lifetime.
+# ---------------------------------------------------------------------------
+_CRAWL4AI_IMPORT_STATE: Optional[bool] = None
+
+
+def _crawl4ai_importable(timeout: float = 30.0) -> bool:
+    """Bounded, cached availability probe for the ``crawl4ai`` package.
+
+    Never raises and never blocks the caller longer than ``timeout`` seconds.
+    """
+    global _CRAWL4AI_IMPORT_STATE
+    if _CRAWL4AI_IMPORT_STATE is not None:
+        return _CRAWL4AI_IMPORT_STATE
+    if "crawl4ai" in sys.modules:
+        _CRAWL4AI_IMPORT_STATE = True
+        return True
+    if importlib.util.find_spec("crawl4ai") is None:
+        _CRAWL4AI_IMPORT_STATE = False
+        return False
+
+    state: Dict[str, bool] = {"ok": False}
+
+    def _load() -> None:
+        try:
+            import crawl4ai  # noqa: F401
+            state["ok"] = True
+        except Exception:  # noqa: BLE001 — availability probe, fail closed
+            state["ok"] = False
+
+    probe = threading.Thread(target=_load, name="crawl4ai_import_probe", daemon=True)
+    probe.start()
+    probe.join(timeout)
+    _CRAWL4AI_IMPORT_STATE = bool(state.get("ok"))
+    return _CRAWL4AI_IMPORT_STATE
+
+
+def create_crawl4ai_provider(*args, **kwargs) -> Optional["Crawl4AIProvider"]:
+    """Lazy, guarded factory.
+
+    Returns a :class:`Crawl4AIProvider` when Crawl4AI is importable, else
+    ``None``. Never raises and never hangs on the import.
+    """
+    try:
+        if not _crawl4ai_importable():
+            return None
+        return Crawl4AIProvider(*args, **kwargs)
+    except Exception as exc:  # noqa: BLE001 — fail closed, structured
+        logger.warning("crawl4ai provider unavailable: %s", exc)
+        return None
 
 
 class Crawl4AIProvider:
@@ -41,11 +104,8 @@ class Crawl4AIProvider:
         self._crawler_available = self._detect_crawl4ai()
 
     def _detect_crawl4ai(self) -> bool:
-        try:
-            import crawl4ai
-            return True
-        except ImportError:
-            return False
+        # Bounded, cached probe: constructors must never block on the import.
+        return _crawl4ai_importable()
 
     def health_check(self) -> ProviderHealth:
         if not self._crawler_available:
@@ -54,7 +114,14 @@ class Crawl4AIProvider:
                 provider_name=self.provider_name,
                 error="crawl4ai package is not installed or importable",
             )
-        import crawl4ai
+        try:
+            import crawl4ai
+        except Exception as exc:  # noqa: BLE001 — probe says available; surface import error cleanly
+            return ProviderHealth(
+                healthy=False,
+                provider_name=self.provider_name,
+                error=f"crawl4ai import failed: {exc}",
+            )
         return ProviderHealth(
             healthy=True,
             provider_name=self.provider_name,

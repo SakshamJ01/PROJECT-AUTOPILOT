@@ -26,7 +26,6 @@ from autopilot.db.manager import DBManager
 from autopilot.core.channel import ChannelManager
 from autopilot.core.research_coordinator import ResearchCoordinator
 from autopilot.providers.wikipedia_provider import WikipediaProvider
-from autopilot.providers.crawl4ai_provider import Crawl4AIProvider
 from autopilot.providers.mock_script import MockScriptProvider
 from autopilot.providers.mock_search import MockSearchProvider
 from autopilot.providers.mock_tts import MockTTSProvider
@@ -185,7 +184,6 @@ class PipelineOrchestrator:
                 self.db.update_job_status(job_id, WorkflowState.RESEARCHING.value)
                 coord = ResearchCoordinator(
                     wikipedia_provider=WikipediaProvider(),
-                    crawl4ai_provider=Crawl4AIProvider(),
                     mock_provider=MockSearchProvider(),
                 )
                 strat = "wikipedia_first"

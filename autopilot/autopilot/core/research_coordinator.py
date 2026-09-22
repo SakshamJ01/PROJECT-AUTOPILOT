@@ -15,7 +15,6 @@ from autopilot.core.contracts import (
     ResearchBundle,
 )
 from autopilot.providers.wikipedia_provider import WikipediaProvider
-from autopilot.providers.crawl4ai_provider import Crawl4AIProvider
 from autopilot.providers.mock_search import MockSearchProvider
 
 logger = logging.getLogger(__name__)
@@ -52,12 +51,56 @@ class ResearchCoordinator:
     def __init__(
         self,
         wikipedia_provider: Optional[WikipediaProvider] = None,
-        crawl4ai_provider: Optional[Crawl4AIProvider] = None,
+        crawl4ai_provider: Optional[Any] = None,
         mock_provider: Optional[MockSearchProvider] = None,
     ):
         self.wiki = wikipedia_provider or WikipediaProvider()
-        self.crawl4ai = crawl4ai_provider or Crawl4AIProvider()
+        # Crawl4AI is NEVER constructed eagerly. It is resolved lazily (and
+        # guarded) the first time a strategy actually routes to it, so that
+        # Wikipedia/mock-only research jobs can never import Crawl4AI.
+        self._crawl4ai = crawl4ai_provider
+        self._crawl4ai_attempted = crawl4ai_provider is not None
         self.mock = mock_provider or MockSearchProvider()
+
+    def _get_crawl4ai(self) -> Optional[Any]:
+        """Lazily resolve the Crawl4AI provider through the guarded factory.
+
+        Returns the provider, or ``None`` when Crawl4AI cannot be imported.
+        Never blocks indefinitely and never raises.
+        """
+        if not self._crawl4ai_attempted:
+            self._crawl4ai_attempted = True
+            from autopilot.providers.crawl4ai_provider import create_crawl4ai_provider
+            self._crawl4ai = create_crawl4ai_provider()
+        return self._crawl4ai
+
+    def _search_crawl4ai(self, topic: str, max_results: int = 5) -> List[ResearchEvidenceRecord]:
+        """Run Crawl4AI search when available; otherwise fail closed with [].
+
+        Structured, non-raising path: an unavailable Crawl4AI simply yields no
+        evidence rather than blocking or crashing the research stage.
+        """
+        provider = self._get_crawl4ai()
+        if provider is None:
+            logger.warning("crawl4ai provider unavailable; skipping crawl4ai research for topic %r", topic)
+            return []
+        try:
+            return provider.search(topic, max_results=max_results)
+        except Exception as exc:  # noqa: BLE001 — provider failure must not crash research
+            logger.warning(f"Crawl4AI search failed for topic '{topic}': {exc}")
+            return []
+
+    def _fetch_crawl4ai_page(self, url: str) -> Optional[ResearchEvidenceRecord]:
+        """Fetch a single URL via Crawl4AI when available; otherwise None."""
+        provider = self._get_crawl4ai()
+        if provider is None:
+            logger.warning("crawl4ai provider unavailable; cannot fetch explicit URL %r", url)
+            return None
+        try:
+            return provider.fetch_page(url)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"Crawl4AI fetch failed for url '{url}': {exc}")
+            return None
 
     def coordinate_research(
         self,
@@ -74,16 +117,16 @@ class ResearchCoordinator:
         if is_url:
             chosen_strategy = "explicit_url"
             # Route directly to Crawl4AI for explicit URL
-            page_rec = self.crawl4ai.fetch_page(topic.strip())
+            page_rec = self._fetch_crawl4ai_page(topic.strip())
             if page_rec:
                 raw_candidates.append(page_rec)
         elif strategy == "crawl4ai_only":
-            raw_candidates.extend(self.crawl4ai.search(topic, max_results=max_results))
+            raw_candidates.extend(self._search_crawl4ai(topic, max_results=max_results))
         elif strategy == "combined":
             # Tier-1: Wikipedia
             raw_candidates.extend(self._search_wikipedia(topic, max_results=max_results))
-            # Tier-2: Crawl4AI
-            raw_candidates.extend(self.crawl4ai.search(topic, max_results=max_results))
+            # Tier-2: Crawl4AI (lazy + guarded)
+            raw_candidates.extend(self._search_crawl4ai(topic, max_results=max_results))
         elif strategy == "mock":
             if allow_mock:
                 raw_candidates.extend(self._search_mock(topic, max_results=max_results))
@@ -93,7 +136,7 @@ class ResearchCoordinator:
             raw_candidates.extend(wiki_results)
             # If Wikipedia yielded sparse results (< 2), augment with Crawl4AI
             if len(wiki_results) < 2:
-                crawl_results = self.crawl4ai.search(topic, max_results=max_results - len(wiki_results))
+                crawl_results = self._search_crawl4ai(topic, max_results=max_results - len(wiki_results))
                 raw_candidates.extend(crawl_results)
 
         total_evaluated = len(raw_candidates)
