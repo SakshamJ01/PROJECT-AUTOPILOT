@@ -339,7 +339,7 @@ def test_production_start_requires_topic(client):
 
 def test_production_start_delegates_to_worker(tmp_path, monkeypatch):
     """production.start enqueues, claims, and runs the canonical worker path
-    (stubbed) with auto_publish forced off and no secrets in the payload."""
+    asynchronously (stubbed) with auto_publish forced off and no secrets in the payload."""
     import autopilot.core.worker as worker_module
     from autopilot.bridge.handlers import BridgeHandlers
     from autopilot.core.config import Config
@@ -350,6 +350,7 @@ def test_production_start_delegates_to_worker(tmp_path, monkeypatch):
     db.init_schema()
 
     captured: dict = {}
+    done = threading.Event()
 
     class FakeWorker:
         def __init__(self, worker_id, config, db):
@@ -359,15 +360,18 @@ def test_production_start_delegates_to_worker(tmp_path, monkeypatch):
             captured["claimed"] = claimed
             captured["provider_overrides"] = provider_overrides
             captured["force_auto_publish"] = force_auto_publish
-            db.complete_queue_item(claimed["queue_id"])  # mirror the real worker
-            return {
-                "queue_id": claimed["queue_id"],
-                "job_id": claimed["job_id"],
-                "status": "succeeded",
-                "media_path": "/tmp/out.mp4",
-                "qa_status": "APPROVED",
-                "error": None,
-            }
+            try:
+                db.complete_queue_item(claimed["queue_id"])  # mirror the real worker
+                return {
+                    "queue_id": claimed["queue_id"],
+                    "job_id": claimed["job_id"],
+                    "status": "succeeded",
+                    "media_path": "/tmp/out.mp4",
+                    "qa_status": "APPROVED",
+                    "error": None,
+                }
+            finally:
+                done.set()
 
     monkeypatch.setattr(worker_module, "LocalWorker", FakeWorker)
 
@@ -378,10 +382,11 @@ def test_production_start_delegates_to_worker(tmp_path, monkeypatch):
         "policy": "local_only",
     })
 
-    assert result["status"] == "succeeded"
-    assert result["qa_status"] == "APPROVED"
+    assert result["status"] == "running"
     assert result["job_id"].startswith("prod-Rust-performance-")
     assert result["queue_id"].startswith("desk-")
+
+    assert done.wait(timeout=5.0)
 
     claimed = captured["claimed"]
     assert claimed["status"] == "running"
@@ -415,6 +420,7 @@ def test_production_start_blocks_mock_under_local_only(tmp_path, monkeypatch):
     db.init_schema()
 
     captured: dict = {}
+    done = threading.Event()
 
     class FakeWorker:
         def __init__(self, worker_id, config, db):
@@ -422,7 +428,10 @@ def test_production_start_blocks_mock_under_local_only(tmp_path, monkeypatch):
 
         def process_claimed_item(self, claimed, provider_overrides=None, force_auto_publish=None):
             captured["overrides"] = provider_overrides
-            return {"queue_id": claimed["queue_id"], "job_id": claimed["job_id"], "status": "failed", "error": "X"}
+            try:
+                return {"queue_id": claimed["queue_id"], "job_id": claimed["job_id"], "status": "failed", "error": "X"}
+            finally:
+                done.set()
 
     monkeypatch.setattr(worker_module, "LocalWorker", FakeWorker)
 
@@ -433,6 +442,7 @@ def test_production_start_blocks_mock_under_local_only(tmp_path, monkeypatch):
         "llm_provider": "mock",
         "tts_provider": "mock",
     })
+    assert done.wait(timeout=5.0)
     assert captured["overrides"]["policy"] == "local_only"
     assert captured["overrides"]["llm"] == "mock"  # worker will reject silently with resolve_providers_for_policy
 

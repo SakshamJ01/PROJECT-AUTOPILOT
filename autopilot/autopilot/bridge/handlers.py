@@ -367,37 +367,49 @@ class BridgeHandlers:
         if claimed is None:
             raise ProtocolError(INTERNAL_ERROR, "Failed to claim newly enqueued item")
 
-        # Execute pipeline synchronously via the canonical worker path.
-        from autopilot.core.worker import LocalWorker
-
-        worker = LocalWorker(
-            worker_id=f"desktop-{os.getpid()}",
-            config=self.config,
-            db=self.db,
-        )
-        try:
-            result = worker.process_claimed_item(
-                claimed,
-                provider_overrides=provider_overrides or None,
-                force_auto_publish=False,
-            )
-        except Exception as exc:  # noqa: BLE001 — must not crash the bridge
-            self.db.fail_queue_item(queue_id, str(exc), retryable=False)
-            result = {
-                "queue_id": queue_id,
-                "job_id": job_id,
-                "status": "failed",
-                "error": str(exc),
-            }
+        # Execute pipeline asynchronously on a daemon thread so the bridge
+        # returns the newly created job immediately to the UI (H004-H007).
+        threading.Thread(
+            target=self._run_production_item,
+            args=(claimed, provider_overrides),
+            name=f"prod-{queue_id}",
+            daemon=True,
+        ).start()
 
         return {
             "queue_id": queue_id,
             "job_id": job_id,
-            "status": result.get("status", "unknown"),
-            "media_path": result.get("media_path"),
-            "qa_status": result.get("qa_status"),
-            "error": result.get("error"),
+            "status": "running",
+            "media_path": None,
+            "qa_status": None,
+            "error": None,
         }
+
+    def _run_production_item(self, claimed: dict, provider_overrides: dict[str, str] | None) -> None:
+        """Execute a production item through the canonical worker path.
+
+        Never raises: process_claimed_item owns all terminal status writes,
+        and any residual failure marks the item non-retryable.
+        """
+        from autopilot.core.worker import LocalWorker
+
+        queue_id = claimed["queue_id"]
+        try:
+            worker = LocalWorker(
+                worker_id=f"desktop-{os.getpid()}",
+                config=self.config,
+                db=self.db,
+            )
+            worker.process_claimed_item(
+                claimed,
+                provider_overrides=provider_overrides or None,
+                force_auto_publish=False,  # desktop production never publishes
+            )
+        except Exception as exc:  # noqa: BLE001 — must not crash the worker thread
+            try:
+                self.db.fail_queue_item(queue_id, str(exc), retryable=False)
+            except Exception:  # noqa: BLE001 — best-effort terminal status
+                pass
 
     def on_production_cancel(self, params: dict | None) -> dict[str, Any]:
         """Cancel a queue item by job_id or queue_id."""

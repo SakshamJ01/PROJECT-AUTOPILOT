@@ -438,7 +438,7 @@ class OpenAICompatibleLLMProvider(LLMProvider):
         base_url: Optional[str] = None,
         api_key: Optional[str] = None,
         model_name: Optional[str] = None,
-        timeout: float = 60.0,
+        timeout: float = 180.0,
         idle_timeout: float = 60.0,
         stream: bool = True,
         extra_headers: Optional[Dict[str, str]] = None,
@@ -463,7 +463,13 @@ class OpenAICompatibleLLMProvider(LLMProvider):
             or os.getenv("OPENROUTER_KEY")
             or ""
         )
-        self.timeout = float(os.getenv("OPENAI_TIMEOUT", os.getenv("OLLAMA_TIMEOUT", str(timeout))))
+        default_timeout = getattr(CONFIG, "ollama_timeout", 180.0)
+        env_timeout = (
+            os.getenv("OPENAI_TIMEOUT")
+            or os.getenv("OLLAMA_TIMEOUT")
+            or os.getenv("AUTOPILOT_OLLAMA_TIMEOUT")
+        )
+        self.timeout = float(env_timeout) if env_timeout else float(default_timeout if timeout == 60.0 else timeout)
         self.idle_timeout = float(os.getenv("OLLAMA_IDLE_TIMEOUT", str(idle_timeout)))
         self.stream = stream
         self.extra_headers = extra_headers or {}
