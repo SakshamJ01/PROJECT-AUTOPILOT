@@ -146,10 +146,9 @@ class LocalWorker:
                     policy=policy,
                     asset_provider=asset_provider,
                 )
-            except ValueError:
-                # Policy forbids mock but no explicit real provider was given;
-                # fall through and let the pipeline fail loudly.
-                pass
+            except ValueError as exc:
+                self.db.fail_queue_item(queue_id=item_dict["queue_id"], error_message=str(exc), retryable=False)
+                return {"queue_id": item_dict["queue_id"], "job_id": job_id, "status": "failed", "error": str(exc)}
 
         # Check channel status & config if channel profile exists
         from autopilot.core.channel import ChannelManager
