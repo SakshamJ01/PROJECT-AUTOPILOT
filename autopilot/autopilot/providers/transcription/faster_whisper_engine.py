@@ -174,15 +174,93 @@ class FasterWhisperEngine:
             centis = 0
         return f"{hours:d}:{minutes:02d}:{secs:02d}.{centis:02d}"
 
+    @staticmethod
+    def _chunk_segment_to_phrases(
+        seg: SegmentTimestamp, max_words: int = 3, max_chars: int = 25, max_duration_sec: float = 2.5
+    ) -> List[Tuple[float, float, str, List[WordTimestamp]]]:
+        """Splits a single segment into short phrase-level timing units suitable for modern short-form captions."""
+        results: List[Tuple[float, float, str, List[WordTimestamp]]] = []
+
+        if seg.words and len(seg.words) > 0:
+            current_words: List[WordTimestamp] = []
+            current_chars = 0
+            chunk_start = seg.words[0].start_sec
+
+            for w in seg.words:
+                w_text = w.word.strip()
+                if not w_text:
+                    continue
+
+                new_chars = current_chars + (1 if current_words else 0) + len(w_text)
+                duration = w.end_sec - chunk_start
+
+                if current_words and (
+                    len(current_words) >= max_words
+                    or new_chars > max_chars
+                    or duration > max_duration_sec
+                ):
+                    chunk_end = current_words[-1].end_sec
+                    phrase = " ".join(cw.word.strip() for cw in current_words)
+                    results.append((chunk_start, chunk_end, phrase, current_words))
+                    current_words = [w]
+                    current_chars = len(w_text)
+                    chunk_start = w.start_sec
+                else:
+                    if not current_words:
+                        chunk_start = w.start_sec
+                    current_words.append(w)
+                    current_chars = new_chars
+
+            if current_words:
+                chunk_end = current_words[-1].end_sec
+                phrase = " ".join(cw.word.strip() for cw in current_words)
+                results.append((chunk_start, chunk_end, phrase, current_words))
+
+        if not results:
+            words = [w.strip() for w in seg.text.strip().split() if w.strip()]
+            if not words:
+                return []
+            tot_dur = max(0.1, seg.end_sec - seg.start_sec)
+            word_dur = tot_dur / max(1, len(words))
+
+            cur_words: List[str] = []
+            cur_start = seg.start_sec
+
+            for i, w in enumerate(words):
+                w_end = seg.start_sec + (i + 1) * word_dur
+                cur_words.append(w)
+                phrase_chars = sum(len(x) for x in cur_words) + len(cur_words) - 1
+
+                if len(cur_words) >= max_words or phrase_chars >= max_chars or (i == len(words) - 1):
+                    phrase = " ".join(cur_words)
+                    results.append((cur_start, round(w_end, 2), phrase, []))
+                    cur_words = []
+                    cur_start = round(w_end, 2)
+
+        return results
+
     def generate_srt(self, segments: List[SegmentTimestamp]) -> str:
         lines: List[str] = []
-        for idx, seg in enumerate(segments, 1):
-            start_str = self._format_srt_time(seg.start_sec)
-            end_str = self._format_srt_time(seg.end_sec)
-            lines.append(str(idx))
-            lines.append(f"{start_str} --> {end_str}")
-            lines.append(seg.text)
-            lines.append("")
+        srt_idx = 1
+        for seg in segments:
+            phrases = self._chunk_segment_to_phrases(seg)
+            if not phrases:
+                start_str = self._format_srt_time(seg.start_sec)
+                end_str = self._format_srt_time(seg.end_sec)
+                lines.append(str(srt_idx))
+                lines.append(f"{start_str} --> {end_str}")
+                lines.append(seg.text)
+                lines.append("")
+                srt_idx += 1
+            else:
+                for start_sec, end_sec, phrase_text, _ in phrases:
+                    start_str = self._format_srt_time(start_sec)
+                    end_str = self._format_srt_time(end_sec)
+                    lines.append(str(srt_idx))
+                    lines.append(f"{start_str} --> {end_str}")
+                    lines.append(phrase_text)
+                    lines.append("")
+                    srt_idx += 1
         return "\n".join(lines)
 
     def generate_ass(self, segments: List[SegmentTimestamp], title: str = "Autopilot Subtitles") -> str:
@@ -205,17 +283,24 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
         events: List[str] = []
         for seg in segments:
-            start_str = self._format_ass_time(seg.start_sec)
-            end_str = self._format_ass_time(seg.end_sec)
-            
-            # If word timestamps are present, create dynamic karaoke/highlight tags
-            if seg.words and len(seg.words) > 1:
-                highlighted_text = ""
-                for w in seg.words:
-                    word_duration_cs = int(max(10, (w.end_sec - w.start_sec) * 100))
-                    highlighted_text += f"{{\\k{word_duration_cs}}}{w.word} "
-                events.append(f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,{highlighted_text.strip()}")
-            else:
+            phrases = self._chunk_segment_to_phrases(seg)
+            if not phrases:
+                start_str = self._format_ass_time(seg.start_sec)
+                end_str = self._format_ass_time(seg.end_sec)
                 events.append(f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,{seg.text}")
+            else:
+                for start_sec, end_sec, phrase_text, phrase_words in phrases:
+                    start_str = self._format_ass_time(start_sec)
+                    end_str = self._format_ass_time(end_sec)
+                    if phrase_words and len(phrase_words) > 0:
+                        highlighted_text = ""
+                        for w in phrase_words:
+                            word_dur_cs = int(max(10, (w.end_sec - w.start_sec) * 100))
+                            highlighted_text += f"{{\\k{word_dur_cs}}}{w.word} "
+                        events.append(f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,{highlighted_text.strip()}")
+                    else:
+                        events.append(f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,{phrase_text}")
 
         return header + "\n".join(events) + "\n"
+
+

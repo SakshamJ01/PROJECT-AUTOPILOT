@@ -160,11 +160,51 @@ def evaluate_script(script_doc, topic: Optional[str] = None) -> QualityReport:
             checks.append(QualityCheck(check_name="spoke_narration", status="fail", message=f"Scene {s.scene_id} narration empty for spoken type", severity="blocking"))
             blocking += 1
 
-    # Duration positive
-    for s in script_doc.scenes:
+    # Duration positive & Minimum Total Script Duration (>= 25.0s)
+    total_est_dur = sum(s.estimated_duration_seconds for s in (script_doc.scenes or []))
+    for s in script_doc.scenes or []:
         if s.estimated_duration_seconds <= 0:
             checks.append(QualityCheck(check_name="positive_duration", status="fail", message=f"Scene {s.scene_id} duration non-positive", severity="blocking"))
             blocking += 1
+
+    if total_est_dur < 25.0:
+        checks.append(QualityCheck(
+            check_name="min_script_duration",
+            status="warning",
+            message=f"Script total estimated duration ({total_est_dur:.1f}s) is below target minimum threshold of 25.0s",
+            severity="warning",
+        ))
+        warnings += 1
+    else:
+        checks.append(QualityCheck(
+            check_name="min_script_duration",
+            status="pass",
+            message=f"Script estimated duration ({total_est_dur:.1f}s) meets or exceeds minimum 25.0s threshold",
+            severity="warning",
+        ))
+
+    # Intentional Ending Check
+    has_ending = False
+    if script_doc.scenes and len(script_doc.scenes) >= 3:
+        last_scene = script_doc.scenes[-1]
+        if last_scene.narration and len(last_scene.narration.strip()) > 0:
+            has_ending = True
+    if not has_ending:
+        checks.append(QualityCheck(
+            check_name="intentional_ending",
+            status="warning",
+            message="Script has fewer than 3 scenes or missing final scene narration",
+            severity="warning",
+        ))
+        warnings += 1
+    else:
+        checks.append(QualityCheck(
+            check_name="intentional_ending",
+            status="pass",
+            message="Intentional ending scene verified",
+            severity="warning",
+        ))
+
 
     # Order deterministic
     orders = [s.order for s in script_doc.scenes]
@@ -173,6 +213,7 @@ def evaluate_script(script_doc, topic: Optional[str] = None) -> QualityReport:
         blocking += 1
     else:
         checks.append(QualityCheck(check_name="deterministic_order", status="pass", message="Order ascending", severity="warning"))
+
 
     # CTA present (optional warning if missing but not blocking by default)
     if not script_doc.cta or len(script_doc.cta.strip()) == 0:

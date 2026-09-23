@@ -8,9 +8,9 @@ from typing import List, Optional
 
 class ProfileConfig(BaseModel):
     profile_id: str = "short_vertical"
-    target_duration_sec: float = 45.0
+    target_duration_sec: float = 35.0
     tone: str = "clear_direct"
-    scene_expectations: int = 4
+    scene_expectations: int = 6
     cta_required: bool = True
     title_style: str = "direct"
     pacing_params: dict = Field(default_factory=lambda: {"max_scene_sec": 15.0})

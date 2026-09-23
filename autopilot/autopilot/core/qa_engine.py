@@ -671,7 +671,21 @@ class QAEngine:
                 value_numeric=round(raw_speech_dur, 2), unit="seconds", status=QAStatus.PASS
             ))
 
+            if actual_dur < raw_speech_dur - 2.0:
+                trunc_diff = raw_speech_dur - actual_dur
+                findings.append(QAFinding(
+                    finding_id=f"{check_id}-narration-truncation",
+                    check_id=check_id,
+                    category=category,
+                    severity=QASeverity.HIGH,
+                    status=QAStatus.BLOCK if trunc_diff > 4.0 else QAStatus.WARN,
+                    message=f"Rendered video duration ({actual_dur:.2f}s) is significantly shorter than narration audio ({raw_speech_dur:.2f}s) by {trunc_diff:.2f}s",
+                    measured_value=actual_dur,
+                    expected_value=raw_speech_dur,
+                ))
+
         # Determine authoritative expected duration vs fallback
+
         expected_dur = 0.0
         if plan and getattr(plan, "rendered_duration_sec", None) is not None and float(plan.rendered_duration_sec) > 0:
             expected_dur = float(plan.rendered_duration_sec)

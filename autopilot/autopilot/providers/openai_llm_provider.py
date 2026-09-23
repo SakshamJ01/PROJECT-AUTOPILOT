@@ -78,7 +78,7 @@ def _build_prompts_and_evidence(
     corrective_instructions: Optional[str] = None,
     regeneration_reason: Optional[str] = None,
     attempt_number: int = 1,
-    target_duration: float = 30.0,
+    target_duration: float = 35.0,
 ) -> Tuple[str, str, List[str], set[str]]:
     """Build bounded, deduplicated system and user prompts with research evidence."""
     evidence_snippets: List[str] = []
@@ -167,7 +167,7 @@ def _build_prompts_and_evidence(
         '      "asset_query": "2-3 word photographic search query",\n'
         '      "on_screen_text": "2-4 WORD UPPERCASE BADGE",\n'
         '      "emphasis_words": ["KEYWORD"],\n'
-        '      "estimated_duration_seconds": 4.0,\n'
+        '      "estimated_duration_seconds": 5.0,\n'
         '      "scene_type": "talking_head",\n'
         '      "transition_hint": "cut"\n'
         '    },\n'
@@ -186,7 +186,31 @@ def _build_prompts_and_evidence(
         '    {\n'
         '      "scene_id": "scene-03",\n'
         '      "order": 3,\n'
-        '      "narration": "Next substantive fact or conclusion (10-18 words)",\n'
+        '      "narration": "Next substantive fact or context (10-18 words)",\n'
+        '      "visual_intent": "Concrete physical photographic description",\n'
+        '      "asset_query": "2-3 word photographic search query",\n'
+        '      "on_screen_text": "2-4 WORD UPPERCASE BADGE",\n'
+        '      "emphasis_words": ["KEYWORD"],\n'
+        '      "estimated_duration_seconds": 5.0,\n'
+        '      "scene_type": "broll",\n'
+        '      "transition_hint": "cut"\n'
+        '    },\n'
+        '    {\n'
+        '      "scene_id": "scene-04",\n'
+        '      "order": 4,\n'
+        '      "narration": "Additional surprising fact or depth (10-18 words)",\n'
+        '      "visual_intent": "Concrete physical photographic description",\n'
+        '      "asset_query": "2-3 word photographic search query",\n'
+        '      "on_screen_text": "2-4 WORD UPPERCASE BADGE",\n'
+        '      "emphasis_words": ["KEYWORD"],\n'
+        '      "estimated_duration_seconds": 5.0,\n'
+        '      "scene_type": "broll",\n'
+        '      "transition_hint": "cut"\n'
+        '    },\n'
+        '    {\n'
+        '      "scene_id": "scene-05",\n'
+        '      "order": 5,\n'
+        '      "narration": "Intentional conclusion or payoff connecting back to hook (10-18 words)",\n'
         '      "visual_intent": "Concrete physical photographic description",\n'
         '      "asset_query": "2-3 word photographic search query",\n'
         '      "on_screen_text": "2-4 WORD UPPERCASE BADGE",\n'
@@ -206,12 +230,14 @@ def _build_prompts_and_evidence(
         f"- Hook Style: {channel_hook_style}\n"
         f"- Visual Motif: {channel_visual_motif}\n"
         "EDITORIAL QUALITY RULES:\n"
-        "1. HOOK: Stop the viewer in the first 2-3 seconds with an intriguing curiosity gap or surprising fact. NEVER start with generic filler.\n"
-        "2. SCENE NARRATION: Punchy, conversational, spoken English. 10 to 18 words per scene. One clear idea per scene.\n"
-        "3. VISUAL INTENT: Describe concrete, tangible physical subjects suitable for photography.\n"
-        "4. ASSET QUERY: 2-3 words naming concrete physical photographic subjects.\n"
-        "5. ON_SCREEN_TEXT: 2-4 uppercase words for visual title card.\n"
-        "6. EMPHASIS_WORDS: 1-2 keywords from narration to highlight in captions.\n"
+        "1. DURATION: Generate 5 to 8 scenes so total video duration targets 30-45 seconds (approx 75-110 spoken words total).\n"
+        "2. STRUCTURE: Script MUST follow the progression: HOOK (Scene 1) -> EXPLANATION / FACTS (Middle Scenes) -> INTENTIONAL PAYOFF / ENDING (Final Scene).\n"
+        "3. INTENTIONAL ENDING: The final scene MUST be an intentional conclusion (payoff returning to hook, strongest final fact, seamless loop back, or payoff statement). NEVER end abruptly or use generic filler like 'thanks for watching'.\n"
+        "4. SCENE NARRATION: Punchy, conversational, spoken English. 10 to 18 words per scene. One clear idea per scene.\n"
+        "5. VISUAL INTENT: Describe concrete, tangible physical subjects suitable for photography.\n"
+        "6. ASSET QUERY: 2-3 words naming concrete physical photographic subjects.\n"
+        "7. ON_SCREEN_TEXT: 2-4 uppercase words for visual title card.\n"
+        "8. EMPHASIS_WORDS: 1-2 keywords from narration to highlight in captions.\n"
         "RULES FOR SCENE NARRATION:\n"
         "1. Every spoken scene (scene_type: talking_head, broll, montage) MUST have non-empty spoken 'narration'.\n"
         "2. Do NOT output empty strings for 'narration'.\n"
@@ -220,6 +246,7 @@ def _build_prompts_and_evidence(
         "2. DO NOT invent or fabricate statistics, dates, or names unsupported by supplied evidence.\n"
         "3. In 'source_references', list ONLY source IDs explicitly provided in the supplied research context."
     )
+
 
     user_prompt_lines = [f"Write a {int(target_duration)}-second vertical video script about: {topic}"]
     if cardinality:

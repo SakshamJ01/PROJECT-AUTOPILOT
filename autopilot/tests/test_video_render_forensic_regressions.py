@@ -267,3 +267,97 @@ def test_audio_renderer_rejects_corrupted_sample_rate(tmp_path, monkeypatch):
         renderer.render(plan, str(out_path))
     assert "invalid audio sample rate: 96000 Hz" in str(excinfo.value)
 
+
+def test_caption_chunking_phrase_level_timing():
+    """Verify FasterWhisperEngine generates phrase-level timed captions instead of single giant multiline blocks."""
+    from autopilot.providers.transcription.faster_whisper_engine import FasterWhisperEngine
+    from autopilot.core.contracts import SegmentTimestamp, WordTimestamp
+
+    engine = FasterWhisperEngine()
+
+    words = [
+        WordTimestamp(word="Rainbows", start_sec=0.0, end_sec=0.4, probability=0.99),
+        WordTimestamp(word="happen", start_sec=0.4, end_sec=0.8, probability=0.99),
+        WordTimestamp(word="when", start_sec=0.8, end_sec=1.1, probability=0.99),
+        WordTimestamp(word="sunlight", start_sec=1.1, end_sec=1.5, probability=0.99),
+        WordTimestamp(word="enters", start_sec=1.5, end_sec=1.8, probability=0.99),
+        WordTimestamp(word="raindrops.", start_sec=1.8, end_sec=2.4, probability=0.99),
+    ]
+
+    seg = SegmentTimestamp(
+        segment_id=1,
+        start_sec=0.0,
+        end_sec=2.4,
+        text="Rainbows happen when sunlight enters raindrops.",
+        words=words,
+    )
+
+    srt = engine.generate_srt([seg])
+    # Must produce multiple SRT subtitle blocks, not just 1 block containing the entire sentence
+    assert srt.count("-->") >= 2
+    assert "Rainbows happen" in srt
+    assert "when sunlight enters" in srt or "raindrops." in srt
+
+    ass = engine.generate_ass([seg])
+    assert ass.count("Dialogue:") >= 2
+
+
+def test_script_evaluation_min_duration_and_ending():
+    """Verify evaluate_script rejects scripts under 25s and validates intentional ending."""
+    from autopilot.core.quality import evaluate_script
+    from autopilot.core.contracts import ScriptDocument, ScriptScene
+
+    # Short script < 25s
+    short_script = ScriptDocument(
+        content_id="c-short",
+        topic="Test",
+        hook="Short hook",
+        scenes=[
+            ScriptScene(scene_id="s1", order=1, visual_intent="Img 1", narration="Hook scene", estimated_duration_seconds=5.0),
+            ScriptScene(scene_id="s2", order=2, visual_intent="Img 2", narration="Fact scene", estimated_duration_seconds=5.0),
+        ],
+    )
+    report_short = evaluate_script(short_script)
+    assert any(c.check_name == "min_script_duration" and c.status == "warning" for c in report_short.checks)
+
+    # Valid script >= 25s with 5 scenes and intentional ending
+    valid_script = ScriptDocument(
+        content_id="c-valid",
+        topic="Test",
+        hook="Good hook",
+        scenes=[
+            ScriptScene(scene_id="s1", order=1, visual_intent="Img 1", narration="Hook scene", estimated_duration_seconds=6.0),
+            ScriptScene(scene_id="s2", order=2, visual_intent="Img 2", narration="Fact 1", estimated_duration_seconds=7.0),
+            ScriptScene(scene_id="s3", order=3, visual_intent="Img 3", narration="Fact 2", estimated_duration_seconds=7.0),
+            ScriptScene(scene_id="s4", order=4, visual_intent="Img 4", narration="Fact 3", estimated_duration_seconds=7.0),
+            ScriptScene(scene_id="s5", order=5, visual_intent="Img 5", narration="Intentional payoff ending.", estimated_duration_seconds=8.0),
+        ],
+    )
+    report_valid = evaluate_script(valid_script)
+    assert report_valid.overall != "fail"
+    assert any(c.check_name == "min_script_duration" and c.status == "pass" for c in report_valid.checks)
+    assert any(c.check_name == "intentional_ending" and c.status == "pass" for c in report_valid.checks)
+
+
+def test_qa_duration_drift_truncation_warning():
+    """Verify QAEngine detects when rendered video is shorter than raw narration audio."""
+    from autopilot.core.qa_engine import QAEngine
+    from autopilot.core.contracts import ContentPackage, ContentItem, ScriptDocument, ScriptScene
+
+    qa = QAEngine()
+    item = ContentItem(content_id="c1", topic="test")
+    script = ScriptDocument(
+        content_id="c1",
+        topic="test",
+        hook="hook",
+        scenes=[
+            ScriptScene(scene_id="s1", order=1, visual_intent="Img", narration="Hello world", estimated_duration_seconds=13.24)
+        ]
+    )
+    package = ContentPackage(content_item=item, script=script, measured_duration_sec=13.24)
+
+    check, metrics = qa.check_duration_timeline(actual_dur=10.5, package=package)
+    assert any(f.finding_id.endswith("-narration-truncation") for f in check.findings)
+
+
+
