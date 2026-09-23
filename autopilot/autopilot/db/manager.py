@@ -623,9 +623,11 @@ class DBManager:
         self.conn: sqlite3.Connection | None = None
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        conn = sqlite3.connect(str(self.db_path), check_same_thread=False, timeout=30.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA busy_timeout = 30000")
         return conn
 
     def init_schema(self) -> None:
@@ -746,6 +748,35 @@ class DBManager:
                     (idempotency_key, job_id),
                 )
             conn.commit()
+
+    def transition_job(
+        self,
+        job_id: str,
+        to_state: str,
+        reason: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> bool:
+        """Atomically transitions a job's status and logs the corresponding workflow event."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT status FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+            if not row:
+                return False
+            from_state = row["status"]
+            conn.execute(
+                "UPDATE jobs SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE job_id = ?",
+                (to_state, job_id),
+            )
+            if idempotency_key:
+                conn.execute(
+                    "UPDATE jobs SET idempotency_key = ? WHERE job_id = ?",
+                    (idempotency_key, job_id),
+                )
+            conn.execute(
+                "INSERT INTO workflow_events (job_id, from_state, to_state, reason, idempotency_key) VALUES (?, ?, ?, ?, ?)",
+                (job_id, from_state, to_state, reason, idempotency_key),
+            )
+            conn.commit()
+            return True
 
     def log_event(self, job_id: str, from_state: str, to_state: str, reason: str | None = None, idempotency_key: str | None = None) -> None:
         with self._connect() as conn:
@@ -1670,7 +1701,7 @@ class DBManager:
             conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(
                 """
-                SELECT queue_id, attempt_count, max_attempts FROM queue_items
+                SELECT queue_id, job_id, stage, attempt_count, max_attempts FROM queue_items
                 WHERE status = 'running'
                   AND lease_expires_at IS NOT NULL
                   AND datetime(lease_expires_at) < datetime('now')
@@ -1678,6 +1709,8 @@ class DBManager:
             ).fetchall()
             for r in rows:
                 qid = r["queue_id"]
+                job_id = r["job_id"]
+                stage = r["stage"] or "UNKNOWN"
                 att = r["attempt_count"]
                 m_att = r["max_attempts"]
                 if att < m_att:
@@ -1692,6 +1725,16 @@ class DBManager:
                         """,
                         (int(grace_lease_sec), qid),
                     )
+                    conn.execute(
+                        "INSERT INTO errors (job_id, stage, error_type, message, details_json) VALUES (?, ?, ?, ?, ?)",
+                        (
+                            job_id,
+                            stage,
+                            "STALE_LEASE_RECOVERED",
+                            "Worker lease expired while running; rescheduled with backoff",
+                            json.dumps({"queue_id": qid, "attempt": att, "max_attempts": m_att}),
+                        ),
+                    )
                 else:
                     conn.execute(
                         """
@@ -1703,6 +1746,16 @@ class DBManager:
                         WHERE queue_id = ?
                         """,
                         (qid,),
+                    )
+                    conn.execute(
+                        "INSERT INTO errors (job_id, stage, error_type, message, details_json) VALUES (?, ?, ?, ?, ?)",
+                        (
+                            job_id,
+                            stage,
+                            "DEAD_LETTER",
+                            "Worker lease expired and max attempts reached",
+                            json.dumps({"queue_id": qid, "attempt": att, "max_attempts": m_att, "exhausted": True}),
+                        ),
                     )
                 recovered.append(qid)
             conn.commit()
