@@ -236,6 +236,15 @@ impl Engine {
                     }
                 }
             }
+            if parse_json {
+                let mut pending = internal.pending.lock().unwrap();
+                for (_, tx) in pending.drain() {
+                    let _ = tx.send(Err("engine process disconnected unexpectedly".to_string()));
+                }
+                if let Some(app) = &app {
+                    let _ = app.emit("bridge://disconnect", json!({ "state": "disconnected" }));
+                }
+            }
         });
     }
 

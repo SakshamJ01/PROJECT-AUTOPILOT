@@ -1,3 +1,5 @@
+import { useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import StatusBadge from "./components/StatusBadge";
 import Dashboard from "./components/Dashboard";
 import SystemPanel from "./components/SystemPanel";
@@ -43,12 +45,29 @@ export default function App() {
   const setPage = useUiStore((s) => s.setPage);
   const { data: engineStatus, isError } = useEngineStatusQuery();
   const { data: autonomyPublish } = useAutonomyPublishStatusQuery();
+  const [disconnected, setDisconnected] = useState(false);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen("bridge://disconnect", () => {
+      setDisconnected(true);
+    })
+      .then((fn) => {
+        unlisten = fn;
+      })
+      .catch(() => {
+        // Ignored when outside Tauri runtime (e.g. unit tests)
+      });
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, []);
 
   // The header badge derives from the backend-controlled switch, never from
   // client state. Unknown/unreachable is treated as OFF (fail-closed display).
   const autonomyPublishOn = autonomyPublish?.enabled === true;
 
-  const reachable = !isError && engineStatus?.running !== false;
+  const reachable = !disconnected && !isError && engineStatus?.running !== false;
 
   return (
     <div className="app">
@@ -81,9 +100,8 @@ export default function App() {
       </header>
       <main className="app-main">
         {!reachable ? (
-          <div className="banner banner-warn">
-            Backend engine is not reachable. Start the Python bridge (python -m
-            autopilot.bridge) and restart the app.
+          <div className="banner banner-bad">
+            ⚠️ Backend engine process is not responding or has stopped. Ensure Python 3.10+ is available and restart the application.
           </div>
         ) : null}
         {page === "dashboard" ? <Dashboard /> : null}
