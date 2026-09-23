@@ -676,6 +676,16 @@ tbody tr:hover {
   font-weight: 600;
 }
 
+.stage-failed .stage-dot {
+  border-color: var(--bad);
+  background: var(--bad);
+}
+
+.stage-failed .stage-name {
+  color: var(--bad);
+  font-weight: 600;
+}
+
 @keyframes pulse {
   0%,
   100% {

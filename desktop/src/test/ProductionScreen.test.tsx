@@ -302,4 +302,15 @@ describe("Production screen", () => {
       expect(text).not.toContain(kw);
     }
   });
+
+  it("renders failed stage with stage-failed class when job failed", async () => {
+    mockQueueAndInspect({ status: "failed", stage: "RENDER" });
+    const { container } = renderScreen();
+    await waitFor(() =>
+      expect(screen.getAllByText("Quantum Computing Basics").length).toBeGreaterThan(0),
+    );
+    const failedItem = container.querySelector(".stage-failed");
+    expect(failedItem).toBeInTheDocument();
+    expect(failedItem?.textContent).toContain("RENDER");
+  });
 });

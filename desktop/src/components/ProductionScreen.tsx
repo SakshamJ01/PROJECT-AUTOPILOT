@@ -67,25 +67,30 @@ function fileBase(path: string): string {
   return parts[parts.length - 1] || path;
 }
 
-function StageTimeline({ current }: { current: string }) {
+function StageTimeline({ current, status }: { current: string; status?: string }) {
+  const isFailed = status === "failed" || status === "dead_letter" || status === "blocked";
+  const isComplete = status === "succeeded" || current === "COMPLETE";
   const idx = STAGES.indexOf(current as (typeof STAGES)[number]);
   return (
     <ol className="stage-timeline">
       {STAGES.map((stage, i) => {
-        const done = idx > i;
-        const active = idx === i;
+        const done = isComplete ? true : idx > i;
+        const failed = isFailed && idx === i;
+        const active = !isFailed && !isComplete && idx === i;
         const reachable = idx >= 0;
         return (
           <li
             key={stage}
             className={
-              done
-                ? "stage-done"
-                : active
-                  ? "stage-active"
-                  : reachable
-                    ? "stage-pending"
-                    : "stage-future"
+              failed
+                ? "stage-failed"
+                : done
+                  ? "stage-done"
+                  : active
+                    ? "stage-active"
+                    : reachable
+                      ? "stage-pending"
+                      : "stage-future"
             }
           >
             <span className="stage-dot" />
@@ -128,7 +133,7 @@ function JobStatusCard({ item }: { item: QueueItem }) {
             </>
           ) : null}
         </dl>
-        <StageTimeline current={item.stage} />
+        <StageTimeline current={item.stage} status={item.status} />
         <div className="job-links">
           <button className="ghost-btn" onClick={() => showTab("timeline")}>
             Timeline
