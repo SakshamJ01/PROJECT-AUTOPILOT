@@ -35,3 +35,45 @@ export const POLL = {
   // MoneyPrinterTurbo readiness probe — quicker while the service is down.
   engineMs: 5000,
 } as const;
+
+export interface StructuredError {
+  code?: number;
+  message: string;
+  category: "engine" | "network" | "timeout" | "validation" | "error";
+  actionHint?: string;
+  raw: string;
+}
+
+export function parseEngineError(err: unknown): StructuredError {
+  const raw = err instanceof Error ? err.message : String(err ?? "Unknown error");
+  const match = raw.match(/engine error (-?\d+):\s*(.*)/i);
+  let code: number | undefined;
+  let message = raw;
+  if (match) {
+    code = parseInt(match[1], 10);
+    message = match[2];
+  }
+
+  let category: StructuredError["category"] = "error";
+  let actionHint: string | undefined;
+
+  const lower = message.toLowerCase();
+  if (code === -32601 || code === -32602 || lower.includes("invalid param") || lower.includes("validation") || lower.includes("not found")) {
+    category = "validation";
+    actionHint = "Verify request parameters and format.";
+  } else if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("timedout")) {
+    category = "timeout";
+    actionHint = "Operation timed out. The local engine or provider may be busy or still processing.";
+  } else if (lower.includes("moneyprinter") || /\bmpt\b/.test(lower) || lower.includes("renderer")) {
+    category = "engine";
+    actionHint = "Ensure MoneyPrinterTurbo service is running or click 'Start Engine' on the Production screen.";
+  } else if (lower.includes("ollama") || lower.includes("llm") || /\bmodel\b/.test(lower)) {
+    category = "engine";
+    actionHint = "Ensure local Ollama service is active (`ollama serve`) and model `qwen3:4b` is installed.";
+  } else if (lower.includes("connection") || lower.includes("refused") || lower.includes("failed to fetch")) {
+    category = "network";
+    actionHint = "Connection failed. Check network or local service availability.";
+  }
+
+  return { code, message, category, actionHint, raw };
+}

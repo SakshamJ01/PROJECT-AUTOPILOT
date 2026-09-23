@@ -10,6 +10,7 @@ import {
 } from "../api/hooks";
 import { useUiStore } from "../state/ui";
 import StatusBadge from "./StatusBadge";
+import ErrorBanner from "./ErrorBanner";
 import type { QueueItem } from "../api/types";
 
 export const STAGES = [
@@ -402,9 +403,12 @@ function StartForm({ onDone }: { onDone: () => void }) {
       </div>
       <ProductionEngineCard ensure={ensure} />
       {mutation.isError ? (
-        <div className="banner banner-warn">
-          {(mutation.error as Error)?.message ?? "Failed to start production"}
-        </div>
+        <ErrorBanner
+          error={mutation.error}
+          title="Failed to start production"
+          onRetry={() => submit(new Event("submit") as unknown as React.FormEvent)}
+          retryLabel="Retry Production"
+        />
       ) : null}
       {mutation.data ? (
         <div className="banner banner-info">

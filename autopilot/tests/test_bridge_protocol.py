@@ -944,3 +944,81 @@ def test_bridge_spawn_fails_fast_on_unreadable_db(tmp_path):
     )
     exit_code = proc.wait(timeout=30)
     assert exit_code != 0  # backend unavailable must surface, never fake health
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: Error Observability & Redaction Tests
+# ---------------------------------------------------------------------------
+
+def test_errors_list_snapshot(client):
+    res = client.call("errors.list", {"limit": 50})["result"]
+    assert "errors" in res
+    assert "total" in res
+    assert res["total"] >= 1
+    err = next(e for e in res["errors"] if e["job_id"] == "job-1")
+    assert err["stage"] == "RENDER"
+    assert err["error_type"] == "FFMPEG_TIMEOUT"
+    assert "budget" in err["message"]
+
+
+def test_fail_and_block_queue_item_populates_errors_table(tmp_path):
+    from autopilot.db.manager import DBManager
+
+    db_path = tmp_path / "err_test.db"
+    db = DBManager(db_path)
+    db.init_schema()
+
+    db.create_job("job-err-1", channel_id="chan1", topic="Fail Item Test")
+    db.enqueue_item(
+        queue_id="q-err-1",
+        job_id="job-err-1",
+        priority=1,
+        channel_id="chan1",
+    )
+
+    # Fail queue item (retryable)
+    status = db.fail_queue_item("q-err-1", "Model connection reset", retryable=True)
+    assert status == "retry_wait"
+    errs = db.get_errors_for_job("job-err-1")
+    assert len(errs) == 1
+    assert errs[0]["error_type"] == "RETRYABLE_ERROR"
+    assert errs[0]["message"] == "Model connection reset"
+    assert errs[0]["stage"] == "RESEARCH"
+
+    # Block item
+    db.block_queue_item("q-err-1", "Content violates safety policy")
+    errs = db.get_errors_for_job("job-err-1")
+    assert len(errs) == 2
+    assert errs[1]["error_type"] == "BLOCKED"
+    assert errs[1]["message"] == "Content violates safety policy"
+
+    # Verify list_recent_errors
+    recent = db.list_recent_errors(limit=10, job_id="job-err-1")
+    assert len(recent) == 2
+
+
+def test_protocol_redact_sensitive():
+    from autopilot.bridge.protocol import make_error, make_result, redact_sensitive
+
+    raw_payload = {
+        "access_token": "ya29.secret_token_12345",
+        "client_secrets_path": "C:\\secrets.json",
+        "nested": {
+            "api_key": "AIzaSy1234567890",
+            "safe_field": "hello world",
+        },
+        "auth_header": "sensitive_auth_string",
+        "log_message": "Calling endpoint with Bearer ya29.secret_bearer_token here",
+    }
+    redacted = redact_sensitive(raw_payload)
+    assert redacted["access_token"] == "[REDACTED]"
+    assert redacted["client_secrets_path"] == "[REDACTED]"
+    assert redacted["nested"]["api_key"] == "[REDACTED]"
+    assert redacted["nested"]["safe_field"] == "hello world"
+    assert redacted["auth_header"] == "[REDACTED]"
+    assert redacted["log_message"] == "Calling endpoint with Bearer [REDACTED] here"
+
+    err_json = make_error(1, -32603, "Failed with token ya29.secret_token", {"gemini_api_key": "secret"})
+    parsed_err = json.loads(err_json)
+    assert "timestamp" in parsed_err["error"]
+    assert parsed_err["error"]["data"]["gemini_api_key"] == "[REDACTED]"

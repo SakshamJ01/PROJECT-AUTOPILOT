@@ -190,6 +190,24 @@ export interface ProductionEngineStatus {
   error?: string | null;
 }
 
+export interface ErrorRecord {
+  error_id: number;
+  job_id: string | null;
+  stage: string;
+  error_type: string;
+  message: string;
+  occurred_at: string;
+  channel_id?: string | null;
+  topic?: string | null;
+  details_json?: string;
+}
+
+export interface ErrorsListResult {
+  errors: ErrorRecord[];
+  total: number;
+  limit: number;
+}
+
 // ---------------------------------------------------------------------------
 // M3 — autonomy + scheduler control surface
 // ---------------------------------------------------------------------------

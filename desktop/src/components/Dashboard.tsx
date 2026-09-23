@@ -1,6 +1,7 @@
 import {
   useAnalyticsStatusQuery,
   useAutonomyPublishStatusQuery,
+  useErrorsQuery,
   useHealthQuery,
   usePublishingStatusQuery,
   useQueueQuery,
@@ -213,12 +214,66 @@ function M4SummaryGrid() {
   );
 }
 
+function RecentFailuresCard() {
+  const { data } = useErrorsQuery({ limit: 5 });
+  const setSelectedJobId = useUiStore((s) => s.setSelectedJobId);
+  const setJobDrawerTab = useUiStore((s) => s.setJobDrawerTab);
+
+  if (!data || data.errors.length === 0) return null;
+
+  return (
+    <div className="card" style={{ borderColor: "rgba(229, 72, 77, 0.4)" }}>
+      <div className="card-header">
+        <span style={{ color: "var(--bad)", fontWeight: 600 }}>⚠️ Recent Failures & Errors</span>
+        <span className="muted">{data.total} recorded</span>
+      </div>
+      <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+        {data.errors.slice(0, 3).map((err) => (
+          <div
+            key={err.error_id}
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              padding: "6px 8px",
+              background: "rgba(229, 72, 77, 0.08)",
+              borderRadius: "4px",
+              cursor: err.job_id ? "pointer" : "default",
+            }}
+            onClick={() => {
+              if (err.job_id) {
+                setSelectedJobId(err.job_id);
+                setJobDrawerTab("errors");
+              }
+            }}
+          >
+            <div>
+              <span className="status-badge bad" style={{ marginRight: "8px" }}>
+                {err.error_type}
+              </span>
+              <span style={{ fontWeight: 500 }}>{err.topic ?? err.job_id ?? "System"}</span>
+              <span className="muted small" style={{ marginLeft: "8px" }}>
+                ({err.stage})
+              </span>
+              <div className="small" style={{ marginTop: "2px", color: "var(--text)" }}>
+                {err.message}
+              </div>
+            </div>
+            <div className="muted small">{new Date(err.occurred_at).toLocaleTimeString()}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function Dashboard() {
   return (
     <div className="dashboard">
       <div className="health-grid">
         <HealthGrid />
       </div>
+      <RecentFailuresCard />
       <M4SummaryGrid />
       <ReadyPane />
       <QueueTable />

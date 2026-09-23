@@ -288,6 +288,19 @@ class BridgeHandlers:
             "stage_order": _STAGE_ORDER,
         }
 
+    def on_errors_list(self, params: dict | None) -> dict[str, Any]:
+        """List recent errors across the application, optionally filtered."""
+        params = params or {}
+        limit = int(params.get("limit", 100))
+        job_id = params.get("job_id")
+        channel_id = params.get("channel_id")
+        errors = self.db.list_recent_errors(limit=limit, job_id=job_id, channel_id=channel_id)
+        return {
+            "errors": errors,
+            "total": len(errors),
+            "limit": limit,
+        }
+
     # ------------------------------------------------------------------
     # production control
     # ------------------------------------------------------------------

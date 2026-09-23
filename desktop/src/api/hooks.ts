@@ -20,6 +20,7 @@ import type {
   AutonomyRunRequest,
   AutonomyRunResult,
   AutonomyStatus,
+  ErrorsListResult,
   HealthGet,
   JobInspect,
   LogEntry,
@@ -220,6 +221,27 @@ export function useActivityQuery(enabled = true) {
     queryKey: ["engine", "events.tail"],
     queryFn: () => engineCall<{ events: WorkflowEvent[] }>("events.tail", { limit: 25 }),
     refetchInterval: POLL.activityMs,
+    retry: false,
+    enabled,
+  });
+}
+
+export function useErrorsQuery(filters?: { limit?: number; job_id?: string; channel_id?: string }, enabled = true) {
+  return useQuery({
+    queryKey: [
+      "engine",
+      "errors.list",
+      filters?.limit ?? 100,
+      filters?.job_id ?? "all",
+      filters?.channel_id ?? "all",
+    ],
+    queryFn: () =>
+      engineCall<ErrorsListResult>("errors.list", {
+        limit: filters?.limit ?? 100,
+        job_id: filters?.job_id,
+        channel_id: filters?.channel_id,
+      }),
+    refetchInterval: POLL.logsMs,
     retry: false,
     enabled,
   });

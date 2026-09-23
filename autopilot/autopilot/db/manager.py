@@ -1447,13 +1447,19 @@ class DBManager:
         backoff_base_sec: float = 2.0,
     ) -> str:
         with self._connect() as conn:
-            row = conn.execute("SELECT attempt_count, max_attempts FROM queue_items WHERE queue_id = ?", (queue_id,)).fetchone()
+            row = conn.execute(
+                "SELECT job_id, stage, attempt_count, max_attempts FROM queue_items WHERE queue_id = ?",
+                (queue_id,),
+            ).fetchone()
             if not row:
                 return "failed"
+            job_id = row["job_id"]
+            stage = row["stage"] or "UNKNOWN"
             attempt_count = row["attempt_count"]
             max_attempts = row["max_attempts"]
 
             if retryable and attempt_count < max_attempts:
+                error_type = "RETRYABLE_ERROR"
                 delay = int(backoff_base_sec * (2 ** max(0, attempt_count - 1)))
                 conn.execute(
                     """
@@ -1466,9 +1472,20 @@ class DBManager:
                     """,
                     (error_message, delay, queue_id),
                 )
+                conn.execute(
+                    "INSERT INTO errors (job_id, stage, error_type, message, details_json) VALUES (?, ?, ?, ?, ?)",
+                    (
+                        job_id,
+                        stage,
+                        error_type,
+                        error_message,
+                        json.dumps({"queue_id": queue_id, "attempt": attempt_count, "max_attempts": max_attempts, "delay_sec": delay}),
+                    ),
+                )
                 conn.commit()
                 return "retry_wait"
             elif attempt_count >= max_attempts:
+                error_type = "DEAD_LETTER"
                 conn.execute(
                     """
                     UPDATE queue_items
@@ -1480,9 +1497,20 @@ class DBManager:
                     """,
                     (error_message, queue_id),
                 )
+                conn.execute(
+                    "INSERT INTO errors (job_id, stage, error_type, message, details_json) VALUES (?, ?, ?, ?, ?)",
+                    (
+                        job_id,
+                        stage,
+                        error_type,
+                        error_message,
+                        json.dumps({"queue_id": queue_id, "attempt": attempt_count, "max_attempts": max_attempts, "exhausted": True}),
+                    ),
+                )
                 conn.commit()
                 return "dead_letter"
             else:
+                error_type = "FAILED"
                 conn.execute(
                     """
                     UPDATE queue_items
@@ -1494,11 +1522,28 @@ class DBManager:
                     """,
                     (error_message, queue_id),
                 )
+                conn.execute(
+                    "INSERT INTO errors (job_id, stage, error_type, message, details_json) VALUES (?, ?, ?, ?, ?)",
+                    (
+                        job_id,
+                        stage,
+                        error_type,
+                        error_message,
+                        json.dumps({"queue_id": queue_id, "attempt": attempt_count, "max_attempts": max_attempts}),
+                    ),
+                )
                 conn.commit()
                 return "failed"
 
     def block_queue_item(self, queue_id: str, reason: str) -> None:
         with self._connect() as conn:
+            row = conn.execute(
+                "SELECT job_id, stage FROM queue_items WHERE queue_id = ?",
+                (queue_id,),
+            ).fetchone()
+            job_id = row["job_id"] if row else None
+            stage = (row["stage"] if row else None) or "UNKNOWN"
+
             conn.execute(
                 """
                 UPDATE queue_items
@@ -1510,6 +1555,16 @@ class DBManager:
                 """,
                 (reason, queue_id),
             )
+            conn.execute(
+                "INSERT INTO errors (job_id, stage, error_type, message, details_json) VALUES (?, ?, ?, ?, ?)",
+                (
+                    job_id,
+                    stage,
+                    "BLOCKED",
+                    reason,
+                    json.dumps({"queue_id": queue_id}),
+                ),
+            )
             conn.commit()
 
     def update_queue_item_status(self, queue_id: str, status: str, error_message: str | None = None) -> None:
@@ -1520,7 +1575,7 @@ class DBManager:
         elif status == "cancelled":
             self.cancel_queue_item(queue_id)
         elif status == "failed":
-            self.record_attempt_failure(queue_id, error_message or "Failed")
+            self.fail_queue_item(queue_id, error_message or "Failed")
         else:
             with self._connect() as conn:
                 conn.execute(

@@ -5,7 +5,9 @@ Newline-delimited over stdin/stdout — no HTTP, no sockets.
 
 from __future__ import annotations
 
+import datetime
 import json
+import re
 from typing import Any
 
 PARSE_ERROR = -32700
@@ -25,8 +27,36 @@ _SENSITIVE_KEYWORDS = frozenset(
         "gemini_api_key",
         "openrouter_api_key",
         "postiz_api_key",
+        "authorization_code",
+        "refresh_token",
     }
 )
+
+_SENSITIVE_KEY_PATTERN = re.compile(
+    r"(token|secret|password|api[_-]?key|credential|auth|client_secrets)",
+    re.IGNORECASE,
+)
+_BEARER_PATTERN = re.compile(r"Bearer\s+[A-Za-z0-9_\-\.~+/]+=*", re.IGNORECASE)
+
+
+def redact_sensitive(data: Any) -> Any:
+    """Recursively scrub sensitive tokens, credentials, and API keys."""
+    if isinstance(data, dict):
+        cleaned: dict[str, Any] = {}
+        for k, v in data.items():
+            k_str = str(k)
+            if k_str in _SENSITIVE_KEYWORDS or _SENSITIVE_KEY_PATTERN.search(k_str):
+                cleaned[k] = "[REDACTED]"
+            else:
+                cleaned[k] = redact_sensitive(v)
+        return cleaned
+    elif isinstance(data, (list, tuple)):
+        return [redact_sensitive(item) for item in data]
+    elif isinstance(data, set):
+        return {redact_sensitive(item) for item in data}
+    elif isinstance(data, str):
+        return _BEARER_PATTERN.sub("Bearer [REDACTED]", data)
+    return data
 
 
 class ProtocolError(Exception):
@@ -51,20 +81,24 @@ def make_request(request_id: Any, method: str, params: dict | None = None) -> st
 
 
 def make_result(request_id: Any, result: Any) -> str:
-    return json.dumps({"jsonrpc": "2.0", "id": request_id, "result": result}, default=str)
+    return json.dumps({"jsonrpc": "2.0", "id": request_id, "result": redact_sensitive(result)}, default=str)
 
 
 def make_error(request_id: Any, code: int, message: str, data: Any = None) -> str:
-    err: dict[str, Any] = {"code": code, "message": message}
+    err: dict[str, Any] = {
+        "code": code,
+        "message": redact_sensitive(message),
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
     if data is not None:
-        err["data"] = data
+        err["data"] = redact_sensitive(data)
     return json.dumps({"jsonrpc": "2.0", "id": request_id, "error": err}, default=str)
 
 
 def make_notification(method: str, params: Any = None) -> str:
     payload: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
     if params is not None:
-        payload["params"] = params
+        payload["params"] = redact_sensitive(params)
     return json.dumps(payload, default=str)
 
 

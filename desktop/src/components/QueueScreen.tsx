@@ -106,9 +106,16 @@ function QueueTable({ items }: { items: QueueItem[] }) {
         {items.map((item) => (
           <tr key={item.queue_id} onClick={() => setSelectedJobId(item.job_id)}>
             <td>
-              {item.topic ?? item.job_id}
-              {item.attempt_count > 0 ? (
-                <span className="muted small"> attempt {item.attempt_count}</span>
+              <div>
+                <span>{item.topic ?? item.job_id}</span>
+                {item.attempt_count > 0 ? (
+                  <span className="muted small"> attempt {item.attempt_count}</span>
+                ) : null}
+              </div>
+              {item.last_error ? (
+                <div className="queue-item-error" title={item.last_error}>
+                  ⚠️ {item.last_error}
+                </div>
               ) : null}
             </td>
             <td>
