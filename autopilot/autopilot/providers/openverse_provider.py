@@ -236,22 +236,39 @@ class OpenverseAssetProvider(AssetProvider):
             elif ar_str in ("1:1", "square"):
                 params["aspect_ratio"] = "square"
 
-        url = f"{self.base_url}images/?{urllib.parse.urlencode(params)}"
-        req = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": "PROJECT-AUTOPILOT/1.0 (local-content-factory; rights-aware-asset-search)",
-                "Accept": "application/json",
-            },
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as response:
-                content = response.read().decode("utf-8")
-                return self.parse_api_response(content)
-        except urllib.error.HTTPError as exc:
-            raise RuntimeError(f"Openverse API error HTTP {exc.code}: {exc.reason}") from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(f"Openverse network connection failed: {exc.reason}") from exc
+        def _do_request(p: dict) -> List[AssetCandidate]:
+            u = f"{self.base_url}images/?{urllib.parse.urlencode(p)}"
+            r = urllib.request.Request(
+                u,
+                headers={
+                    "User-Agent": "PROJECT-AUTOPILOT/1.0 (local-content-factory; rights-aware-asset-search)",
+                    "Accept": "application/json",
+                },
+            )
+            try:
+                with urllib.request.urlopen(r, timeout=self.timeout) as response:
+                    content = response.read().decode("utf-8")
+                    return self.parse_api_response(content)
+            except urllib.error.HTTPError as exc:
+                raise RuntimeError(f"Openverse API error HTTP {exc.code}: {exc.reason}") from exc
+            except urllib.error.URLError as exc:
+                raise RuntimeError(f"Openverse network connection failed: {exc.reason}") from exc
+
+        candidates = _do_request(params)
+        if not candidates and "aspect_ratio" in params:
+            params_no_ar = dict(params)
+            params_no_ar.pop("aspect_ratio", None)
+            candidates = _do_request(params_no_ar)
+
+        if not candidates:
+            # Fallback to last/first substantive word from query
+            words = [w.strip() for w in query.strip().split() if len(w.strip()) > 2]
+            if len(words) > 1:
+                substantive_q = words[-1] if len(words[-1]) >= 4 else words[0]
+                candidates = _do_request({"q": substantive_q, "page_size": max(1, min(max_results, 20)), "license_type": "commercial,modification"})
+
+        return candidates
+
 
     def select(self, candidates: List[AssetCandidate], criteria: Optional[dict] = None) -> AssetSelection:
         """Select highest scored rights-cleared candidate."""
