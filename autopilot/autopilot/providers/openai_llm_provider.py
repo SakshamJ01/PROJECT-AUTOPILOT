@@ -210,7 +210,19 @@ def _build_prompts_and_evidence(
         '    {\n'
         '      "scene_id": "scene-05",\n'
         '      "order": 5,\n'
-        '      "narration": "Intentional conclusion or payoff connecting back to hook (10-18 words)",\n'
+        '      "narration": "Key insight or climax building toward payoff (12-18 words)",\n'
+        '      "visual_intent": "Concrete physical photographic description",\n'
+        '      "asset_query": "2-3 word photographic search query",\n'
+        '      "on_screen_text": "2-4 WORD UPPERCASE BADGE",\n'
+        '      "emphasis_words": ["KEYWORD"],\n'
+        '      "estimated_duration_seconds": 5.0,\n'
+        '      "scene_type": "broll",\n'
+        '      "transition_hint": "cut"\n'
+        '    },\n'
+        '    {\n'
+        '      "scene_id": "scene-06",\n'
+        '      "order": 6,\n'
+        '      "narration": "Intentional conclusion or payoff connecting back to hook (12-18 words)",\n'
         '      "visual_intent": "Concrete physical photographic description",\n'
         '      "asset_query": "2-3 word photographic search query",\n'
         '      "on_screen_text": "2-4 WORD UPPERCASE BADGE",\n'
@@ -230,10 +242,10 @@ def _build_prompts_and_evidence(
         f"- Hook Style: {channel_hook_style}\n"
         f"- Visual Motif: {channel_visual_motif}\n"
         "EDITORIAL QUALITY RULES:\n"
-        "1. DURATION: Generate 5 to 8 scenes so total video duration targets 30-45 seconds (approx 75-110 spoken words total).\n"
+        "1. DURATION: Generate 6 to 8 useful scenes so total video narration targets 32-38 seconds of natural speech (approx 85 to 110 spoken words total across all scenes).\n"
         "2. STRUCTURE: Script MUST follow the progression: HOOK (Scene 1) -> EXPLANATION / FACTS (Middle Scenes) -> INTENTIONAL PAYOFF / ENDING (Final Scene).\n"
         "3. INTENTIONAL ENDING: The final scene MUST be an intentional conclusion (payoff returning to hook, strongest final fact, seamless loop back, or payoff statement). NEVER end abruptly or use generic filler like 'thanks for watching'.\n"
-        "4. SCENE NARRATION: Punchy, conversational, spoken English. 10 to 18 words per scene. One clear idea per scene.\n"
+        "4. SCENE NARRATION: Punchy, conversational, spoken English. 13 to 18 words per scene. One clear idea per scene.\n"
         "5. VISUAL INTENT: Describe concrete, tangible physical subjects suitable for photography.\n"
         "6. ASSET QUERY: 2-3 words naming concrete physical photographic subjects.\n"
         "7. ON_SCREEN_TEXT: 2-4 uppercase words for visual title card.\n"
@@ -248,7 +260,11 @@ def _build_prompts_and_evidence(
     )
 
 
-    user_prompt_lines = [f"Write a {int(target_duration)}-second vertical video script about: {topic}"]
+    user_prompt_lines = [
+        f"Write a {int(target_duration)}-second vertical video script about: {topic}",
+        f"Target spoken narration duration is 32-38 seconds (approx 85-110 total spoken words across 6 to 8 useful scenes).",
+        "Scene 1 MUST be a strong hook. The final scene MUST be an intentional conclusion/payoff.",
+    ]
     if cardinality:
         user_prompt_lines.append(
             f"\nLISTICLE STRUCTURE REQUIREMENTS:\n"

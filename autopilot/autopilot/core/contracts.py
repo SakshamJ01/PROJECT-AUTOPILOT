@@ -527,7 +527,7 @@ class ProductionRequest(BaseModel):
     target_resolution: str = "1080x1920"
     engine_name: str = "moneyprinterturbo"
     production_engine: str = "moneyprinterturbo"
-    timeout_seconds: int = 300
+    timeout_seconds: int = 600
     bgm_volume: float = 0.2
     options: Dict[str, Any] = Field(default_factory=dict)
     params: Dict[str, Any] = Field(default_factory=dict)

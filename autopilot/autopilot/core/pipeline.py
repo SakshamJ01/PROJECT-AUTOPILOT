@@ -510,6 +510,86 @@ class PipelineOrchestrator:
             logger.info("stage_resumed", details={"stage": "VOICE", "reason": "existing_audio_artifacts"})
 
         # --------------------------------------------------------------
+        # 3b. UNDERSIZED NARRATION GUARD
+        # --------------------------------------------------------------
+        # Reject scripts whose narration is far too short for the target
+        # duration.  Better to regenerate than to render a tiny video.
+        from autopilot.core.profiles import PROFILES, ProfileConfig
+        profile_cfg = PROFILES.get(profile, ProfileConfig())
+        target_dur = profile_cfg.target_duration_sec  # e.g. 35.0
+        min_narration_dur = target_dur * 0.82  # floor: 28.7s for a 35s target
+
+        narration_dur = package.measured_duration_sec or 0.0
+        if narration_dur > 0 and narration_dur < min_narration_dur:
+            if attempt_number < max_regeneration_attempts:
+                logger.warning(
+                    "undersized_narration_regeneration",
+                    details={
+                        "narration_sec": narration_dur,
+                        "target_sec": target_dur,
+                        "min_narration_sec": min_narration_dur,
+                        "attempt": attempt_number,
+                    },
+                )
+                # Invalidate script and voice artifacts so the next attempt
+                # generates a longer script.
+                sp_path.unlink(missing_ok=True)
+                pkg_path.unlink(missing_ok=True)
+                for v_art in voice_artifacts:
+                    Path(v_art).unlink(missing_ok=True)
+
+                regen_meta = {
+                    "attempt": attempt_number,
+                    "defect_type": RegenerationDefectType.DURATION_MISMATCH.value,
+                    "reason": f"Narration duration {narration_dur:.1f}s is below minimum {min_narration_dur:.1f}s (target {target_dur:.0f}s)",
+                    "instruction": (
+                        f"The narration is too short ({narration_dur:.1f}s for a {target_dur:.0f}s target). "
+                        "Add more detail, examples, and elaboration to each scene. "
+                        "Aim for narration that naturally fills the target duration."
+                    ),
+                    "target_stage": "SCRIPT",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+                regen_file = art_dir / "quality" / f"regeneration_attempt_{attempt_number}.json"
+                regen_file.parent.mkdir(parents=True, exist_ok=True)
+                regen_file.write_text(json.dumps(regen_meta, indent=2), encoding="utf-8")
+
+                return self.run_pipeline(
+                    job_id=job_id,
+                    topic=topic,
+                    profile=profile,
+                    priority=priority,
+                    auto_publish=auto_publish,
+                    publish_visibility=publish_visibility,
+                    publish_platform=publish_platform,
+                    tts_provider=tts_provider,
+                    asset_provider=asset_provider,
+                    on_stage_progress=on_stage_progress,
+                    channel_id=channel_id,
+                    llm_provider=llm_provider,
+                    research_provider=research_provider,
+                    production_engine=production_engine,
+                    max_regeneration_attempts=max_regeneration_attempts,
+                    attempt_number=attempt_number + 1,
+                    corrective_instructions=(
+                        f"The narration is too short ({narration_dur:.1f}s for a {target_dur:.0f}s target). "
+                        "Add more detail, examples, and elaboration to each scene. "
+                        "Aim for narration that naturally fills the target duration."
+                    ),
+                    regeneration_reason=f"Narration duration {narration_dur:.1f}s below minimum {min_narration_dur:.1f}s",
+                    policy=policy,
+                )
+            else:
+                logger.warning(
+                    "undersized_narration_accepted",
+                    details={
+                        "narration_sec": narration_dur,
+                        "target_sec": target_dur,
+                        "reason": "max_regeneration_attempts_exceeded",
+                    },
+                )
+
+        # --------------------------------------------------------------
         # 4. ASSETS STAGE
         # --------------------------------------------------------------
         if on_stage_progress:

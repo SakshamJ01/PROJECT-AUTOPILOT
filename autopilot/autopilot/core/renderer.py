@@ -191,10 +191,14 @@ class FFmpegRenderer:
             for i in range(len(segments)):
                 concat_filter += f"[{i}:v][{i}:a]"
             concat_filter += f"concat=n={len(segments)}:v=1:a=1[outv][outa]"
+            # NOTE: No -t flag here — each segment is already individually
+            # clipped to its scene duration.  A redundant -t on the concat
+            # would truncate the output because H.264 GOP alignment causes
+            # each encoded segment to be slightly shorter than requested,
+            # and the accumulated shortfall compounds across many scenes.
             concat_cmd = ["ffmpeg", "-y"] + concat_inputs + [
                 "-filter_complex", concat_filter,
                 "-map", "[outv]", "-map", "[outa]",
-                "-t", str(duration),
                 "-pix_fmt", "yuv420p", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
                 "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2", "-r", "25", "-threads", "2",
                 str(out),
@@ -231,10 +235,36 @@ class FFmpegRenderer:
                 if "invalid audio sample rate" in str(e) or "missing AAC audio stream" in str(e):
                     raise
 
+        # Probe the actual rendered duration from the file — never trust
+        # the pre-computed plan sum which can diverge from reality.
+        actual_duration = float(duration)  # fallback
+        dur_probe_cmd = [
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            str(out),
+        ]
+        dur_probe_res = subprocess.run(dur_probe_cmd, capture_output=True, text=True)
+        if dur_probe_res.returncode == 0 and dur_probe_res.stdout.strip():
+            try:
+                actual_duration = float(dur_probe_res.stdout.strip())
+            except ValueError:
+                pass
+
+        # Post-render narration truncation guard: the rendered video must
+        # never be shorter than the narration audio it contains.
+        if actual_duration < duration - 1.0:
+            raise RuntimeError(
+                f"Rendered video ({actual_duration:.2f}s) is shorter than the "
+                f"narration timeline ({duration:.2f}s) by "
+                f"{duration - actual_duration:.2f}s — audio would be truncated. "
+                f"This indicates an encoding issue."
+            )
+
         checksum = hashlib.sha256(out.read_bytes()).hexdigest() if out.exists() else None
         output = RenderOutput(
             output_path=str(out),
-            duration_sec=float(duration),
+            duration_sec=actual_duration,
             width=1080,
             height=1920,
             codec_video="h264",

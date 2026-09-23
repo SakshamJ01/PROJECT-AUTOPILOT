@@ -33,7 +33,7 @@ class MoneyPrinterTurboAdapter:
         self,
         endpoint: Optional[str] = None,
         cli_path: Optional[str] = None,
-        timeout_seconds: int = 300,
+        timeout_seconds: int = 600,
         poll_interval_seconds: float = 1.0,
         autostart: Optional[bool] = None,
     ):
