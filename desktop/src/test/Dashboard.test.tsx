@@ -104,6 +104,7 @@ describe("Dashboard polls the engine bridge", () => {
       if (args.method === "health.get") return Promise.resolve(health);
       if (args.method === "queue.list") return Promise.resolve(queue);
       if (args.method === "autonomy.publish_status") return Promise.resolve(switchStatus);
+      if (args.method === "production.engine.status") return Promise.resolve({ running: true, engine: "MoneyPrinterTurbo" });
       return Promise.reject(new Error(`unexpected call ${args.method}`));
     });
 
@@ -132,6 +133,7 @@ describe("Dashboard polls the engine bridge", () => {
       if (args.method === "queue.list") return Promise.resolve(queue);
       if (args.method === "job.inspect") return Promise.resolve(jobInspect);
       if (args.method === "autonomy.publish_status") return Promise.resolve(switchStatus);
+      if (args.method === "production.engine.status") return Promise.resolve({ running: true, engine: "MoneyPrinterTurbo" });
       return Promise.reject(new Error(`unexpected call ${args.method}`));
     });
 

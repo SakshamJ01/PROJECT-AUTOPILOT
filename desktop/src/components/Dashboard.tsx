@@ -3,6 +3,7 @@ import {
   useAutonomyPublishStatusQuery,
   useErrorsQuery,
   useHealthQuery,
+  useProductionEngineStatusQuery,
   usePublishingStatusQuery,
   useQueueQuery,
   useStrategyStatusQuery,
@@ -15,12 +16,14 @@ function toneForStatus(status: string): "ok" | "bad" | "warn" | "info" {
     case "AVAILABLE":
     case "healthy":
     case "active":
+    case "running":
     case "configured":
       return "ok";
     case "degraded":
     case "unconfigured":
     case "retry_wait":
     case "blocked":
+    case "standby":
       return "warn";
     default:
       return status === "failed" || status === "dead_letter" ? "bad" : "info";
@@ -38,6 +41,7 @@ function HealthCard({ title, value }: { title: string; value: string }) {
 
 function HealthGrid() {
   const { data, isLoading, isError } = useHealthQuery();
+  const { data: mpt } = useProductionEngineStatusQuery();
   if (isLoading) return <div className="card-body muted">Loading health…</div>;
   if (isError || !data)
     return <div className="card-body muted">Health unavailable</div>;
@@ -47,7 +51,8 @@ function HealthGrid() {
       <HealthCard title="Scheduler" value={data.scheduler.status} />
       <HealthCard title="Queue" value={data.queue_engine.status} />
       <HealthCard title="Worker" value={data.worker.status} />
-      <HealthCard title="Production engine" value={data.qa_engine.status} />
+      <HealthCard title="MPT Renderer" value={mpt?.running ? "active" : "standby"} />
+      <HealthCard title="QA Engine" value={data.qa_engine.status} />
       <HealthCard title="Analytics" value={data.analytics_engine.status} />
       <HealthCard title="Publishing" value={data.publishing.status} />
       <HealthCard title="Learning" value={data.learning_engine.status} />
