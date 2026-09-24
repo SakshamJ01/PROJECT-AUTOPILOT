@@ -49,12 +49,25 @@ def compute_image_phash(image_path: str | Path) -> Optional[str]:
         return None
 
 
+_WINDOWS_RESERVED_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
+
+
 def sanitize_filename(name: str) -> str:
-    """Strip path traversal characters and unsafe symbols from filename."""
+    """Strip path traversal characters, Windows invalid symbols, and reserved names from filename."""
     clean = name.replace("/", "_").replace("\\", "_")
+    clean = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", clean)
     clean = re.sub(r"[^\w\-_.]", "_", clean)
-    clean = re.sub(r"_+", "_", clean).strip("_.")
-    return clean[:128] or "media_asset"
+    clean = re.sub(r"_+", "_", clean).strip(" ._")
+    stem = clean[:128] or "media_asset"
+    # Check if base name without extension is a Windows reserved name
+    base = stem.split(".")[0].upper()
+    if base in _WINDOWS_RESERVED_NAMES:
+        stem = f"_{stem}"
+    return stem
 
 
 class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):

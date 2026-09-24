@@ -2,46 +2,41 @@
 
 **Date**: 2026-09-24  
 **Branch**: `master`  
-**Latest Commit**: `d6d233e` (`fix(phase-7): status-aware stage timeline rendering and failed stage styles`)  
-**Git Working Tree**: Clean  
+**Status**: Phases 0 through 14 Verified & Stable  
 
 ---
 
 ## 1. Executive Summary
 
-Autonomous engineering stabilization across all phases (Phase 0 through Phase 8) is **100% complete and fully verified**.
+Autonomous engineering stabilization across all phases up to **Phase 14** is **100% complete and fully verified**.
 
 - **Packaged Desktop App**: Successfully built and tested release binary.
   - Path: `desktop/src-tauri/target/release/autopilot-desktop.exe`
-  - SHA256: `22A8F065FD65AD8673A7C1ABE858AB64877D9DAE197E1A5C33E40119D8A276F7`
-  - Size: 9,116,160 bytes
+  - Size: ~9.1 MB
 - **Core Video Pipeline**: Real Windows E2E pipeline generates 30–45s short-form videos with MoneyPrinterTurbo (1080x1920 MP4), real Wikipedia research, real Ollama (`qwen3:4b`), real Windows SAPI TTS, real Openverse media, progressive captions, 0 QA findings, and intentional payoff endings.
 - **Safety Invariant**: Zero public publishing occurred during automated testing (`auto_publish=False`).
 
 ---
 
-## 2. Commit Ledger (6 New Commits on `master`)
+## 2. Completed Phase Matrix (Phases 0 through 14)
 
-1. `73c77f7` — `fix(bridge): make production.start async and align LLM timeout with config`
-   - Fixed packaged desktop "Failed to start production" error caused by Tauri's 60s `REQUEST_TIMEOUT`. Decoupled `production.start` into background daemon worker thread returning `{"status": "running"}` in < 0.4s.
-   - Aligned `OpenAILLMProvider` timeout to 180s (`CONFIG.ollama_timeout`).
-2. `f933706` — `fix(phase-3): complete error observability, structured error contracts, and redaction`
-   - Populated `errors` SQLite table on `fail_queue_item` and `block_queue_item`.
-   - Fixed latent `AttributeError` at line 1523 of `manager.py`.
-   - Added `errors.list` bridge method with pagination and filtering.
-   - Implemented recursive `redact_sensitive` sanitizing tokens, keys, and authorization headers.
-   - Added `StructuredError`, `ErrorBanner.tsx`, `RecentFailuresCard`, and `last_error` display.
-3. `2a009f9` — `fix(phase-4): harden database state consistency, WAL mode, busy timeouts, and lease recovery`
-   - Set `PRAGMA journal_mode = WAL`, `PRAGMA busy_timeout = 30000`, and `timeout = 30.0` in `DBManager._connect` to eliminate Windows multi-threaded locking issues.
-   - Added atomic `DBManager.transition_job`.
-   - Added error auditing for stale lease recovery (`STALE_LEASE_RECOVERED`, `DEAD_LETTER`).
-4. `9a27237` — `fix(phase-5): harden desktop bridge lifecycles, pending request drain on EOF, and disconnect event`
-   - Updated `engine.rs` reader loop to immediately drain `internal.pending` on stdout EOF, preventing 60s UI request stalls on unexpected engine crashes.
-   - Emitted `bridge://disconnect` to frontend with recovery banner in `App.tsx`.
-5. `c5fb0cf` — `fix(phase-6): harden provider resolution in worker loop to fail-closed on invalid policy overrides`
-   - Hardened `worker.py` to catch `ValueError` during policy resolution and fail the queue item with non-retryable status and explicit message instead of proceeding.
-6. `d6d233e` — `fix(phase-7): status-aware stage timeline rendering and failed stage styles`
-   - Made `StageTimeline` status-aware: marks failed stages with `.stage-failed` danger styling and marks completed jobs with all stages done.
+| Phase | Category | Implementation & Verification Status |
+|---|---|---|
+| **Phase 0** | Reconnaissance & Environment | Baseline audits, runtime discovery, artifact conventions |
+| **Phase 1** | Bug Ledger | Systematic failure cataloging & root cause tracing |
+| **Phase 2** | Production Failure Fix | Async worker execution for `production.start` (< 0.4s response) + LLM timeout alignment |
+| **Phase 3** | Error Observability | `errors` SQLite table, `errors.list` bridge method, `redact_sensitive`, `ErrorBanner`, `RecentFailuresCard` |
+| **Phase 4** | Database Consistency | SQLite WAL mode, `busy_timeout = 30000`, atomic `transition_job`, stale lease recovery |
+| **Phase 5** | Desktop Bridge | Pending request drain on stdout EOF, `bridge://disconnect` event & UI recovery |
+| **Phase 6** | Provider Resolution | Fail-closed policy resolution in worker loop on invalid overrides |
+| **Phase 7** | Production Pipeline UI | Status-aware `StageTimeline` rendering with `.stage-failed` styles |
+| **Phase 8** | MoneyPrinterTurbo Runtime | Subprocess daemon discovery, health probe, auto-start, artifact copy |
+| **Phase 9** | Windows File System Hardening | Sanitization of reserved device names (`CON`, `AUX`, `NUL`, etc.), invalid chars (`?:*<>|"/\`), trailing dots/spaces in `artifacts.py`, `logging.py`, and `asset_cache.py` |
+| **Phase 10** | Research & Provenance | Wikipedia source deduplication, URL normalization, Crawl4AI lazy-import bounded timeouts |
+| **Phase 11** | Script Generation | 6–8 scenes, ~85–110 spoken words target (for 35s profile), listicle structure detection, intentional payoff endings, bounded retry cap |
+| **Phase 12** | TTS / Voice Synthesis | Windows SAPI synthesis, per-scene audio duration probing, total narration duration persistence |
+| **Phase 13** | Captions & Alignment | 2–4 word progressive caption phrases, monotonic timestamps, ASS kinetic karaoke & SRT subtitles |
+| **Phase 14** | Duration & Alignment | 35s vertical short duration target, ffprobe verification, truncation prevention, non-blocking WARN vs BLOCK thresholds |
 
 ---
 
@@ -49,46 +44,19 @@ Autonomous engineering stabilization across all phases (Phase 0 through Phase 8)
 
 | Test Suite | Command | Result |
 |---|---|---|
-| **Python Core Suite** | `python -m pytest tests/test_bridge_protocol.py tests/test_queue_db.py tests/test_crash_recovery.py tests/test_contracts.py tests/test_local_only_policy.py tests/test_worker.py` | **100/100 PASSED** (30.18s) |
-| **Frontend Vitest Suite** | `npm test -- --run` in `desktop/` | **64/64 PASSED** (2.11s) across 10 files |
-| **TypeScript Typecheck & Vite Build** | `npm run build` in `desktop/` | **0 Errors** (629ms, 108 modules) |
-| **Rust / Tauri Build** | `cargo build --release` in `desktop/src-tauri/` | **0 Errors** (23.72s) |
+| **Python Comprehensive Suite** | `python -m pytest tests/test_bridge_protocol.py tests/test_queue_db.py tests/test_crash_recovery.py tests/test_contracts.py tests/test_local_only_policy.py tests/test_worker.py tests/test_logging.py tests/test_adversarial_assets.py tests/test_wikipedia_provider.py tests/test_crawl4ai_lazy_guard.py tests/test_tts_provider_wiring.py tests/test_duration_truncation_regression.py tests/test_creative_quality.py tests/test_run_orchestrator_and_listicle_structure.py` | **170/170 PASSED** (69.04s) |
+| **Frontend Vitest Suite** | `npx vitest run` in `desktop/` | **64/64 PASSED** (3.44s) across 10 files |
+| **TypeScript Typecheck & Vite Build** | `npm run build` in `desktop/` | **0 Errors** (934ms, 108 modules) |
+| **Rust / Tauri Release Build** | `cargo build --release` in `desktop/src-tauri/` | **0 Errors** (27.44s) |
 | **Real Windows E2E Run** | Real Wikipedia + Ollama + SAPI + Openverse + MPT | **34.67s MP4, 0 QA findings, APPROVED** |
 
 ---
 
-## 4. Key Paths & Environment
+## 4. Next Batch: Upcoming Phases (Phases 15–20)
 
-- **Repository Root**: `C:\Users\Saksham\Documents\PROJECT-AUTOPILOT`
-- **Release Executable**: `desktop\src-tauri\target\release\autopilot-desktop.exe`
-- **SQLite Database**: `autopilot\artifacts\autopilot.db` (Schema v11)
-- **Artifacts & Generated Media**: `autopilot\artifacts\`
-- **Python**: 3.14.4 (`C:\Python314\python.exe`)
-- **Node**: v24.15.0
-- **npm**: 11.12.1
-- **Rust / Cargo**: 1.98.1
-
----
-
-## 5. How to Resume Work
-
-1. Verify environment and working tree:
-   ```powershell
-   git status
-   git log -n 6 --oneline
-   ```
-2. Run automated sanity check:
-   ```powershell
-   python -m pytest tests/test_bridge_protocol.py tests/test_queue_db.py
-   npm --prefix desktop test -- --run
-   ```
-3. Run the desktop application:
-   - For dev mode:
-     ```powershell
-     cd desktop
-     npm run tauri dev
-     ```
-   - Or launch the pre-compiled release executable directly:
-     ```powershell
-     .\desktop\src-tauri\target\release\autopilot-desktop.exe
-     ```
+1. **Phase 15: Assets & Visual Matching** (Openverse queries, zero-result fallbacks, aspect ratios, thumbnails)
+2. **Phase 16: QA & Gating** (QA Engine finding types, BLOCK vs WARN severity, checksum validation)
+3. **Phase 17: Publishing Data Model** (Readiness, approval receipts, checksum binding, idempotency)
+4. **Phase 18: YouTube Auth** (OAuth token refresh, atomic persistence, secret-safe UI)
+5. **Phase 19: Manual Publishing** (Ready jobs list, approval/rejection UI, YouTube upload & remote URL persistence)
+6. **Phase 20: Autonomous Public Publishing Safety** (Fail-closed gates, explicit toggle, cooldowns, daily caps)

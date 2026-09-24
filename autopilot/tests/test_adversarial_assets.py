@@ -69,6 +69,24 @@ def test_adversarial_path_traversal_refused(tmp_path):
     assert clean == "windows_system32_cmd.exe"
 
 
+def test_adversarial_windows_reserved_names_and_invalid_chars():
+    """Verify Windows reserved device names and invalid characters are sanitized."""
+    from autopilot.core.asset_cache import sanitize_filename
+    for res in ("CON.png", "AUX.jpg", "NUL.mp4", "PRN.jpeg", "COM1.bin", "LPT5.png"):
+        clean = sanitize_filename(res)
+        assert clean.startswith("_")
+        assert not clean.startswith("CON.")
+        assert not clean.startswith("AUX.")
+
+    # Test invalid chars and trailing dots/spaces
+    dirty = 'photo:name?with*illegal|chars<and>quotes".jpg   ...'
+    clean_dirty = sanitize_filename(dirty)
+    for ch in '<>:"/\\|?*':
+        assert ch not in clean_dirty
+    assert not clean_dirty.endswith(".")
+    assert not clean_dirty.endswith(" ")
+
+
 def test_adversarial_malformed_openverse_json():
     """Verify openverse provider handles broken JSON without unhandled crash."""
     provider = OpenverseAssetProvider()
