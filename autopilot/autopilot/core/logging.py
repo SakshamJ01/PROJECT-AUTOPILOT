@@ -59,6 +59,8 @@ class StructuredLogger:
             entry["error"] = error
         if details:
             entry["details"] = details
+        from autopilot.bridge.protocol import redact_sensitive
+        entry = redact_sensitive(entry)
         line = json.dumps(entry, default=str)
         with open(self.log_file, "a", encoding="utf-8") as f:
             f.write(line + "\n")

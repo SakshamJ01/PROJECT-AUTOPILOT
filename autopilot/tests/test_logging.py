@@ -113,3 +113,14 @@ def test_sanitized_log_filename_is_valid_on_windows(isolated_logs):
     logger.error("boom", error="test")
     assert logger.log_file.exists()
     assert _read_entries(logger)[0]["error"] == "test"
+
+
+def test_logger_redacts_sensitive_tokens_in_details(isolated_logs):
+    """Verify secrets and tokens are redacted when written to log files."""
+    logger = StructuredLogger(job_id="sec-1", stage="security")
+    logger.info("auth_check", details={"api_key": "sk-secret12345", "token": "ya29.auth_token", "normal": "safe"})
+    entries = _read_entries(logger)
+    assert entries[0]["details"]["api_key"] == "[REDACTED]"
+    assert entries[0]["details"]["token"] == "[REDACTED]"
+    assert entries[0]["details"]["normal"] == "safe"
+
