@@ -91,6 +91,9 @@ export const useUiStore = create<UiState>((set, get) => ({
 
   clearNotifications: (severity?: SeverityFilter) =>
     set((state) => {
+      if (!severity || severity === "all") {
+        return { notifications: {} };
+      }
       const newNotifs: Record<
         string,
         {
@@ -103,7 +106,7 @@ export const useUiStore = create<UiState>((set, get) => ({
         }
       > = {};
       Object.keys(state.notifications)
-        .filter((k) => !(severity !== undefined && state.notifications[k].severity !== severity))
+        .filter((k) => state.notifications[k].severity !== severity)
         .forEach((k) => (newNotifs[k] = state.notifications[k]));
       return { notifications: newNotifs };
     }),

@@ -12,6 +12,7 @@ import AnalyticsScreen from "./components/AnalyticsScreen";
 import StrategyScreen from "./components/StrategyScreen";
 import SettingsScreen from "./components/SettingsScreen";
 import JobDrawer from "./components/JobDrawer";
+import NotificationCenter from "./components/NotificationCenter";
 import { useEngineStatusQuery, useAutonomyPublishStatusQuery } from "./api/hooks";
 import { useUiStore } from "./state/ui";
 import type { Page } from "./state/ui";
@@ -116,6 +117,7 @@ export default function App() {
         {page === "system" ? <SystemPanel /> : null}
       </main>
       <JobDrawer />
+      <NotificationCenter />
     </div>
   );
 }

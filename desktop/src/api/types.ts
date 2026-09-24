@@ -133,15 +133,78 @@ export interface LogEntry {
   message: string;
 }
 
+export interface ArtifactEntry {
+  artifact_id: string;
+  job_id: string;
+  stage?: string;
+  artifact_type: string;
+  artifact_path?: string;
+  file_path?: string;
+  path?: string;
+  file_size_bytes?: number | null;
+  sha256?: string | null;
+  sha256_hash?: string | null;
+  created_at?: string | null;
+  metadata_json?: string | null;
+}
+
+export interface PublicationEntry {
+  publication_id?: string;
+  publish_id?: string;
+  job_id: string;
+  platform: string;
+  status: string;
+  remote_video_id?: string | null;
+  remote_url?: string | null;
+  visibility?: string | null;
+  published_at?: string | null;
+  created_at?: string | null;
+  idempotency_key?: string | null;
+  receipt_json?: string | null;
+}
+
+export interface JobMetadata {
+  job_id: string;
+  topic?: string | null;
+  channel_id?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  duration_seconds?: number | null;
+  total_duration_sec?: number | null;
+  target_duration_sec?: number | null;
+  narration_duration_sec?: number | null;
+  narration_sec?: number | null;
+  render_duration_sec?: number | null;
+  render_sec?: number | null;
+  media_checksum_sha256?: string | null;
+  checksum_manifest?: string | null;
+  sha256?: string | null;
+  sources_json?: string | null;
+}
+
+export interface StageRunEntry {
+  run_id?: string | number;
+  stage_name?: string;
+  stage?: string;
+  status: string;
+  duration_ms?: number | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  error_message?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
 export interface JobInspect {
   found: boolean;
   job_id: string;
-  job: Record<string, unknown> | null;
-  events: WorkflowEvent[];
-  artifacts: Record<string, unknown>[];
-  errors: ErrorEntry[];
-  queue_item: QueueItem | null;
-  publications: Record<string, unknown>[];
+  job?: JobMetadata | Record<string, unknown> | null;
+  manifest?: JobMetadata | Record<string, unknown> | null;
+  events?: WorkflowEvent[];
+  stage_runs?: StageRunEntry[];
+  artifacts?: ArtifactEntry[];
+  errors?: ErrorEntry[];
+  queue_item?: QueueItem | null;
+  publications?: PublicationEntry[];
   qa_reports?: QaReport[];
   stage_order?: string[];
 }

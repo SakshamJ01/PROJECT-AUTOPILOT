@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useQueueQuery } from "../api/hooks";
 import { useUiStore } from "../state/ui";
 import StatusBadge from "./StatusBadge";
@@ -14,6 +14,21 @@ const STATUS_OPTIONS = [
   "blocked",
   "cancelled",
   "dead_letter",
+] as const;
+
+const QUICK_CATEGORIES = [
+  { id: "all", label: "All Items" },
+  { id: "running", label: "Running" },
+  { id: "succeeded", label: "Completed" },
+  { id: "failed", label: "Failed / Blocked" },
+  { id: "review", label: "Needs Review" },
+] as const;
+
+const DATE_OPTIONS = [
+  { id: "all", label: "All time" },
+  { id: "today", label: "Today" },
+  { id: "24h", label: "Last 24 hours" },
+  { id: "7d", label: "Last 7 days" },
 ] as const;
 
 function toneForStatus(status: string): "ok" | "bad" | "warn" | "info" {
@@ -138,11 +153,50 @@ function QueueTable({ items }: { items: QueueItem[] }) {
 
 export default function QueueScreen() {
   const [statusFilter, setStatusFilter] = useState<(typeof STATUS_OPTIONS)[number]>("all");
+  const [categoryFilter, setCategoryFilter] = useState<(typeof QUICK_CATEGORIES)[number]["id"]>("all");
+  const [dateFilter, setDateFilter] = useState<(typeof DATE_OPTIONS)[number]["id"]>("all");
   const [search, setSearch] = useState("");
+
   const { data, isLoading, isError } = useQueueQuery({
     status: statusFilter,
     search: search || undefined,
   });
+
+  const filteredItems = useMemo(() => {
+    if (!data?.items) return [];
+    let items = data.items;
+
+    // Quick category filtering
+    if (categoryFilter === "running") {
+      items = items.filter((i) => i.status === "running");
+    } else if (categoryFilter === "succeeded") {
+      items = items.filter((i) => i.status === "succeeded");
+    } else if (categoryFilter === "failed") {
+      items = items.filter((i) => ["failed", "dead_letter", "blocked"].includes(i.status));
+    } else if (categoryFilter === "review") {
+      items = items.filter((i) => ["retry_wait", "blocked"].includes(i.status));
+    }
+
+    // Date filtering
+    if (dateFilter !== "all") {
+      const now = Date.now();
+      const cutoff =
+        dateFilter === "today"
+          ? new Date().setHours(0, 0, 0, 0)
+          : dateFilter === "24h"
+            ? now - 24 * 3600 * 1000
+            : now - 7 * 24 * 3600 * 1000;
+
+      items = items.filter((i) => {
+        const ts = i.started_at ?? i.scheduled_at ?? i.completed_at;
+        if (!ts) return false;
+        const t = new Date(ts).getTime();
+        return !Number.isNaN(t) && t >= cutoff;
+      });
+    }
+
+    return items;
+  }, [data?.items, categoryFilter, dateFilter]);
 
   return (
     <div className="queue-screen">
@@ -167,19 +221,48 @@ export default function QueueScreen() {
             </option>
           ))}
         </select>
+        <select
+          className="select-input"
+          value={dateFilter}
+          onChange={(e) => setDateFilter(e.target.value as (typeof DATE_OPTIONS)[number]["id"])}
+          aria-label="Filter by date"
+        >
+          {DATE_OPTIONS.map((d) => (
+            <option key={d.id} value={d.id}>
+              {d.label}
+            </option>
+          ))}
+        </select>
       </div>
+
+      <div className="filter-tabs" style={{ marginBottom: "16px" }}>
+        {QUICK_CATEGORIES.map((c) => (
+          <button
+            key={c.id}
+            className={`filter-chip ${categoryFilter === c.id ? "active" : ""}`}
+            onClick={() => setCategoryFilter(c.id)}
+            type="button"
+          >
+            {c.label}
+          </button>
+        ))}
+      </div>
+
       {data ? <SummaryStats summary={data.summary} /> : null}
+
       <div className="card">
         <div className="card-header">
           <span>Queue items</span>
-          <span className="muted">{data?.items.length ?? 0} shown</span>
+          <span className="muted">
+            {filteredItems.length} shown{data?.items ? ` (of ${data.items.length})` : ""}
+          </span>
         </div>
         {isLoading ? (
           <div className="card-body muted">Loading queue…</div>
         ) : isError || !data ? (
           <div className="card-body muted">Queue unavailable</div>
         ) : (
-          <QueueTable items={data.items} />
+          <QueueTable items={filteredItems} />
         )}
       </div>
     </div>

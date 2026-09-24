@@ -33,7 +33,7 @@ function fileBase(path: string): string {
 }
 
 function OverviewTab({ data }: { data: JobInspect }) {
-  const job = (data.job ?? (data as unknown as { manifest?: Record<string, unknown> }).manifest ?? data.queue_item ?? {}) as Record<string, unknown>;
+  const job = (data.job ?? data.manifest ?? data.queue_item ?? {}) as Record<string, unknown>;
   const queue = data.queue_item;
   const checksum = String(job.media_checksum_sha256 ?? job.checksum_manifest ?? job.sha256 ?? "—");
   const durationSec = job.duration_seconds ?? job.total_duration_sec ?? job.target_duration_sec;
@@ -128,7 +128,7 @@ function OverviewTab({ data }: { data: JobInspect }) {
 
 function TimelineTab({ data }: { data: JobInspect }) {
   const events = data.events ?? [];
-  const stageRuns = (data as unknown as Record<string, unknown>).stage_runs as Array<Record<string, unknown>> | undefined;
+  const stageRuns = data.stage_runs;
 
   return (
     <div className="tab-panel">
@@ -183,10 +183,9 @@ function ArtifactsTab({ data }: { data: JobInspect }) {
   return (
     <div className="tab-panel">
       <ul className="artifact-list">
-        {artifacts.map((a, idx) => {
-          const art = a as Record<string, unknown>;
+        {artifacts.map((art, idx) => {
           const path = String(art.artifact_path ?? art.file_path ?? art.path ?? "");
-          const type = String(art.artifact_type ?? art.type ?? "artifact");
+          const type = String(art.artifact_type ?? "artifact");
           const sha = art.sha256 ?? art.sha256_hash ? String(art.sha256 ?? art.sha256_hash).slice(0, 16) : null;
           return (
             <li key={String(art.artifact_id ?? idx)} className="artifact-item">
@@ -240,7 +239,8 @@ function ErrorsTab({ data }: { data: JobInspect }) {
 }
 
 function PublicationTab({ data }: { data: JobInspect }) {
-  if (data.publications.length === 0) {
+  const publications = data.publications ?? [];
+  if (publications.length === 0) {
     return (
       <div className="tab-panel">
         <p className="muted small">
@@ -252,12 +252,11 @@ function PublicationTab({ data }: { data: JobInspect }) {
   return (
     <div className="tab-panel">
       <ul className="plain-list">
-        {data.publications.map((p, idx) => {
-          const pub = p as Record<string, unknown>;
+        {publications.map((pub, idx) => {
           const isSuccess = pub.status === "SUCCESS" || pub.status === "published";
           const remoteUrl = pub.remote_url ? String(pub.remote_url) : null;
           return (
-            <li key={String(pub.publish_id ?? idx)} className="card-body" style={{ background: "rgba(255, 255, 255, 0.02)", borderRadius: "6px", marginBottom: "8px" }}>
+            <li key={String(pub.publish_id ?? pub.publication_id ?? idx)} className="card-body" style={{ background: "rgba(255, 255, 255, 0.02)", borderRadius: "6px", marginBottom: "8px" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
                 <StatusBadge
                   label={String(pub.status ?? "UNKNOWN")}
@@ -284,12 +283,6 @@ function PublicationTab({ data }: { data: JobInspect }) {
                         {remoteUrl}
                       </a>
                     </dd>
-                  </>
-                ) : null}
-                {pub.error_message ? (
-                  <>
-                    <dt>Error</dt>
-                    <dd className="err-type">{String(pub.error_message)}</dd>
                   </>
                 ) : null}
               </dl>

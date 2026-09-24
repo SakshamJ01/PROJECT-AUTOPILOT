@@ -1,10 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useUiStore } from "../state/ui";
 import {
   engineCall,
   engineStatus,
   POLL,
   type JsonValue,
 } from "./engine";
+
+function notify(title: string, description: string, severity: "info" | "error" = "info") {
+  useUiStore.getState().addNotification(title, description, severity);
+}
 import type {
   AnalyticsReport,
   AnalyticsSnapshots,
@@ -141,11 +146,15 @@ export function useProductionStartMutation() {
       asset_provider?: string;
       production_engine?: string;
     }) => engineCall<ProductionStartResult>("production.start", params),
-    onSuccess: (data) => {
+    onSuccess: (data, variables) => {
       void queryClient.invalidateQueries({ queryKey: ["engine", "queue.list"] });
       void queryClient.invalidateQueries({ queryKey: ["engine", "health"] });
       void queryClient.invalidateQueries({ queryKey: ["engine", "job.inspect", data.job_id] });
       void queryClient.invalidateQueries({ queryKey: ["engine", "errors.list"] });
+      notify("Production Started", `Started job ${data.job_id} (${variables.topic})`, "info");
+    },
+    onError: (err) => {
+      notify("Production Start Failed", (err as Error)?.message ?? "Failed to start production", "error");
     },
   });
 }
@@ -155,10 +164,14 @@ export function useProductionCancelMutation() {
   return useMutation({
     mutationFn: (params: { job_id?: string; queue_id?: string }) =>
       engineCall<ProductionActionResult>("production.cancel", params),
-    onSuccess: () => {
+    onSuccess: (data) => {
       void queryClient.invalidateQueries({ queryKey: ["engine", "queue.list"] });
       void queryClient.invalidateQueries({ queryKey: ["engine", "health"] });
       void queryClient.invalidateQueries({ queryKey: ["engine", "errors.list"] });
+      notify("Job Cancelled", `Queue item ${data.queue_id} was cancelled`, "info");
+    },
+    onError: (err) => {
+      notify("Cancel Failed", (err as Error)?.message ?? "Failed to cancel job", "error");
     },
   });
 }
@@ -168,10 +181,14 @@ export function useProductionRetryMutation() {
   return useMutation({
     mutationFn: (params: { job_id?: string; queue_id?: string }) =>
       engineCall<ProductionActionResult>("production.retry", params),
-    onSuccess: () => {
+    onSuccess: (data) => {
       void queryClient.invalidateQueries({ queryKey: ["engine", "queue.list"] });
       void queryClient.invalidateQueries({ queryKey: ["engine", "health"] });
       void queryClient.invalidateQueries({ queryKey: ["engine", "errors.list"] });
+      notify("Job Retried", `Queue item ${data.queue_id} queued for retry (${data.status ?? "running"})`, "info");
+    },
+    onError: (err) => {
+      notify("Retry Failed", (err as Error)?.message ?? "Failed to retry job", "error");
     },
   });
 }
@@ -195,8 +212,12 @@ export function useProductionEngineEnsureMutation() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: () => engineCall<ProductionEngineStatus>("production.engine.ensure"),
-    onSuccess: () => {
+    onSuccess: (data) => {
       void queryClient.invalidateQueries({ queryKey: ["engine", "production.engine.status"] });
+      notify("Production Engine", `MoneyPrinterTurbo is ${data.running ? "running" : "offline"}`, data.running ? "info" : "error");
+    },
+    onError: (err) => {
+      notify("Engine Error", (err as Error)?.message ?? "Failed to connect to engine", "error");
     },
   });
 }
@@ -281,10 +302,14 @@ export function useAutonomyRunMutation() {
   return useMutation({
     mutationFn: (params: AutonomyRunRequest) =>
       engineCall<AutonomyRunResult>("autonomy.run", params),
-    onSuccess: () => {
+    onSuccess: (data) => {
       void queryClient.invalidateQueries({ queryKey: ["engine", "autonomy.status"] });
       void queryClient.invalidateQueries({ queryKey: ["engine", "autonomy.proposals"] });
       void queryClient.invalidateQueries({ queryKey: ["engine", "queue.list"] });
+      notify("Autopilot Run Complete", `Autopilot run ${data.run_id} completed (${data.status})`, "info");
+    },
+    onError: (err) => {
+      notify("Autopilot Run Failed", (err as Error)?.message ?? "Failed to run autonomy", "error");
     },
   });
 }
@@ -323,6 +348,10 @@ export function useProposalApproveMutation() {
       void queryClient.invalidateQueries({ queryKey: ["engine", "autonomy.proposals"] });
       void queryClient.invalidateQueries({ queryKey: ["engine", "autonomy.status"] });
       void queryClient.invalidateQueries({ queryKey: ["engine", "queue.list"] });
+      notify("Proposal Approved", "Topic queued for autonomous production", "info");
+    },
+    onError: (err) => {
+      notify("Approval Failed", (err as Error)?.message ?? "Failed to approve proposal", "error");
     },
   });
 }
@@ -336,6 +365,10 @@ export function useProposalRejectMutation() {
       void queryClient.invalidateQueries({ queryKey: ["engine", "autonomy.proposals"] });
       void queryClient.invalidateQueries({ queryKey: ["engine", "autonomy.status"] });
       void queryClient.invalidateQueries({ queryKey: ["engine", "queue.list"] });
+      notify("Proposal Rejected", "Topic proposal dismissed", "info");
+    },
+    onError: (err) => {
+      notify("Rejection Failed", (err as Error)?.message ?? "Failed to reject proposal", "error");
     },
   });
 }
@@ -393,9 +426,13 @@ export function useScheduleCreateMutation() {
   return useMutation({
     mutationFn: (params: ScheduleCreateRequest) =>
       engineCall<Schedule>("scheduler.create", params),
-    onSuccess: () => {
+    onSuccess: (data) => {
       void queryClient.invalidateQueries({ queryKey: ["engine", "scheduler.list"] });
       void queryClient.invalidateQueries({ queryKey: ["engine", "scheduler.status"] });
+      notify("Schedule Created", `Schedule '${data.schedule_id}' (${data.cadence}) created`, "info");
+    },
+    onError: (err) => {
+      notify("Schedule Creation Failed", (err as Error)?.message ?? "Failed to create schedule", "error");
     },
   });
 }
@@ -405,9 +442,13 @@ export function useScheduleUpdateMutation() {
   return useMutation({
     mutationFn: (params: ScheduleUpdateRequest) =>
       engineCall<Schedule>("scheduler.update", params),
-    onSuccess: () => {
+    onSuccess: (data) => {
       void queryClient.invalidateQueries({ queryKey: ["engine", "scheduler.list"] });
       void queryClient.invalidateQueries({ queryKey: ["engine", "scheduler.status"] });
+      notify("Schedule Updated", `Schedule '${data.schedule_id}' (${data.cadence}) updated`, "info");
+    },
+    onError: (err) => {
+      notify("Schedule Update Failed", (err as Error)?.message ?? "Failed to update schedule", "error");
     },
   });
 }
@@ -420,9 +461,13 @@ export function useScheduleToggleMutation() {
         params.enabled ? "scheduler.enable" : "scheduler.disable",
         { schedule_id: params.schedule_id },
       ),
-    onSuccess: () => {
+    onSuccess: (data) => {
       void queryClient.invalidateQueries({ queryKey: ["engine", "scheduler.list"] });
       void queryClient.invalidateQueries({ queryKey: ["engine", "scheduler.status"] });
+      notify("Schedule Toggled", `Schedule '${data.schedule_id}' is now ${data.enabled ? "enabled" : "disabled"}`, "info");
+    },
+    onError: (err) => {
+      notify("Schedule Toggle Failed", (err as Error)?.message ?? "Failed to toggle schedule", "error");
     },
   });
 }
@@ -435,6 +480,10 @@ export function useScheduleDeleteMutation() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["engine", "scheduler.list"] });
       void queryClient.invalidateQueries({ queryKey: ["engine", "scheduler.status"] });
+      notify("Schedule Deleted", "Schedule removed from system", "info");
+    },
+    onError: (err) => {
+      notify("Schedule Delete Failed", (err as Error)?.message ?? "Failed to delete schedule", "error");
     },
   });
 }
@@ -452,6 +501,10 @@ export function useScheduleRunNowMutation() {
       });
       void queryClient.invalidateQueries({ queryKey: ["engine", "queue.list"] });
       void queryClient.invalidateQueries({ queryKey: ["engine", "autonomy.status"] });
+      notify("Schedule Triggered", `Triggered execution for schedule ${data.schedule_id}`, "info");
+    },
+    onError: (err) => {
+      notify("Schedule Trigger Failed", (err as Error)?.message ?? "Failed to trigger schedule", "error");
     },
   });
 }
@@ -527,6 +580,10 @@ export function usePublishApproveMutation() {
       void queryClient.invalidateQueries({
         queryKey: ["engine", "publishing.inspect", variables.job_id],
       });
+      notify("Job Approved", `Job ${variables.job_id} approved for publishing`, "info");
+    },
+    onError: (err) => {
+      notify("Approval Failed", (err as Error)?.message ?? "Failed to approve job", "error");
     },
   });
 }
@@ -545,6 +602,10 @@ export function usePublishRejectMutation() {
       void queryClient.invalidateQueries({
         queryKey: ["engine", "publishing.inspect", variables.job_id],
       });
+      notify("Job Rejected", `Job ${variables.job_id} rejected`, "info");
+    },
+    onError: (err) => {
+      notify("Rejection Failed", (err as Error)?.message ?? "Failed to reject job", "error");
     },
   });
 }
@@ -554,7 +615,7 @@ export function usePublishMutation() {
   return useMutation({
     mutationFn: (params: PublishRequestParams) =>
       engineCall<PublishActionResult>("publishing.publish", params),
-    onSuccess: (_data, variables) => {
+    onSuccess: (data, variables) => {
       void queryClient.invalidateQueries({ queryKey: ["engine", "publishing.list_ready"] });
       void queryClient.invalidateQueries({ queryKey: ["engine", "publishing.status"] });
       void queryClient.invalidateQueries({ queryKey: ["engine", "queue.list"] });
@@ -564,6 +625,10 @@ export function usePublishMutation() {
       });
       void queryClient.invalidateQueries({ queryKey: ["engine", "analytics.status"] });
       void queryClient.invalidateQueries({ queryKey: ["engine", "analytics.report"] });
+      notify("Publish Successful", `Job ${variables.job_id} published (${data.status})`, "info");
+    },
+    onError: (err) => {
+      notify("Publish Failed", (err as Error)?.message ?? "Failed to publish job", "error");
     },
   });
 }
@@ -587,11 +652,15 @@ export function useAnalyticsSyncMutation() {
   return useMutation({
     mutationFn: (params: AnalyticsSyncParams) =>
       engineCall<AnalyticsSyncAllResult>("analytics.sync", params),
-    onSuccess: () => {
+    onSuccess: (data) => {
       void queryClient.invalidateQueries({ queryKey: ["engine", "analytics.status"] });
       void queryClient.invalidateQueries({ queryKey: ["engine", "analytics.report"] });
       void queryClient.invalidateQueries({ queryKey: ["engine", "analytics.snapshots"] });
       void queryClient.invalidateQueries({ queryKey: ["engine", "strategy.status"] });
+      notify("Analytics Synced", `Synchronized ${data.synced_count ?? 0} video metric snapshots`, "info");
+    },
+    onError: (err) => {
+      notify("Analytics Sync Failed", (err as Error)?.message ?? "Failed to sync analytics", "error");
     },
   });
 }
@@ -646,12 +715,16 @@ export function useStrategyLearnMutation() {
   return useMutation({
     mutationFn: (params: StrategyLearnParams) =>
       engineCall<StrategyLearnResult>("strategy.learn", params),
-    onSuccess: () => {
+    onSuccess: (data) => {
       // Refresh strategy state after a learning run.
       void queryClient.invalidateQueries({ queryKey: ["engine", "strategy.status"] });
       void queryClient.invalidateQueries({ queryKey: ["engine", "strategy.show"] });
       void queryClient.invalidateQueries({ queryKey: ["engine", "analytics.status"] });
       void queryClient.invalidateQueries({ queryKey: ["engine", "autonomy.status"] });
+      notify("Strategy Updated", `Processed ${data.observations_used} observations into strategy`, "info");
+    },
+    onError: (err) => {
+      notify("Strategy Update Failed", (err as Error)?.message ?? "Failed to update strategy", "error");
     },
   });
 }
@@ -684,7 +757,13 @@ export function useAutonomyPublishEnableMutation() {
         queryClient.invalidateQueries({ queryKey: ["engine", "autonomy.publish_status"] });
         queryClient.invalidateQueries({ queryKey: ["engine", "publishing.status"] });
         queryClient.invalidateQueries({ queryKey: ["engine", "health"] });
+        notify("Autonomy Publishing", "Autonomous public publishing enabled", "info");
+      } else {
+        notify("Action Denied", res.reason ?? "Disabled", "error");
       }
+    },
+    onError: (err) => {
+      notify("Autonomy Switch Failed", (err as Error)?.message ?? "Failed to switch autonomy", "error");
     },
   });
 }
@@ -697,6 +776,10 @@ export function useAutonomyPublishDisableMutation() {
       for (const key of AUTONOMY_SWITCH_INVALIDATE) {
         queryClient.invalidateQueries({ queryKey: [...key] });
       }
+      notify("Autonomy Publishing", "Autonomous publishing turned OFF (safe)", "info");
+    },
+    onError: (err) => {
+      notify("Kill Switch Failed", (err as Error)?.message ?? "Failed to disable", "error");
     },
   });
 }

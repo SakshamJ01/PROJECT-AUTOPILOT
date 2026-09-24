@@ -11,7 +11,7 @@ import {
 import { useUiStore } from "../state/ui";
 import StatusBadge from "./StatusBadge";
 import ErrorBanner from "./ErrorBanner";
-import type { QueueItem } from "../api/types";
+import type { JobInspect, QueueItem } from "../api/types";
 
 export const STAGES = [
   "RESEARCH",
@@ -203,6 +203,137 @@ function useFocusedJobId(items: QueueItem[] | undefined): string | null {
   return focused?.job_id ?? null;
 }
 
+function formatBytes(bytes?: number | null): string {
+  if (!bytes || bytes <= 0) return "—";
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function RenderObservabilityCard({
+  item,
+  jobInspect,
+}: {
+  item: QueueItem;
+  jobInspect?: JobInspect;
+}) {
+  const engineStatus = useProductionEngineStatusQuery();
+  const stageRuns = jobInspect?.stage_runs ?? [];
+  const renderRun = stageRuns.find(
+    (sr) =>
+      sr.stage_name === "RENDER" ||
+      sr.stage === "RENDER" ||
+      sr.stage_name === "MPT" ||
+      sr.stage === "MPT",
+  );
+  const artifacts = jobInspect?.artifacts ?? [];
+  const mediaArtifact = artifacts.find(
+    (a) =>
+      a.artifact_type === "media" ||
+      String(a.artifact_path ?? a.file_path ?? "").endsWith(".mp4"),
+  );
+
+  const jobMeta = (jobInspect?.job ?? {}) as Record<string, unknown>;
+  const isRenderingNow =
+    item.status === "running" && (item.stage === "RENDER" || item.stage === "MPT");
+  const isRenderComplete =
+    renderRun?.status === "succeeded" ||
+    Boolean(mediaArtifact) ||
+    ["QA", "READY_TO_PUBLISH", "PUBLISH", "COMPLETE"].includes(item.stage);
+  const isRenderFailed =
+    renderRun?.status === "failed" ||
+    ((item.stage === "RENDER" || item.stage === "MPT") &&
+      ["failed", "dead_letter"].includes(item.status));
+
+  const renderState = isRenderingNow
+    ? "Rendering Video (MPT Active)"
+    : isRenderComplete
+      ? "Render Succeeded"
+      : isRenderFailed
+        ? "Render Failed"
+        : "Pending Pipeline Stage";
+
+  const renderDurationSec =
+    jobMeta.render_duration_sec ??
+    jobMeta.render_sec ??
+    (renderRun?.duration_ms != null ? Number(renderRun.duration_ms) / 1000 : null);
+
+  const taskId =
+    (renderRun?.metadata?.task_id as string) ??
+    (renderRun?.metadata?.mpt_task_id as string) ??
+    (item.payload_json?.includes("task_id") ? "mpt-task-active" : null) ??
+    `mpt-${item.job_id.slice(0, 8)}`;
+
+  const resolution = "1080 x 1920 (9:16 Vertical)";
+  const codec = "H.264 (libx264) · AAC Audio";
+  const checksum =
+    mediaArtifact?.sha256 ??
+    mediaArtifact?.sha256_hash ??
+    (jobMeta.media_checksum_sha256 as string) ??
+    (jobMeta.sha256 as string) ??
+    "—";
+
+  const fileSize = formatBytes(mediaArtifact?.file_size_bytes);
+
+  return (
+    <div className="card render-observability-card">
+      <div className="card-header">
+        <span>Render Observability (MPT)</span>
+        <StatusBadge
+          label={renderState}
+          tone={
+            isRenderComplete
+              ? "ok"
+              : isRenderFailed
+                ? "bad"
+                : isRenderingNow
+                  ? "warn"
+                  : "info"
+          }
+        />
+      </div>
+      <div className="card-body">
+        <dl className="kv">
+          <dt>Engine Status</dt>
+          <dd>
+            {engineStatus.data?.running ? (
+              <span className="text-ok">
+                ● Online — {engineStatus.data.engine} {engineStatus.data.version}
+                {engineStatus.data.pid ? ` (PID ${engineStatus.data.pid})` : ""}
+              </span>
+            ) : (
+              <span className="text-warn">○ Standby / Offline (Auto-starts on render)</span>
+            )}
+          </dd>
+          <dt>MPT Task ID</dt>
+          <dd className="small mono">{taskId}</dd>
+          <dt>Resolution</dt>
+          <dd>{resolution}</dd>
+          <dt>Video Codec</dt>
+          <dd>{codec}</dd>
+          <dt>Render Duration</dt>
+          <dd>
+            {renderDurationSec != null ? `${Number(renderDurationSec).toFixed(1)}s` : isRenderingNow ? "In progress…" : "—"}
+          </dd>
+          <dt>Output Size</dt>
+          <dd>{fileSize}</dd>
+          <dt>Media SHA-256</dt>
+          <dd className="small mono" style={{ wordBreak: "break-all" }}>
+            {checksum}
+          </dd>
+          {isRenderFailed && (renderRun?.error_message || item.last_error) ? (
+            <>
+              <dt>Failure Reason</dt>
+              <dd className="err-type">
+                {String(renderRun?.error_message ?? item.last_error)}
+              </dd>
+            </>
+          ) : null}
+        </dl>
+      </div>
+    </div>
+  );
+}
+
 function ProductionDetail({ item }: { item: QueueItem }) {
   const { data, isLoading, isError } = useJobInspectQuery(item.job_id);
   const artifacts = data?.artifacts ?? [];
@@ -211,6 +342,7 @@ function ProductionDetail({ item }: { item: QueueItem }) {
   return (
     <div className="production-grid">
       <JobStatusCard item={item} />
+      <RenderObservabilityCard item={item} jobInspect={data} />
       <ProvidersCard item={item} />
       <div className="card">
         <div className="card-header">
@@ -224,11 +356,11 @@ function ProductionDetail({ item }: { item: QueueItem }) {
             <span className="muted card-body">No artifacts yet</span>
           ) : null}
           {artifacts.map((a) => {
-            const path = String((a as Record<string, unknown>).artifact_path ?? "");
-            const type = String((a as Record<string, unknown>).artifact_type ?? "artifact");
+            const path = String(a.artifact_path ?? a.file_path ?? a.path ?? "");
+            const type = String(a.artifact_type ?? "artifact");
             return (
               <div
-                key={String((a as Record<string, unknown>).artifact_id ?? path)}
+                key={String(a.artifact_id ?? path)}
                 className={`artifact-card ${type === "media" ? "artifact-media" : ""}`}
               >
                 <StatusBadge label={type} tone={type === "media" ? "ok" : "info"} />

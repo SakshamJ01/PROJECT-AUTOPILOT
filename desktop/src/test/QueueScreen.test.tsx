@@ -107,8 +107,25 @@ describe("Queue screen", () => {
     });
     expect(screen.getByText("Rust performance")).toBeInTheDocument();
     // Summary stats render counts from the backend summary.
-    expect(screen.getByText("Running")).toBeInTheDocument();
+    expect(screen.getAllByText("Running")[0]).toBeInTheDocument();
     expect(screen.getAllByText("1")[0]).toBeInTheDocument();
+  });
+
+  it("filters items by quick category chips", async () => {
+    mockQueue();
+    renderScreen();
+
+    await waitFor(() => {
+      expect(screen.getByText("Rust performance")).toBeInTheDocument();
+    });
+
+    const failedChip = screen.getByRole("button", { name: "Failed / Blocked" });
+    fireEvent.click(failedChip);
+
+    // Only the failed item should remain visible
+    expect(screen.getByText("Kubernetes networking")).toBeInTheDocument();
+    expect(screen.queryByText("Quantum Computing Basics")).not.toBeInTheDocument();
+    expect(screen.queryByText("Rust performance")).not.toBeInTheDocument();
   });
 
   it("sends a search filter to the bridge", async () => {
