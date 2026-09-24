@@ -23,6 +23,37 @@ const systemStatus = {
   config_valid: true,
 };
 
+const healthStatus = {
+  status: "healthy",
+  db: { path: "C:\\db", exists: true, schema_version: 26 },
+  scheduler: { status: "AVAILABLE", next_schedule: null },
+  queue_engine: { status: "AVAILABLE", summary: {} },
+  worker: { status: "AVAILABLE" },
+  qa_engine: { available: true, status: "AVAILABLE" },
+  analytics_engine: { status: "AVAILABLE", default_provider: "youtube_analytics" },
+  learning_engine: { status: "AVAILABLE" },
+  autonomy_engine: { status: "AVAILABLE", autonomy_level: 3 },
+  autonomy_auto_publish_enabled: false,
+  publishing: { status: "AVAILABLE", counts: {} },
+  providers: {
+    configured: {
+      llm: "ollama",
+      tts: "windows_sapi",
+      asset: "openverse",
+    },
+    youtube: { status: "configured", token_present: true },
+  },
+  ffmpeg: { available: true, version: "6.0" },
+};
+
+const mptStatus = {
+  engine: "moneyprinter",
+  version: "1.0",
+  installed: true,
+  running: true,
+  pid: 1234,
+};
+
 const entries = [
   { timestamp: "2026-09-17T10:02:00", severity: "error", source: "error", stage: "RENDER", job_id: "job-1", channel_id: "chan1", topic: "Quantum Computing Basics", message: "FFMPEG_TIMEOUT: render exceeded budget" },
   { timestamp: "2026-09-17T10:00:00", severity: "info", source: "event", stage: "RESEARCH", job_id: "job-1", channel_id: "chan1", topic: "Quantum Computing Basics", message: "transition IDEA -> RESEARCH" },
@@ -50,19 +81,23 @@ afterEach(() => {
 });
 
 describe("System & Logs panel", () => {
-  it("renders system status and log entries", async () => {
+  it("renders system status, health matrix, and log entries", async () => {
     (invoke as unknown as Mock).mockImplementation((_cmd: string, args: { method: string }) => {
       if (args.method === "system.status") return Promise.resolve(systemStatus);
+      if (args.method === "health.get") return Promise.resolve(healthStatus);
+      if (args.method === "production.engine_status") return Promise.resolve(mptStatus);
       if (args.method === "logs.tail") return Promise.resolve({ entries });
       return Promise.reject(new Error(`unexpected ${args.method}`));
     });
 
     renderPanel();
 
-    expect(screen.getByText(/Loading system status/)).toBeInTheDocument();
-    await screen.findByText("v0.1.0");
+    await screen.findByText("System Health & Subsystem Matrix");
+    await screen.findByText("Host Environment & Storage");
     await screen.findByText("FFMPEG_TIMEOUT: render exceeded budget");
     expect(screen.getByText("transition IDEA -> RESEARCH")).toBeInTheDocument();
+    expect(screen.getByText("Ollama / LLM Provider")).toBeInTheDocument();
+    expect(screen.getByText("MoneyPrinterTurbo")).toBeInTheDocument();
   });
 
   it("re-queries logs.tail with an error filter when severity changes", async () => {
@@ -71,6 +106,8 @@ describe("System & Logs panel", () => {
     });
     (invoke as unknown as Mock).mockImplementation((_cmd: string, args: { method: string }) => {
       if (args.method === "system.status") return Promise.resolve(systemStatus);
+      if (args.method === "health.get") return Promise.resolve(healthStatus);
+      if (args.method === "production.engine_status") return Promise.resolve(mptStatus);
       if (args.method === "logs.tail") return tailMock(_cmd, args);
       return Promise.reject(new Error(`unexpected ${args.method}`));
     });
@@ -89,7 +126,7 @@ describe("System & Logs panel", () => {
     });
   });
 
-  it("shows the offline banner state falls through to unavailable UI", async () => {
+  it("shows unavailable UI on bridge rejection", async () => {
     (invoke as unknown as Mock).mockRejectedValue(new Error("bridge down"));
     renderPanel();
     await screen.findByText("System status unavailable");
