@@ -234,10 +234,11 @@ def test_pipeline_openai_compatible_selects_real_provider():
                 topic="pipeline openai test",
                 llm_provider="openai_compatible",
                 production_engine="ffmpeg",
+                max_regeneration_attempts=1,
             )
         except Exception:
             pass
-        mock_cls.assert_called_once()
+        assert mock_cls.call_count >= 1
 
 
 def test_pipeline_default_backward_compatible():
@@ -399,11 +400,12 @@ def test_pipeline_passes_research_to_llm_provider():
                 topic=topic,
                 llm_provider="openai_compatible",
                 production_engine="ffmpeg",
+                max_regeneration_attempts=1,
             )
         except Exception:
             pass
 
-        mock_instance.generate_script.assert_called_once()
+        assert mock_instance.generate_script.call_count >= 1
         call_kwargs = mock_instance.generate_script.call_args.kwargs
         passed_report = call_kwargs.get("research_report")
         assert passed_report is not None

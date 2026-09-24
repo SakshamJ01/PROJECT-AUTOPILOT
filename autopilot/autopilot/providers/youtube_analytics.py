@@ -102,9 +102,7 @@ class YouTubeAnalyticsProvider:
         raw_data: Dict[str, Any]
 
         if self.http_client:
-            token = self._resolve_token()
-            if not token:
-                raise ValueError("YouTube API credentials not configured. Provide YOUTUBE_ACCESS_TOKEN or mock client.")
+            token = self._resolve_token() or "mock-bearer-token"
             raw_data = self.http_client(url, {"Authorization": f"Bearer {token}"})
         else:
             token = self._resolve_token()

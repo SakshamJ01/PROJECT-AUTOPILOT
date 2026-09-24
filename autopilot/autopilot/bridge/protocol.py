@@ -39,13 +39,29 @@ _SENSITIVE_KEY_PATTERN = re.compile(
 _BEARER_PATTERN = re.compile(r"Bearer\s+[A-Za-z0-9_\-\.~+/]+=*", re.IGNORECASE)
 
 
+# Keys that explicitly describe presence or boolean state and never contain secrets
+_SAFE_STATUS_KEYS = frozenset(
+    {
+        "authenticated",
+        "secrets_present",
+        "token_present",
+        "auth_status",
+        "oauth_configured",
+        "status",
+        "guidance",
+    }
+)
+
+
 def redact_sensitive(data: Any) -> Any:
     """Recursively scrub sensitive tokens, credentials, and API keys."""
     if isinstance(data, dict):
         cleaned: dict[str, Any] = {}
         for k, v in data.items():
-            k_str = str(k)
-            if k_str in _SENSITIVE_KEYWORDS or _SENSITIVE_KEY_PATTERN.search(k_str):
+            k_str = str(k).lower()
+            if k_str in _SAFE_STATUS_KEYS or isinstance(v, bool):
+                cleaned[k] = redact_sensitive(v)
+            elif k_str in _SENSITIVE_KEYWORDS or _SENSITIVE_KEY_PATTERN.search(k_str):
                 cleaned[k] = "[REDACTED]"
             else:
                 cleaned[k] = redact_sensitive(v)
