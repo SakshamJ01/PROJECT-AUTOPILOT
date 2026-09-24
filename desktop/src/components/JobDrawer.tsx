@@ -180,8 +180,7 @@ function PublicationTab({ data }: { data: JobInspect }) {
     return (
       <div className="tab-panel">
         <p className="muted small">
-          Not published. Publishing is intentionally disabled from the desktop
-          surface — use the CLI or scheduler to publish.
+          Not yet published. You can review and publish this job from the Publishing screen once QA checks and approvals pass.
         </p>
       </div>
     );
@@ -191,15 +190,45 @@ function PublicationTab({ data }: { data: JobInspect }) {
       <ul className="plain-list">
         {data.publications.map((p, idx) => {
           const pub = p as Record<string, unknown>;
+          const isSuccess = pub.status === "SUCCESS" || pub.status === "published";
+          const remoteUrl = pub.remote_url ? String(pub.remote_url) : null;
           return (
-            <li key={String(pub.publish_id ?? idx)}>
-              <StatusBadge
-                label={String(pub.status ?? "UNKNOWN")}
-                tone={pub.status === "SUCCESS" ? "ok" : "warn"}
-              />{" "}
-              <span className="muted small">
-                {String(pub.platform ?? "—")} · {String(pub.visibility ?? "—")}
-              </span>
+            <li key={String(pub.publish_id ?? idx)} className="card-body" style={{ background: "rgba(255, 255, 255, 0.02)", borderRadius: "6px", marginBottom: "8px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
+                <StatusBadge
+                  label={String(pub.status ?? "UNKNOWN")}
+                  tone={isSuccess ? "ok" : "warn"}
+                />
+                <span className="muted small">{formatTime(String(pub.published_at ?? pub.created_at ?? null))}</span>
+              </div>
+              <dl className="kv">
+                <dt>Platform</dt>
+                <dd>{String(pub.platform ?? "YouTube")}</dd>
+                <dt>Visibility</dt>
+                <dd>{String(pub.visibility ?? "private")}</dd>
+                {pub.remote_video_id ? (
+                  <>
+                    <dt>Video ID</dt>
+                    <dd>{String(pub.remote_video_id)}</dd>
+                  </>
+                ) : null}
+                {remoteUrl ? (
+                  <>
+                    <dt>URL</dt>
+                    <dd>
+                      <a href={remoteUrl} target="_blank" rel="noopener noreferrer" style={{ color: "var(--accent)" }}>
+                        {remoteUrl}
+                      </a>
+                    </dd>
+                  </>
+                ) : null}
+                {pub.error_message ? (
+                  <>
+                    <dt>Error</dt>
+                    <dd className="err-type">{String(pub.error_message)}</dd>
+                  </>
+                ) : null}
+              </dl>
             </li>
           );
         })}
