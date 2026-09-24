@@ -51,6 +51,7 @@ class BridgeHandlers:
         "job.inspect",
         "events.tail",
         "logs.tail",
+        "errors.list",
         "production.start",
         "production.cancel",
         "production.retry",

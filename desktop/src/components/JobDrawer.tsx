@@ -1,4 +1,10 @@
-import { useJobInspectQuery } from "../api/hooks";
+import {
+  useJobInspectQuery,
+  usePublishApproveMutation,
+  usePublishRejectMutation,
+  useProductionRetryMutation,
+} from "../api/hooks";
+import { useState } from "react";
 import { useUiStore } from "../state/ui";
 import StatusBadge from "./StatusBadge";
 import type { JobInspect } from "../api/types";
@@ -27,8 +33,13 @@ function fileBase(path: string): string {
 }
 
 function OverviewTab({ data }: { data: JobInspect }) {
-  const job = (data.job ?? {}) as Record<string, unknown>;
+  const job = (data.job ?? (data as unknown as { manifest?: Record<string, unknown> }).manifest ?? data.queue_item ?? {}) as Record<string, unknown>;
   const queue = data.queue_item;
+  const checksum = String(job.media_checksum_sha256 ?? job.checksum_manifest ?? job.sha256 ?? "—");
+  const durationSec = job.duration_seconds ?? job.total_duration_sec ?? job.target_duration_sec;
+  const narrationSec = job.narration_duration_sec ?? job.narration_sec;
+  const renderSec = job.render_duration_sec ?? job.render_sec;
+
   return (
     <div className="tab-panel">
       <dl className="kv">
@@ -37,9 +48,27 @@ function OverviewTab({ data }: { data: JobInspect }) {
         <dt>Channel</dt>
         <dd>{String(job.channel_id ?? "—")}</dd>
         <dt>Created</dt>
-        <dd>{formatTime(String(job.created_at))}</dd>
+        <dd>{formatTime(String(job.created_at ?? ""))}</dd>
         <dt>Job ID</dt>
         <dd>{data.job_id}</dd>
+        {durationSec != null ? (
+          <>
+            <dt>Video Duration</dt>
+            <dd>{Number(durationSec).toFixed(1)}s (Narration: {narrationSec != null ? `${Number(narrationSec).toFixed(1)}s` : "—"}, Render: {renderSec != null ? `${Number(renderSec).toFixed(1)}s` : "—"})</dd>
+          </>
+        ) : null}
+        {checksum !== "—" ? (
+          <>
+            <dt>Media SHA-256</dt>
+            <dd className="small" style={{ wordBreak: "break-all" }}>{checksum}</dd>
+          </>
+        ) : null}
+        {job.sources_json ? (
+          <>
+            <dt>Research Sources</dt>
+            <dd className="small">{String(job.sources_json)}</dd>
+          </>
+        ) : null}
       </dl>
       <h4 className="drawer-subtitle">Queue status</h4>
       {queue ? (
@@ -72,20 +101,23 @@ function OverviewTab({ data }: { data: JobInspect }) {
       <h4 className="drawer-subtitle">QA</h4>
       {data.qa_reports && data.qa_reports.length > 0 ? (
         <ul className="plain-list">
-          {data.qa_reports.map((report) => (
-            <li key={report.report_id}>
-              <StatusBadge
-                label={String(report.status ?? "UNKNOWN")}
-                tone={report.publish_allowed ? "ok" : "warn"}
-              />{" "}
-              <span className="muted small">
-                {report.overall_score != null
-                  ? `score ${report.overall_score}`
-                  : "no score"}{" "}
-                · {formatTime(report.created_at ?? null)}
-              </span>
-            </li>
-          ))}
+          {data.qa_reports.map((report, idx) => {
+            const rep = report as unknown as Record<string, unknown>;
+            return (
+              <li key={String(rep.report_id ?? rep.qa_id ?? idx)}>
+                <StatusBadge
+                  label={String(rep.status ?? rep.decision ?? "UNKNOWN")}
+                  tone={rep.publish_allowed ? "ok" : "warn"}
+                />{" "}
+                <span className="muted small">
+                  {rep.overall_score != null
+                    ? `score ${rep.overall_score}`
+                    : "no score"}{" "}
+                  · {formatTime(String(rep.created_at ?? rep.evaluated_at ?? ""))}
+                </span>
+              </li>
+            );
+          })}
         </ul>
       ) : (
         <p className="muted small">No QA reports yet.</p>
@@ -95,13 +127,35 @@ function OverviewTab({ data }: { data: JobInspect }) {
 }
 
 function TimelineTab({ data }: { data: JobInspect }) {
+  const events = data.events ?? [];
+  const stageRuns = (data as unknown as Record<string, unknown>).stage_runs as Array<Record<string, unknown>> | undefined;
+
   return (
     <div className="tab-panel">
+      {stageRuns && stageRuns.length > 0 ? (
+        <div style={{ marginBottom: "16px" }}>
+          <h4 className="drawer-subtitle">Stages</h4>
+          <ul className="plain-list">
+            {stageRuns.map((sr, idx) => (
+              <li key={String(sr.run_id ?? idx)} style={{ marginBottom: "6px" }}>
+                <span className="status-badge" style={{ marginRight: "8px" }}>{String(sr.stage_name ?? sr.stage ?? "STAGE")}</span>
+                <StatusBadge label={String(sr.status ?? "UNKNOWN")} tone={sr.status === "succeeded" ? "ok" : sr.status === "failed" ? "bad" : "info"} />
+                <span className="muted small" style={{ marginLeft: "8px" }}>
+                  {sr.duration_ms != null ? `${(Number(sr.duration_ms) / 1000).toFixed(1)}s` : "—"}
+                </span>
+                {sr.error_message ? <div className="err-type small" style={{ marginTop: "2px" }}>{String(sr.error_message)}</div> : null}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      <h4 className="drawer-subtitle">Event Log</h4>
       <ol className="timeline">
-        {data.events.length === 0 ? (
+        {events.length === 0 ? (
           <li className="muted">No events</li>
         ) : (
-          data.events.map((ev) => (
+          events.map((ev) => (
             <li key={ev.event_id}>
               <span className="timeline-time">{formatTime(ev.occurred_at)}</span>
               <span className="timeline-states">
@@ -118,7 +172,8 @@ function TimelineTab({ data }: { data: JobInspect }) {
 }
 
 function ArtifactsTab({ data }: { data: JobInspect }) {
-  if (data.artifacts.length === 0) {
+  const artifacts = data.artifacts ?? [];
+  if (artifacts.length === 0) {
     return (
       <div className="tab-panel">
         <p className="muted small">No artifacts produced yet.</p>
@@ -128,18 +183,23 @@ function ArtifactsTab({ data }: { data: JobInspect }) {
   return (
     <div className="tab-panel">
       <ul className="artifact-list">
-        {data.artifacts.map((a, idx) => {
+        {artifacts.map((a, idx) => {
           const art = a as Record<string, unknown>;
-          const path = String(art.artifact_path ?? "");
-          const type = String(art.artifact_type ?? "artifact");
+          const path = String(art.artifact_path ?? art.file_path ?? art.path ?? "");
+          const type = String(art.artifact_type ?? art.type ?? "artifact");
+          const sha = art.sha256 ?? art.sha256_hash ? String(art.sha256 ?? art.sha256_hash).slice(0, 16) : null;
           return (
             <li key={String(art.artifact_id ?? idx)} className="artifact-item">
               <StatusBadge label={type} tone={type === "media" ? "ok" : "info"} />
-              <div>
+              <div style={{ flex: 1 }}>
                 <div className="artifact-name" title={path}>
-                  {fileBase(path)}
+                  {fileBase(path) || path || "Artifact"}
                 </div>
-                <div className="muted small">{formatTime(String(art.created_at))}</div>
+                {path ? <div className="muted small" style={{ wordBreak: "break-all" }}>{path}</div> : null}
+                <div className="muted small">
+                  {formatTime(String(art.created_at ?? ""))}
+                  {sha ? ` · SHA: ${sha}…` : ""}
+                </div>
               </div>
             </li>
           );
@@ -150,7 +210,8 @@ function ArtifactsTab({ data }: { data: JobInspect }) {
 }
 
 function ErrorsTab({ data }: { data: JobInspect }) {
-  if (data.errors.length === 0) {
+  const errors = data.errors ?? [];
+  if (errors.length === 0) {
     return (
       <div className="tab-panel">
         <p className="muted small">No errors recorded.</p>
@@ -160,16 +221,19 @@ function ErrorsTab({ data }: { data: JobInspect }) {
   return (
     <div className="tab-panel">
       <ul className="plain-list">
-        {data.errors.map((err) => (
-          <li key={err.error_id} className="error-item">
-            <div>
-              <span className="err-type">{err.error_type}</span>
-              {err.stage ? <span className="muted small"> · {err.stage}</span> : null}
-            </div>
-            <div>{err.message}</div>
-            <div className="muted small">{formatTime(err.occurred_at)}</div>
-          </li>
-        ))}
+        {errors.map((err, idx) => {
+          const e = err as unknown as Record<string, unknown>;
+          return (
+            <li key={String(e.error_id ?? idx)} className="error-item">
+              <div>
+                <span className="err-type">{String(e.error_type ?? "ERROR")}</span>
+                {e.stage ? <span className="muted small"> · {String(e.stage)}</span> : null}
+              </div>
+              <div>{String(e.message ?? e.error_message ?? "Unknown error")}</div>
+              <div className="muted small">{formatTime(String(e.occurred_at ?? ""))}</div>
+            </li>
+          );
+        })}
       </ul>
     </div>
   );
@@ -240,13 +304,52 @@ function PublicationTab({ data }: { data: JobInspect }) {
 export default function JobDrawer() {
   const selectedJobId = useUiStore((s) => s.selectedJobId);
   const setSelectedJobId = useUiStore((s) => s.setSelectedJobId);
+  const setPage = useUiStore((s) => s.setPage);
   const tab = useUiStore((s) => s.jobDrawerTab);
   const setTab = useUiStore((s) => s.setJobDrawerTab);
   const { data, isError, isFetching } = useJobInspectQuery(selectedJobId);
 
+  const approve = usePublishApproveMutation();
+  const reject = usePublishRejectMutation();
+  const retry = useProductionRetryMutation();
+  const [confirmReject, setConfirmReject] = useState(false);
+  const [confirmRetry, setConfirmRetry] = useState(false);
+
   if (!selectedJobId) return null;
 
   const close = () => setSelectedJobId(null);
+
+  const queueItem = data?.queue_item;
+  const isFailed = queueItem?.status === "failed" || Boolean(data?.errors && data.errors.length > 0);
+  const hasQA = Boolean(data?.qa_reports && data.qa_reports.length > 0);
+  const qaAllowed = Boolean(hasQA && data?.qa_reports?.[0]?.publish_allowed);
+
+  const onApprove = () => {
+    if (!selectedJobId) return;
+    approve.mutate({ job_id: selectedJobId, notes: "Approved from Job Drawer" });
+  };
+
+  const onReject = () => {
+    if (!selectedJobId) return;
+    if (!confirmReject) {
+      setConfirmReject(true);
+      window.setTimeout(() => setConfirmReject(false), 3500);
+      return;
+    }
+    reject.mutate({ job_id: selectedJobId, notes: "Rejected from Job Drawer" });
+    setConfirmReject(false);
+  };
+
+  const onRetry = () => {
+    if (!queueItem?.queue_id) return;
+    if (!confirmRetry) {
+      setConfirmRetry(true);
+      window.setTimeout(() => setConfirmRetry(false), 3500);
+      return;
+    }
+    retry.mutate({ queue_id: queueItem.queue_id });
+    setConfirmRetry(false);
+  };
 
   return (
     <div className="drawer-backdrop" onClick={close}>
@@ -281,6 +384,45 @@ export default function JobDrawer() {
             {tab === "artifacts" ? <ArtifactsTab data={data} /> : null}
             {tab === "errors" ? <ErrorsTab data={data} /> : null}
             {tab === "publication" ? <PublicationTab data={data} /> : null}
+
+            <div className="card-header" style={{ borderTop: "1px solid var(--border)", marginTop: "auto", display: "flex", gap: "8px", flexWrap: "wrap" }}>
+              {isFailed ? (
+                <button
+                  className="primary-btn"
+                  disabled={retry.isPending}
+                  onClick={onRetry}
+                >
+                  {confirmRetry ? "Confirm retry?" : retry.isPending ? "Retrying…" : "Retry job"}
+                </button>
+              ) : null}
+              {qaAllowed ? (
+                <>
+                  <button
+                    className="ghost-btn"
+                    disabled={approve.isPending}
+                    onClick={onApprove}
+                  >
+                    {approve.isPending ? "Approving…" : "Approve for Publishing"}
+                  </button>
+                  <button
+                    className="danger-btn"
+                    disabled={reject.isPending}
+                    onClick={onReject}
+                  >
+                    {confirmReject ? "Confirm reject?" : reject.isPending ? "Rejecting…" : "Reject"}
+                  </button>
+                  <button
+                    className="ghost-btn"
+                    onClick={() => {
+                      close();
+                      setPage("publishing");
+                    }}
+                  >
+                    Go to Publishing →
+                  </button>
+                </>
+              ) : null}
+            </div>
           </>
         )}
       </aside>
