@@ -143,8 +143,9 @@ export function useProductionStartMutation() {
     }) => engineCall<ProductionStartResult>("production.start", params),
     onSuccess: (data) => {
       void queryClient.invalidateQueries({ queryKey: ["engine", "queue.list"] });
-      void queryClient.invalidateQueries({ queryKey: ["engine", "health.get"] });
+      void queryClient.invalidateQueries({ queryKey: ["engine", "health"] });
       void queryClient.invalidateQueries({ queryKey: ["engine", "job.inspect", data.job_id] });
+      void queryClient.invalidateQueries({ queryKey: ["engine", "errors.list"] });
     },
   });
 }
@@ -156,6 +157,8 @@ export function useProductionCancelMutation() {
       engineCall<ProductionActionResult>("production.cancel", params),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["engine", "queue.list"] });
+      void queryClient.invalidateQueries({ queryKey: ["engine", "health"] });
+      void queryClient.invalidateQueries({ queryKey: ["engine", "errors.list"] });
     },
   });
 }
@@ -167,6 +170,8 @@ export function useProductionRetryMutation() {
       engineCall<ProductionActionResult>("production.retry", params),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["engine", "queue.list"] });
+      void queryClient.invalidateQueries({ queryKey: ["engine", "health"] });
+      void queryClient.invalidateQueries({ queryKey: ["engine", "errors.list"] });
     },
   });
 }
@@ -667,7 +672,7 @@ export function useAutonomyPublishStatusQuery() {
 const AUTONOMY_SWITCH_INVALIDATE = [
   ["engine", "autonomy.publish_status"],
   ["engine", "publishing.status"],
-  ["engine", "health.get"],
+  ["engine", "health"],
 ] as const;
 
 export function useAutonomyPublishEnableMutation() {
@@ -678,7 +683,7 @@ export function useAutonomyPublishEnableMutation() {
       if (res.ok) {
         queryClient.invalidateQueries({ queryKey: ["engine", "autonomy.publish_status"] });
         queryClient.invalidateQueries({ queryKey: ["engine", "publishing.status"] });
-        queryClient.invalidateQueries({ queryKey: ["engine", "health.get"] });
+        queryClient.invalidateQueries({ queryKey: ["engine", "health"] });
       }
     },
   });
