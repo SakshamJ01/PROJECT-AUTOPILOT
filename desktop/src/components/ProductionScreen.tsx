@@ -102,6 +102,22 @@ function StageTimeline({ current, status }: { current: string; status?: string }
   );
 }
 
+function getHumanStageDescription(stage: string, status?: string): string {
+  if (status === "failed" || status === "dead_letter") return "Production failed · Inspect errors in drawer or log viewer below.";
+  if (status === "succeeded" || stage === "COMPLETE") return "Production complete · Video generated, QA passed, ready to publish.";
+  switch (stage.toUpperCase()) {
+    case "RESEARCH": return "Gathering research sources from Wikipedia & web…";
+    case "SCRIPT": return "Generating structured short-form script with Ollama…";
+    case "VOICE": return "Synthesizing voiceover audio with Windows SAPI…";
+    case "ASSETS": return "Acquiring verified vertical visuals from Openverse…";
+    case "MPT": return "Starting MoneyPrinterTurbo rendering service…";
+    case "RENDER": return "Rendering 1080x1920 video with MPT & FFmpeg…";
+    case "QA": return "Running automated multi-pass QA checks…";
+    case "READY_TO_PUBLISH": return "Ready to publish · Awaiting operator review.";
+    default: return `Processing stage ${stage}…`;
+  }
+}
+
 function JobStatusCard({ item }: { item: QueueItem }) {
   const setJobDrawerTab = useUiStore((s) => s.setJobDrawerTab);
   const setSelectedJobId = useUiStore((s) => s.setSelectedJobId);
@@ -117,6 +133,9 @@ function JobStatusCard({ item }: { item: QueueItem }) {
         <StatusBadge label={item.status} tone={toneForStatus(item.status)} />
       </div>
       <div className="card-body">
+        <div style={{ padding: "8px 12px", background: "rgba(255, 255, 255, 0.03)", borderRadius: "6px", marginBottom: "12px", fontSize: "0.9rem", color: item.status === "failed" ? "var(--bad)" : "var(--accent)" }}>
+          {getHumanStageDescription(item.stage, item.status)}
+        </div>
         <dl className="kv">
           <dt>Job</dt>
           <dd>{item.job_id}</dd>
