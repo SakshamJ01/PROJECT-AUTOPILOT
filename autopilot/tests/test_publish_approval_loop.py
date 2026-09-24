@@ -475,12 +475,33 @@ def test_cli_approve_creates_and_binds(env):
 
 def test_e2e_cli_approve_then_run_publishes(env, monkeypatch):
     import autopilot.cli.main as cli_main
+    from autopilot.core.contracts import PublishResult, PublishStatus, PublicationReceipt
+    from datetime import datetime, timezone
     job_id = "t17-e2e"
     make_ready_job(env["db"], env["tmp_path"], job_id)
 
     monkeypatch.setattr("sys.argv", ["autopilot", "publish", "approve", job_id, "--by", "ops", "--notes", "all good"])
     assert cli_main.main() == 0
     assert env["db"].get_publish_approval(job_id)["status"] == "approved"
+
+    monkeypatch.setenv("YOUTUBE_ACCESS_TOKEN", "mock-access-token-xyz")
+    mock_receipt = PublicationReceipt(
+        receipt_id="rcpt-mock-123",
+        job_id=job_id,
+        content_id=job_id,
+        platform="youtube",
+        publication_state=PublishStatus.SUCCESS,
+        remote_video_id="yt-mock-123",
+        remote_url="https://youtu.be/yt-mock-123",
+        published_at=datetime.now(timezone.utc).isoformat(),
+        render_checksum_sha256="fake_sha",
+        metadata_hash="fake_meta_hash",
+        idempotency_key="fake_idempotency_key",
+    )
+    monkeypatch.setattr(
+        "autopilot.providers.youtube_publisher.YouTubePublisher.upload_video",
+        lambda self, req: PublishResult(success=True, status=PublishStatus.PUBLISHED, receipt=mock_receipt),
+    )
 
     monkeypatch.setattr("sys.argv", ["autopilot", "publish", "run", job_id, "--platform", "youtube"])
     assert cli_main.main() == 0
