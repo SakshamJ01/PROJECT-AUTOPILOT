@@ -45,9 +45,9 @@ class Config(BaseModel):
 
     # Cloud LLM: Gemini & OpenRouter configurations
     gemini_api_key: Optional[str] = None
-    gemini_model: Optional[str] = "gemini-2.0-flash"
+    gemini_model: Optional[str] = "gemini-2.5-flash"
     gemini_endpoint: str = "https://generativelanguage.googleapis.com/v1beta/openai"
-    gemini_thinking_budget: Optional[int] = 0
+    gemini_thinking_budget: Optional[int] = None
 
     openrouter_api_key: Optional[str] = None
     openrouter_model: Optional[str] = None
@@ -58,6 +58,10 @@ class Config(BaseModel):
     openverse_base_url: str = "https://api.openverse.org/v1/"
     openverse_timeout: float = 10.0
     openverse_max_results: int = 5
+    pexels_api_key: Optional[str] = None
+    pexels_timeout: float = 10.0
+    pixabay_api_key: Optional[str] = None
+    pixabay_timeout: float = 10.0
     asset_cache_dir: Path = Field(default_factory=lambda: Path(__file__).resolve().parent.parent.parent / "artifacts" / "asset_cache")
     asset_target_width: int = 1080
     asset_target_height: int = 1920
@@ -136,6 +140,26 @@ class Config(BaseModel):
     strategy_influence_scale: float = 0.25       # bounded scorer bonus scale
 
     def __init__(self, **data):
+        # Auto-load .env files if present
+        for env_path in (
+            Path(__file__).resolve().parent.parent.parent / ".env",
+            Path(__file__).resolve().parent.parent.parent.parent / ".env",
+            Path.cwd() / ".env",
+        ):
+            if env_path.exists():
+                try:
+                    with open(env_path, "r", encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if line and not line.startswith("#") and "=" in line:
+                                k, v = line.split("=", 1)
+                                k = k.strip()
+                                v = v.strip().strip("'\"")
+                                if k and k not in os.environ:
+                                    os.environ[k] = v
+                except Exception:
+                    pass
+
         # Apply env overrides before validation
         env_map = {
             "AUTOPILOT_ARTIFACTS_DIR": "artifacts_dir",
@@ -231,6 +255,12 @@ class Config(BaseModel):
             "AUTOPILOT_OPENROUTER_MODEL": "openrouter_model",
             "OPENROUTER_BASE_URL": "openrouter_endpoint",
             "OPENROUTER_ENDPOINT": "openrouter_endpoint",
+            "PEXELS_API_KEY": "pexels_api_key",
+            "AUTOPILOT_PEXELS_API_KEY": "pexels_api_key",
+            "PEXELS_TIMEOUT": "pexels_timeout",
+            "PIXABAY_API_KEY": "pixabay_api_key",
+            "AUTOPILOT_PIXABAY_API_KEY": "pixabay_api_key",
+            "PIXABAY_TIMEOUT": "pixabay_timeout",
         }
         for env_key, field_name in env_map.items():
             val = os.environ.get(env_key)

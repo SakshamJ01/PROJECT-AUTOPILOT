@@ -9,6 +9,7 @@ from __future__ import annotations
 import json as _json
 import os
 import platform
+import re
 import sqlite3
 import sys
 import threading
@@ -348,7 +349,8 @@ class BridgeHandlers:
                 provider_overrides[key] = val
         provider_overrides["policy"] = policy
 
-        job_id = f"prod-{topic.replace(' ', '-')[:30]}-{uuid.uuid4().hex[:8]}"
+        clean_slug = re.sub(r"[^a-zA-Z0-9_\-]", "", topic.replace(" ", "-")).strip(" .-_")[:30] or "job"
+        job_id = f"prod-{clean_slug}-{uuid.uuid4().hex[:8]}"
         queue_id = f"desk-{uuid.uuid4().hex[:12]}"
 
         payload: dict[str, Any] = {

@@ -38,6 +38,7 @@ FINAL_REPORT.txt
 RENDER_DIAGNOSIS.txt
 inspect_db.py
 read_openverse.py
+audit_frames/
 
 # ===== Python =====
 __pycache__/

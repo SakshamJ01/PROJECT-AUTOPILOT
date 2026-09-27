@@ -88,6 +88,19 @@ def map_openverse_license(license_code: Optional[str], license_version: Optional
         )
 
 
+class OpenverseRateLimitError(RuntimeError):
+    """Raised when Openverse API returns HTTP 429 Too Many Requests."""
+    pass
+
+
+# Module-level cache, throttling, and circuit breaker for Openverse API
+_OPENVERSE_SEARCH_CACHE: Dict[str, Tuple[float, List[AssetCandidate]]] = {}
+_LAST_OPENVERSE_REQUEST_TIME: float = 0.0
+_OPENVERSE_CIRCUIT_BROKEN_UNTIL: float = 0.0
+_MIN_OPENVERSE_REQUEST_INTERVAL: float = 1.0  # seconds between consecutive API calls
+_SEARCH_CACHE_TTL_SEC: float = 3600.0  # 1 hour query cache
+
+
 class OpenverseAssetProvider(AssetProvider):
     provider_name = "openverse"
     capability = CapabilityMetadata(
@@ -105,6 +118,17 @@ class OpenverseAssetProvider(AssetProvider):
 
     def health_check(self) -> ProviderHealth:
         """Check Openverse API health without throwing unhandled exceptions."""
+        global _OPENVERSE_CIRCUIT_BROKEN_UNTIL
+        import time
+        if time.time() < _OPENVERSE_CIRCUIT_BROKEN_UNTIL:
+            remaining = int(_OPENVERSE_CIRCUIT_BROKEN_UNTIL - time.time())
+            return ProviderHealth(
+                healthy=False,
+                provider_name=self.provider_name,
+                error=f"Openverse circuit breaker active due to rate limiting (HTTP 429). Cool-off: {remaining}s",
+                details={"circuit_broken": True, "cooldown_sec": remaining},
+            )
+
         if not CONFIG.openverse_enabled:
             return ProviderHealth(
                 healthy=False,
@@ -126,6 +150,15 @@ class OpenverseAssetProvider(AssetProvider):
                     error="" if status_ok else f"HTTP {resp.status}",
                     details={"status_code": resp.status, "base_url": self.base_url},
                 )
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429:
+                _OPENVERSE_CIRCUIT_BROKEN_UNTIL = time.time() + 60.0
+            return ProviderHealth(
+                healthy=False,
+                provider_name=self.provider_name,
+                error=f"Openverse HTTP {exc.code}: {exc.reason}",
+                details={"status_code": exc.code, "base_url": self.base_url},
+            )
         except Exception as exc:
             return ProviderHealth(
                 healthy=False,
@@ -148,13 +181,16 @@ class OpenverseAssetProvider(AssetProvider):
             if not media_url:
                 continue
 
+            filetype = (item.get("filetype") or "jpeg").lower()
+            if filetype in ("svg", "svg+xml") or media_url.lower().endswith((".svg", ".svgz")):
+                continue
+
             openverse_id = str(item.get("id") or "")
             source_landing = item.get("foreign_landing_url") or media_url
             creator = item.get("creator")
             lic_code = item.get("license")
             lic_ver = item.get("license_version")
             lic_url = item.get("license_url")
-            filetype = item.get("filetype") or "jpeg"
             filesize = item.get("filesize") or 0
             width = item.get("width")
             height = item.get("height")
@@ -206,7 +242,10 @@ class OpenverseAssetProvider(AssetProvider):
         return candidates
 
     def search(self, request: dict | Any, max_results: int = 5, **kwargs) -> List[AssetCandidate]:
-        """Query Openverse API for images matching query and criteria."""
+        """Query Openverse API for images matching query and criteria with caching and rate limit handling."""
+        import time
+        global _OPENVERSE_CIRCUIT_BROKEN_UNTIL, _LAST_OPENVERSE_REQUEST_TIME, _OPENVERSE_SEARCH_CACHE
+
         query = ""
         aspect_ratio = None
         if isinstance(request, dict):
@@ -218,6 +257,18 @@ class OpenverseAssetProvider(AssetProvider):
 
         if not query or not query.strip():
             return []
+
+        # Check circuit breaker
+        if time.time() < _OPENVERSE_CIRCUIT_BROKEN_UNTIL:
+            # Circuit breaker is tripped; fail fast and return empty so fallback provider takes over
+            return []
+
+        # Check query cache
+        cache_key = f"{query.strip().lower()}:{str(aspect_ratio).lower()}:{max_results}"
+        if cache_key in _OPENVERSE_SEARCH_CACHE:
+            cached_ts, cached_cands = _OPENVERSE_SEARCH_CACHE[cache_key]
+            if time.time() - cached_ts < _SEARCH_CACHE_TTL_SEC:
+                return [c.model_copy(deep=True) for c in cached_cands]
 
         # Build query parameters
         params: Dict[str, Any] = {
@@ -237,6 +288,15 @@ class OpenverseAssetProvider(AssetProvider):
                 params["aspect_ratio"] = "square"
 
         def _do_request(p: dict) -> List[AssetCandidate]:
+            global _LAST_OPENVERSE_REQUEST_TIME, _OPENVERSE_CIRCUIT_BROKEN_UNTIL
+            if time.time() < _OPENVERSE_CIRCUIT_BROKEN_UNTIL:
+                return []
+
+            # Enforce minimum inter-request interval (throttling)
+            elapsed = time.time() - _LAST_OPENVERSE_REQUEST_TIME
+            if elapsed < _MIN_OPENVERSE_REQUEST_INTERVAL:
+                time.sleep(_MIN_OPENVERSE_REQUEST_INTERVAL - elapsed)
+
             u = f"{self.base_url}images/?{urllib.parse.urlencode(p)}"
             r = urllib.request.Request(
                 u,
@@ -246,26 +306,43 @@ class OpenverseAssetProvider(AssetProvider):
                 },
             )
             try:
+                _LAST_OPENVERSE_REQUEST_TIME = time.time()
                 with urllib.request.urlopen(r, timeout=self.timeout) as response:
                     content = response.read().decode("utf-8")
                     return self.parse_api_response(content)
             except urllib.error.HTTPError as exc:
+                if exc.code == 429:
+                    retry_after = 60.0
+                    try:
+                        ra_hdr = exc.headers.get("Retry-After")
+                        if ra_hdr:
+                            retry_after = max(5.0, float(ra_hdr))
+                    except Exception:
+                        pass
+                    _OPENVERSE_CIRCUIT_BROKEN_UNTIL = time.time() + retry_after
+                    raise OpenverseRateLimitError(f"Openverse API rate limited (HTTP 429). Retry after {retry_after:.0f}s.") from exc
                 raise RuntimeError(f"Openverse API error HTTP {exc.code}: {exc.reason}") from exc
             except urllib.error.URLError as exc:
                 raise RuntimeError(f"Openverse network connection failed: {exc.reason}") from exc
 
-        candidates = _do_request(params)
-        if not candidates and "aspect_ratio" in params:
-            params_no_ar = dict(params)
-            params_no_ar.pop("aspect_ratio", None)
-            candidates = _do_request(params_no_ar)
+        try:
+            candidates = _do_request(params)
+            if not candidates and "aspect_ratio" in params:
+                params_no_ar = dict(params)
+                params_no_ar.pop("aspect_ratio", None)
+                candidates = _do_request(params_no_ar)
 
-        if not candidates:
-            # Fallback to last/first substantive word from query
-            words = [w.strip() for w in query.strip().split() if len(w.strip()) > 2]
-            if len(words) > 1:
-                substantive_q = words[-1] if len(words[-1]) >= 4 else words[0]
-                candidates = _do_request({"q": substantive_q, "page_size": max(1, min(max_results, 20)), "license_type": "commercial,modification"})
+            if not candidates:
+                # Fallback to last/first substantive word from query
+                words = [w.strip() for w in query.strip().split() if len(w.strip()) > 2]
+                if len(words) > 1:
+                    substantive_q = words[-1] if len(words[-1]) >= 4 else words[0]
+                    candidates = _do_request({"q": substantive_q, "page_size": max(1, min(max_results, 20)), "license_type": "commercial,modification"})
+        except OpenverseRateLimitError:
+            candidates = []
+
+        if candidates:
+            _OPENVERSE_SEARCH_CACHE[cache_key] = (time.time(), [c.model_copy(deep=True) for c in candidates])
 
         return candidates
 

@@ -1017,3 +1017,389 @@ select:focus-visible {
   color: var(--info);
   font-weight: 600;
 }
+
+/* ── Phase 5: Detail Tab Strip ──────────────────────────────────────────── */
+.production-detail-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.detail-tab-strip {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0;
+  margin-bottom: 2px;
+}
+
+.detail-tab {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 8px 14px;
+  border-radius: 6px 6px 0 0;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.detail-tab:hover {
+  color: var(--text);
+}
+
+.detail-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
+.detail-tab-publish.active {
+  color: var(--ok);
+  border-bottom-color: var(--ok);
+}
+
+/* ── Phase 5: Multi-Track Video Inspector ───────────────────────────────── */
+.inspector-card { margin-bottom: 0; }
+
+.inspector-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.inspector-tracks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 8px;
+  padding: 12px 10px;
+}
+
+.inspector-track-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 28px;
+}
+
+.inspector-track-label {
+  width: 72px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.inspector-track-bar {
+  flex: 1;
+  position: relative;
+  height: 22px;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 4px;
+  overflow: visible;
+}
+
+.inspector-block {
+  position: absolute;
+  top: 2px;
+  height: 18px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  cursor: pointer;
+  padding: 0 3px;
+  font-size: 10px;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  transition: opacity 0.12s;
+}
+
+.inspector-block:hover { opacity: 0.85; }
+.inspector-block-active { outline: 2px solid white; z-index: 2; }
+
+.inspector-block-label {
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.inspector-tick {
+  position: absolute;
+  top: -16px;
+  transform: translateX(-50%);
+  font-size: 9px;
+  color: var(--muted);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.inspector-scene-detail {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 16px;
+}
+
+.inspector-scene-detail-header {
+  font-weight: 700;
+  margin-bottom: 8px;
+  color: var(--accent);
+}
+
+/* ── Phase 5: Creative QA Scorecard ─────────────────────────────────────── */
+.qa-scorecard-card { margin-bottom: 0; }
+
+.qa-dimensions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.qa-dimension-row {
+  display: grid;
+  grid-template-columns: 200px 36px 1fr 90px;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 6px;
+}
+
+.qa-dimension-name { font-size: 13px; }
+.qa-dimension-score { font-weight: 700; font-size: 14px; text-align: right; }
+.qa-dimension-status { font-size: 11px; font-weight: 700; text-align: right; }
+.qa-dimension-rationale {
+  grid-column: 1 / -1;
+  margin-top: 2px;
+  font-size: 11px;
+}
+
+.qa-score-bar-track {
+  height: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.qa-score-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.4s ease;
+}
+
+/* ── Phase 5: Before Publish Review Screen ──────────────────────────────── */
+.before-publish-screen {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.before-publish-grid {
+  display: grid;
+  grid-template-columns: 1fr 1.4fr;
+  gap: 14px;
+  align-items: start;
+}
+
+.before-publish-left,
+.before-publish-right {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.video-preview-wrapper {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.video-preview-meta {
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.video-preview-placeholder {
+  min-height: 180px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--muted);
+  gap: 8px;
+  padding: 24px;
+}
+
+/* ── Phase 5: Creator Mode Panel ────────────────────────────────────────── */
+.creator-mode-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.creator-mode-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.mode-toggle {
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.mode-toggle-btn {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 6px 16px;
+  font-size: 13px;
+  transition: background 0.15s, color 0.15s;
+}
+
+.mode-toggle-btn:hover { color: var(--text); }
+
+.mode-toggle-btn.active {
+  background: rgba(61, 125, 216, 0.18);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.creator-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.creator-field-full { grid-column: 1 / -1; }
+
+.creator-field-label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin-bottom: 4px;
+  text-transform: uppercase;
+}
+
+.advanced-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 12px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+}
+
+.advanced-fields-label {
+  grid-column: 1 / -1;
+  margin-bottom: -4px;
+}
+
+/* ── Phase 5: Metadata Director ─────────────────────────────────────────── */
+.metadata-director-card { margin-bottom: 0; }
+
+.metadata-field {
+  margin-bottom: 14px;
+}
+
+.metadata-field-label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin-bottom: 6px;
+  text-transform: uppercase;
+}
+
+.hashtag-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(61, 125, 216, 0.15);
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  padding: 2px 10px;
+  font-size: 12px;
+  color: var(--accent);
+}
+
+.hashtag-remove {
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0;
+  line-height: 1;
+}
+
+.hashtag-remove:hover { color: var(--bad); }
+
+.thumbnail-preview-box {
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.25);
+  aspect-ratio: 9 / 16;
+  max-height: 220px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.thumbnail-preview-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 16px;
+  text-align: center;
+}
+
+.thumbnail-preview-title {
+  font-size: 16px;
+  font-weight: 900;
+  color: #FFE600;
+  text-shadow: 0 2px 6px rgba(0,0,0,0.8);
+  text-transform: uppercase;
+  line-height: 1.2;
+}
+
+.thumbnail-preview-tag { font-size: 10px; }
+
+/* ── Phase 5: Scene Preview Panel ───────────────────────────────────────── */
+.scene-preview-card { margin-bottom: 0; }
+
+.scene-preview-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.scene-preview-selector {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.scene-preview-result {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}

@@ -435,21 +435,42 @@ class ResearchCacheEntry(BaseModel):
     report_id: Optional[str] = None
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
-# Phase 4 / M4 Render contracts
-class RenderPlan(BaseModel):
-    plan_id: str = Field(..., min_length=1)
-    content_id: str = Field(..., min_length=1)
-    job_id: str = Field(..., min_length=1)
-    profile: str = "vertical_short"
-    target_resolution: str = "1080x1920"
-    scenes: List[dict] = Field(default_factory=list)
-    audio_segments: List[dict] = Field(default_factory=list)
-    global_config: dict = Field(default_factory=dict)
-    production_engine: str = "moneyprinterturbo"
-    engine_version: str = "v1.0.0"
-    version: str = CONTRACT_SCHEMA_VERSION
-    rendered_duration_sec: Optional[float] = None
-    raw_speech_duration_sec: Optional[float] = None
+# Phase 4 / M4 Render contracts & Phase 0 3-Tier Timeline
+from autopilot.core.timeline import (
+    RenderPlan,
+    IntentTimeline,
+    IntentScene,
+    IntentNarration,
+    VisualRequirements,
+    CaptionIntent,
+    AudioIntent,
+    TransitionIntent,
+    QAExpectations,
+    TargetTiming,
+    MaterializedTimeline,
+    MaterializedScene,
+    MaterializedTiming,
+    MaterializedNarration,
+    SelectedAsset,
+    WordTimestamp,
+    CaptionPhrase,
+    MaterializedAudioPlan,
+    MaterializedTransitionPlan,
+    MPTHandoffConfig,
+    ReproducibilityClass,
+    StaleDefectCode,
+    detect_stale_timeline,
+    detect_stale_scene_version,
+    script_document_to_intent_timeline,
+    canonical_json_dumps,
+    compute_payload_sha256,
+    HardInvariantCode,
+    TimelineValidationError,
+    TimelineCompilationError,
+    CompilationResult,
+    TimelineCompiler,
+)
+
 
 class RenderScene(BaseModel):
     scene_id: str

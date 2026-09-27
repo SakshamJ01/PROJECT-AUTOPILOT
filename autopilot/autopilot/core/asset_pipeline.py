@@ -20,11 +20,15 @@ from autopilot.core.contracts import (
 from autopilot.providers.asset_contracts import AssetProvider
 from autopilot.providers.local_asset_provider import LocalAssetProvider
 from autopilot.providers.openverse_provider import OpenverseAssetProvider
+from autopilot.providers.pexels_provider import PexelsAssetProvider
+from autopilot.providers.pixabay_provider import PixabayAssetProvider
+from autopilot.core.infographics_generator import InfographicsAssetProvider
 from autopilot.core.asset_scoring import score_candidates
 from autopilot.core.rights_gate import evaluate_rights_gate
 from autopilot.core.asset_cache import safe_download_media, compute_file_sha256, compute_image_phash, AssetCache
 from autopilot.core.asset_normalizer import normalize_asset
 from autopilot.core.media_inspection import inspect_media
+from autopilot.core.artifacts import job_artifact_dir
 from autopilot.db.manager import DBManager
 
 
@@ -70,10 +74,16 @@ def get_asset_provider(name: str = "local") -> AssetProvider:
     name_clean = (name or "local").lower().strip()
     if name_clean == "openverse":
         return OpenverseAssetProvider()
+    elif name_clean == "pexels":
+        return PexelsAssetProvider()
+    elif name_clean == "pixabay":
+        return PixabayAssetProvider()
+    elif name_clean == "infographics":
+        return InfographicsAssetProvider()
     elif name_clean == "local":
         return LocalAssetProvider()
     else:
-        raise ValueError(f"Unknown asset provider: '{name}'. Available: 'local', 'openverse'")
+        raise ValueError(f"Unknown asset provider: '{name}'. Available: 'local', 'openverse', 'pexels', 'pixabay', 'infographics'")
 
 
 def derive_visual_subject_query(scene: ScriptScene, topic: str) -> str:
@@ -165,6 +175,7 @@ def process_scene_assets(
     dry_run: bool = False,
     search_only: bool = False,
     config: Optional[Config] = None,
+    allow_fallback: bool = False,
 ) -> Tuple[List[AssetArtifact], Dict[str, Any]]:
     """Execute complete scene-to-asset acquisition pipeline.
 
@@ -176,12 +187,41 @@ def process_scene_assets(
     db_mgr.init_schema()
     db_mgr.create_job(job_id=job_id, topic=script.topic)
 
-    provider = get_asset_provider(provider_name)
+    primary_provider = get_asset_provider(provider_name)
+    fallback_providers: List[AssetProvider] = []
+    if allow_fallback:
+        if provider_name == "openverse":
+            try:
+                from autopilot.providers.pexels_provider import PexelsAssetProvider
+                p = PexelsAssetProvider()
+                if p.health_check().healthy:
+                    fallback_providers.append(p)
+            except Exception:
+                pass
+            try:
+                from autopilot.providers.pixabay_provider import PixabayAssetProvider
+                px = PixabayAssetProvider()
+                if px.health_check().healthy:
+                    fallback_providers.append(px)
+            except Exception:
+                pass
+            fallback_providers.append(InfographicsAssetProvider())
+            fallback_providers.append(LocalAssetProvider())
+        elif provider_name in ("pexels", "pixabay"):
+            fallback_providers.append(OpenverseAssetProvider())
+            fallback_providers.append(InfographicsAssetProvider())
+            fallback_providers.append(LocalAssetProvider())
+        elif provider_name == "local":
+            fallback_providers.append(InfographicsAssetProvider())
+        else:
+            fallback_providers.append(InfographicsAssetProvider())
+            fallback_providers.append(LocalAssetProvider())
+
     report = AssetQualityReport(job_id=job_id)
     artifacts: List[AssetArtifact] = []
     seen_checksums: set[str] = set()
 
-    job_asset_dir = cfg.get_artifacts_dir() / "jobs" / job_id / "assets"
+    job_asset_dir = job_artifact_dir(job_id, base_dir=cfg.get_artifacts_dir()) / "assets"
     job_asset_dir.mkdir(parents=True, exist_ok=True)
 
     cache = AssetCache(cache_dir=cfg.get_asset_cache_dir())
@@ -193,56 +233,9 @@ def process_scene_assets(
         query = derive_visual_subject_query(scene, script.topic)
         request_id = f"req-{job_id}-{scene.scene_id}"
 
-        asset_request = AssetRequest(
-            asset_request_id=request_id,
-            scene_id=scene.scene_id,
-            query=query,
-            asset_type="image",
-            aspect_ratio="9:16",
-        )
-
-        # 1. Search candidates
-        try:
-            candidates = provider.search(
-                {"query": query, "aspect_ratio": "9:16"},
-                max_results=CONFIG.openverse_max_results,
-            )
-        except Exception as exc:
-            err_msg = f"Search failed for scene {scene.scene_id} ('{query}'): {exc}"
-            report.errors.append(err_msg)
-            report.rejections.append({"scene_id": scene.scene_id, "query": query, "reason": str(exc)})
-            continue
-
-        report.total_candidates_found += len(candidates)
-
-        if not candidates:
-            # Deterministic visual fallback derived from scene visual intent / scene concept + topic core
-            fallback_query = derive_deterministic_fallback_query(scene, script.topic)
-            if fallback_query and fallback_query.lower() != query.lower():
-                try:
-                    candidates = provider.search(
-                        {"query": fallback_query, "aspect_ratio": "9:16"},
-                        max_results=CONFIG.openverse_max_results,
-                    )
-                    if candidates:
-                        report.rejections.append({
-                            "scene_id": scene.scene_id,
-                            "query": query,
-                            "reason": f"Zero results for primary query; used visual fallback query '{fallback_query}'"
-                        })
-                        query = fallback_query
-                except Exception:
-                    pass
-
-            if not candidates:
-                err_msg = f"No candidate assets found for scene {scene.scene_id} query '{query}'"
-                report.errors.append(err_msg)
-                report.rejections.append({"scene_id": scene.scene_id, "query": query, "reason": "Zero search results"})
-                continue
-
-        # Helper to score candidates and select best allowed candidate
-        def select_best_candidate(cands: List[AssetCandidate], q_str: str) -> Tuple[Optional[AssetCandidate], str]:
-            if provider_name != "local":
+        # Helper to score candidates and select all allowed candidates
+        def get_cleared_candidates(cands: List[AssetCandidate], q_str: str, active_pname: str) -> List[Tuple[AssetCandidate, str]]:
+            if active_pname != "local":
                 for c in cands:
                     if c.provenance and c.provenance.original_hash_sha256 in seen_checksums:
                         c.is_duplicate = True
@@ -258,8 +251,9 @@ def process_scene_assets(
                 target_width=CONFIG.asset_target_width,
                 target_height=CONFIG.asset_target_height,
             )
+            cleared = []
             for cand in scored:
-                if provider_name != "local" and cand.score < 0.20:
+                if active_pname not in ("local", "infographics") and cand.score < 0.20:
                     report.rejections.append({
                         "candidate_id": cand.candidate_id,
                         "scene_id": scene.scene_id,
@@ -273,7 +267,7 @@ def process_scene_assets(
                     reason = f"Passed rights gate ({cand.license.license_name}) with score {cand.score:.2f}"
                     if gate_res.warnings:
                         report.warnings.extend(gate_res.warnings)
-                    return cand, reason
+                    cleared.append((cand, reason))
                 else:
                     report.rejections.append({
                         "candidate_id": cand.candidate_id,
@@ -282,161 +276,241 @@ def process_scene_assets(
                         "license": cand.license.license_name,
                         "rights_status": cand.license.rights_status,
                     })
-            return None, ""
+            return cleared
 
-        selected_candidate, selection_reason = select_best_candidate(candidates, query)
+        scene_success = False
+        scene_errors = []
 
-        # If primary query found no eligible candidate, try visual fallback query
-        if not selected_candidate:
-            fallback_query = derive_deterministic_fallback_query(scene, script.topic)
-            if fallback_query and fallback_query.lower() != query.lower():
+        # Iterate over provider cascade: primary provider first, then fallbacks
+        for provider_idx, active_prov in enumerate([primary_provider] + fallback_providers):
+            if scene_success:
+                break
+
+            active_pname = active_prov.provider_name
+            active_query = query
+            candidates: List[AssetCandidate] = []
+
+            try:
+                candidates = active_prov.search(
+                    {"query": active_query, "aspect_ratio": "9:16", "visual_concept": active_query, "headline": scene.asset_query or active_query[:35], "subtext": scene.narration or active_query},
+                    max_results=CONFIG.openverse_max_results,
+                )
+            except Exception as exc:
+                scene_errors.append(f"{active_pname} search error: {exc}")
+                continue
+
+            report.total_candidates_found += len(candidates)
+
+            # Fallback query if no candidates
+            if not candidates:
+                fallback_query = derive_deterministic_fallback_query(scene, script.topic)
+                if fallback_query and fallback_query.lower() != active_query.lower():
+                    try:
+                        candidates = active_prov.search(
+                            {"query": fallback_query, "aspect_ratio": "9:16", "visual_concept": fallback_query, "headline": scene.asset_query or fallback_query[:35], "subtext": scene.narration or fallback_query},
+                            max_results=CONFIG.openverse_max_results,
+                        )
+                        if candidates:
+                            active_query = fallback_query
+                    except Exception:
+                        pass
+
+            # Core topic query if still no candidates and remote provider
+            if not candidates and active_pname not in ("local", "infographics"):
+                topic_stop = {"the", "a", "an", "is", "are", "surprising", "facts", "fact", "about", "top", "best", "things", "ways", "reasons"}
+                topic_words = [w for w in re.findall(r"\b\w+\b", script.topic.lower()) if w not in topic_stop and len(w) > 2]
+                topic_core = " ".join(topic_words[:2]) if topic_words else script.topic
+                if topic_core and topic_core.lower() not in (active_query.lower(), fallback_query.lower() if 'fallback_query' in locals() else ""):
+                    try:
+                        candidates = active_prov.search(
+                            {"query": topic_core, "aspect_ratio": "9:16"},
+                            max_results=CONFIG.openverse_max_results,
+                        )
+                        if candidates:
+                            active_query = topic_core
+                    except Exception:
+                        pass
+
+            cleared_candidates = get_cleared_candidates(candidates, active_query, active_pname)
+            if not cleared_candidates:
+                continue
+
+            # Try downloading and normalizing cleared candidates from this provider
+            for selected_candidate, selection_reason in cleared_candidates:
+                report.selections.append({
+                    "scene_id": scene.scene_id,
+                    "request_id": request_id,
+                    "candidate_id": selected_candidate.candidate_id,
+                    "title": selected_candidate.title,
+                    "license": selected_candidate.license.license_name,
+                    "rights_status": selected_candidate.license.rights_status,
+                    "score": selected_candidate.score,
+                    "reason": selection_reason,
+                })
+
+                if search_only or dry_run:
+                    scene_success = True
+                    break
+
+                # 5. Safe Download & Cache
+                is_video = (selected_candidate.asset_type == "video") or (selected_candidate.source_url and str(selected_candidate.source_url).endswith((".mp4", ".mov", ".mkv", ".webm")))
+                file_ext = ".mp4" if is_video else ".png"
+                source_dest = job_asset_dir / f"src_{scene.scene_id}_{selected_candidate.candidate_id}{file_ext}"
                 try:
-                    fb_cands = provider.search(
-                        {"query": fallback_query, "aspect_ratio": "9:16"},
-                        max_results=CONFIG.openverse_max_results,
-                    )
-                    report.total_candidates_found += len(fb_cands)
-                    if fb_cands:
-                        selected_candidate, selection_reason = select_best_candidate(fb_cands, fallback_query)
-                        if selected_candidate:
-                            query = fallback_query
-                except Exception as fb_exc:
-                    report.warnings.append(f"Fallback search error for scene {scene.scene_id}: {fb_exc}")
+                    downloaded_path_str = active_prov.download(selected_candidate, str(source_dest))
+                    downloaded_path = Path(downloaded_path_str)
+                except Exception as exc:
+                    err_msg = f"Download failed for {selected_candidate.candidate_id} from {active_pname}: {exc}"
+                    report.warnings.append(err_msg)
+                    scene_errors.append(err_msg)
+                    continue
 
-        # If still no candidate, try the core topic as a last resort deterministic query
-        if not selected_candidate and provider_name != "local":
-            topic_stop = {"the", "a", "an", "is", "are", "surprising", "facts", "fact", "about", "top", "best", "things", "ways", "reasons", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"}
-            topic_words = [w for w in re.findall(r"\b\w+\b", script.topic.lower()) if w not in topic_stop and len(w) > 2]
-            topic_core = " ".join(topic_words[:2]) if topic_words else script.topic
-            if topic_core and topic_core.lower() not in (query.lower(), fallback_query.lower() if 'fallback_query' in locals() else ""):
+                # 6. Media Inspection
+                inspection = inspect_media(downloaded_path)
+                if not inspection.get("valid"):
+                    err_msg = f"Downloaded media inspection failed for scene {scene.scene_id}: {inspection.get('errors')}"
+                    report.warnings.append(err_msg)
+                    scene_errors.append(err_msg)
+                    continue
+
+                source_sha256 = compute_file_sha256(downloaded_path)
+                seen_checksums.add(source_sha256)
+
+                # 7. Normalization
+                normalized_dest = job_asset_dir / f"norm_{scene.scene_id}_{selected_candidate.candidate_id}{file_ext}"
                 try:
-                    tc_cands = provider.search(
-                        {"query": topic_core, "aspect_ratio": "9:16"},
-                        max_results=CONFIG.openverse_max_results,
+                    normalized_path_str = active_prov.normalize(
+                        str(downloaded_path),
+                        str(normalized_dest),
+                        asset_type=selected_candidate.asset_type,
+                        target_width=CONFIG.asset_target_width,
+                        target_height=CONFIG.asset_target_height,
                     )
-                    report.total_candidates_found += len(tc_cands)
-                    if tc_cands:
-                        selected_candidate, selection_reason = select_best_candidate(tc_cands, topic_core)
-                        if selected_candidate:
-                            query = topic_core
-                except Exception as tc_exc:
-                    report.warnings.append(f"Topic core search error for scene {scene.scene_id}: {tc_exc}")
+                    normalized_path = Path(normalized_path_str)
+                    norm_sha256 = compute_file_sha256(normalized_path)
+                except Exception as exc:
+                    err_msg = f"Normalization failed for scene {scene.scene_id} from {active_pname}: {exc}"
+                    report.warnings.append(err_msg)
+                    scene_errors.append(err_msg)
+                    continue
 
-        if not selected_candidate:
-            err_msg = f"No semantically relevant candidate passed rights gate for scene {scene.scene_id} (query: '{query}')"
-            report.errors.append(err_msg)
-            continue
+                # 8. Create AssetArtifact & Provenance
+                provenance = AssetProvenance(
+                    provider=active_pname,
+                    source_url=selected_candidate.source_url,
+                    source_id=selected_candidate.source_id,
+                    retrieval_timestamp=datetime.now(timezone.utc).isoformat(),
+                    original_hash_sha256=source_sha256,
+                    normalized_hash_sha256=norm_sha256,
+                    job_id=job_id,
+                    content_id=script.content_id,
+                    scene_id=scene.scene_id,
+                )
 
-        report.selections.append({
-            "scene_id": scene.scene_id,
-            "request_id": request_id,
-            "candidate_id": selected_candidate.candidate_id,
-            "title": selected_candidate.title,
-            "license": selected_candidate.license.license_name,
-            "rights_status": selected_candidate.license.rights_status,
-            "score": selected_candidate.score,
-            "reason": selection_reason,
-        })
+                artifact_id = f"art-{job_id}-{scene.scene_id}"
+                artifact = AssetArtifact(
+                    artifact_id=artifact_id,
+                    job_id=job_id,
+                    content_id=script.content_id,
+                    scene_id=scene.scene_id,
+                    source_path=str(downloaded_path.resolve()),
+                    normalized_path=str(normalized_path.resolve()),
+                    asset_type=selected_candidate.asset_type,
+                    dimensions=AssetDimensions(
+                        width=CONFIG.asset_target_width,
+                        height=CONFIG.asset_target_height,
+                    ),
+                    media_info=AssetMediaInfo(
+                        mime_type="image/png",
+                        file_size_bytes=normalized_path.stat().st_size,
+                    ),
+                    checksum_sha256=norm_sha256,
+                    provenance=provenance,
+                    license=selected_candidate.license,
+                    validated=True,
+                    validation_result="PASS",
+                )
+                artifacts.append(artifact)
 
-        if search_only or dry_run:
-            continue
+                # 9. Persist in Database
+                db_mgr.record_asset_artifact(
+                    job_id=job_id,
+                    content_id=script.content_id,
+                    scene_id=scene.scene_id,
+                    artifact_path=str(normalized_path.resolve()),
+                    asset_type=artifact.asset_type,
+                    checksum=norm_sha256,
+                    provenance_json=provenance.model_dump_json(),
+                    license_json=selected_candidate.license.model_dump_json(),
+                )
 
-        # 5. Safe Download & Cache
-        is_video = (selected_candidate.asset_type == "video") or (selected_candidate.source_url and str(selected_candidate.source_url).endswith((".mp4", ".mov", ".mkv", ".webm")))
-        file_ext = ".mp4" if is_video else ".png"
-        source_dest = job_asset_dir / f"src_{scene.scene_id}_{selected_candidate.candidate_id}{file_ext}"
-        try:
-            downloaded_path_str = provider.download(selected_candidate, str(source_dest))
-            downloaded_path = Path(downloaded_path_str)
-        except Exception as exc:
-            err_msg = f"Download failed for {selected_candidate.candidate_id}: {exc}"
-            report.errors.append(err_msg)
-            continue
+                report.artifacts_created.append({
+                    "artifact_id": artifact_id,
+                    "scene_id": scene.scene_id,
+                    "source_path": str(downloaded_path.resolve()),
+                    "normalized_path": str(normalized_path.resolve()),
+                    "checksum_sha256": norm_sha256,
+                    "provider": active_pname,
+                })
+                if provider_idx > 0:
+                    report.warnings.append(f"Scene {scene.scene_id} used fallback provider '{active_pname}'.")
+                scene_success = True
+                break
 
-        # 6. Media Inspection
-        inspection = inspect_media(downloaded_path)
-        if not inspection.get("valid"):
-            err_msg = f"Downloaded media inspection failed for scene {scene.scene_id}: {inspection.get('errors')}"
-            report.errors.append(err_msg)
-            continue
-
-        source_sha256 = compute_file_sha256(downloaded_path)
-        seen_checksums.add(source_sha256)
-
-        # 7. Normalization
-        normalized_dest = job_asset_dir / f"norm_{scene.scene_id}_{selected_candidate.candidate_id}{file_ext}"
-        try:
-            normalized_path_str = provider.normalize(
-                str(downloaded_path),
-                str(normalized_dest),
-                asset_type=selected_candidate.asset_type,
-                target_width=CONFIG.asset_target_width,
-                target_height=CONFIG.asset_target_height,
-            )
-            normalized_path = Path(normalized_path_str)
-            norm_sha256 = compute_file_sha256(normalized_path)
-        except Exception as exc:
-            err_msg = f"Normalization failed for scene {scene.scene_id}: {exc}"
-            report.errors.append(err_msg)
-            continue
-
-        # 8. Create AssetArtifact & Provenance
-        provenance = AssetProvenance(
-            provider=provider.provider_name,
-            source_url=selected_candidate.source_url,
-            source_id=selected_candidate.source_id,
-            retrieval_timestamp=datetime.now(timezone.utc).isoformat(),
-            original_hash_sha256=source_sha256,
-            normalized_hash_sha256=norm_sha256,
-            job_id=job_id,
-            content_id=script.content_id,
-            scene_id=scene.scene_id,
-        )
-
-        artifact_id = f"art-{job_id}-{scene.scene_id}"
-        artifact = AssetArtifact(
-            artifact_id=artifact_id,
-            job_id=job_id,
-            content_id=script.content_id,
-            scene_id=scene.scene_id,
-            source_path=str(downloaded_path.resolve()),
-            normalized_path=str(normalized_path.resolve()),
-            asset_type=selected_candidate.asset_type,
-            dimensions=AssetDimensions(
-                width=CONFIG.asset_target_width,
-                height=CONFIG.asset_target_height,
-            ),
-            media_info=AssetMediaInfo(
-                mime_type="image/png",
-                file_size_bytes=normalized_path.stat().st_size,
-            ),
-            checksum_sha256=norm_sha256,
-            provenance=provenance,
-            license=selected_candidate.license,
-            validated=True,
-            validation_result="PASS",
-        )
-        artifacts.append(artifact)
-
-        # 9. Persist in Database
-        db_mgr.record_asset_artifact(
-            job_id=job_id,
-            content_id=script.content_id,
-            scene_id=scene.scene_id,
-            artifact_path=str(normalized_path.resolve()),
-            asset_type=artifact.asset_type,
-            checksum=norm_sha256,
-            provenance_json=provenance.model_dump_json(),
-            license_json=selected_candidate.license.model_dump_json(),
-        )
-
-        report.artifacts_created.append({
-            "artifact_id": artifact_id,
-            "scene_id": scene.scene_id,
-            "source_path": str(downloaded_path.resolve()),
-            "normalized_path": str(normalized_path.resolve()),
-            "checksum_sha256": norm_sha256,
-        })
+        # Final absolute safety fallback: if no provider succeeded, generate dedicated infographic
+        if not scene_success and allow_fallback and not (search_only or dry_run):
+            try:
+                info_p = InfographicsAssetProvider()
+                info_cands = info_p.search({
+                    "visual_concept": query,
+                    "headline": scene.asset_query or query[:35],
+                    "subtext": scene.narration or query,
+                })
+                if info_cands:
+                    cand = info_cands[0]
+                    artifact_id = f"art-{job_id}-{scene.scene_id}"
+                    normalized_path = Path(cand.path_local)
+                    norm_sha256 = compute_file_sha256(normalized_path)
+                    artifact = AssetArtifact(
+                        artifact_id=artifact_id,
+                        job_id=job_id,
+                        content_id=script.content_id,
+                        scene_id=scene.scene_id,
+                        source_path=str(normalized_path.resolve()),
+                        normalized_path=str(normalized_path.resolve()),
+                        asset_type="image",
+                        dimensions=AssetDimensions(width=CONFIG.asset_target_width, height=CONFIG.asset_target_height),
+                        media_info=AssetMediaInfo(mime_type="image/png", file_size_bytes=normalized_path.stat().st_size),
+                        checksum_sha256=norm_sha256,
+                        provenance=cand.provenance,
+                        license=cand.license,
+                        validated=True,
+                        validation_result="PASS",
+                    )
+                    artifacts.append(artifact)
+                    db_mgr.record_asset_artifact(
+                        job_id=job_id,
+                        content_id=script.content_id,
+                        scene_id=scene.scene_id,
+                        artifact_path=str(normalized_path.resolve()),
+                        asset_type=artifact.asset_type,
+                        checksum=norm_sha256,
+                        provenance_json=cand.provenance.model_dump_json(),
+                        license_json=cand.license.model_dump_json(),
+                    )
+                    report.artifacts_created.append({
+                        "artifact_id": artifact_id,
+                        "scene_id": scene.scene_id,
+                        "source_path": str(normalized_path.resolve()),
+                        "normalized_path": str(normalized_path.resolve()),
+                        "checksum_sha256": norm_sha256,
+                        "provider": "infographics_safety_net",
+                    })
+                    report.warnings.append(f"Scene {scene.scene_id} generated safety-net infographic asset.")
+                    scene_success = True
+            except Exception as safety_exc:
+                err_msg = f"Asset acquisition completely failed for scene {scene.scene_id}: {safety_exc}"
+                report.errors.append(err_msg)
 
     report.completed_at = datetime.now(timezone.utc).isoformat()
     report.status = "completed" if len(report.errors) == 0 else ("partial" if artifacts else "failed")

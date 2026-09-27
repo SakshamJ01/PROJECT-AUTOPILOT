@@ -418,7 +418,7 @@ class PipelineOrchestrator:
             except Exception as exc:
                 self.db.update_job_status(job_id, WorkflowState.FAILED_SCRIPT.value)
                 self.db.record_error(job_id, "SCRIPT", "script_failed", str(exc))
-                raise PipelineError(f"Script generation failed: {exc}", category="NON_RETRYABLE", stage="SCRIPT")
+                raise PipelineError(f"Script generation failed: {exc}", category="RETRYABLE", stage="SCRIPT")
 
         # --------------------------------------------------------------
         # 3. VOICE / TTS STAGE
@@ -454,29 +454,37 @@ class PipelineOrchestrator:
             try:
                 self.db.update_job_status(job_id, WorkflowState.VOICING.value)
                 tts = get_tts_provider(tts_provider)
+                from autopilot.core.voice_studio import NeuralVoiceStudio
+                voice_studio = NeuralVoiceStudio()
                 voice_artifacts = []
                 total_duration = 0.0
 
-                if tts is not None:
+                if tts is not None and tts_provider not in ("none", "off", "disabled"):
+
                     for scene in script.scenes:
                         if scene.narration:
-                            seg_path = voice_dir / f"scene_{scene.scene_id}.wav"
-                            tts.synthesize(scene.narration, str(seg_path))
-                            dur_info = extract_duration(str(seg_path))
-                            measured = dur_info.get("duration_sec", 2.0) if dur_info.get("valid") else 2.0
+                            scene_res = voice_studio.process_scene_narration(
+                                scene_id=f"scene_{scene.scene_id}",
+                                raw_text=scene.narration,
+                                provider_name=tts_provider,
+                                out_dir=voice_dir,
+                            )
+                            final_path = scene_res.mastered_audio_path
+                            measured = scene_res.duration_sec
                             total_duration += measured
-                            voice_artifacts.append(str(seg_path.resolve()))
+                            voice_artifacts.append(str(Path(final_path).resolve()))
                             self.db.record_voice_artifact(
                                 job_id=job_id,
                                 content_id=job_id,
-                                segment_id=scene.scene_id,
-                                artifact_path=str(seg_path.resolve()),
+                                segment_id=str(scene.scene_id),
+                                artifact_path=str(Path(final_path).resolve()),
                                 duration_sec=measured,
                             )
 
                 package.voice_artifacts = voice_artifacts
                 package.measured_duration_sec = round(total_duration, 2) if total_duration > 0 else None
                 pkg_path.write_text(package.model_dump_json(indent=2), encoding="utf-8")
+
 
                 # Run transcription alignment if voice segments exist and asr_provider is enabled
                 if voice_artifacts:
@@ -625,9 +633,10 @@ class PipelineOrchestrator:
                     provider_name=asset_provider,
                     db=self.db,
                     config=self.config,
+                    allow_fallback=True,
                 )
-                if not asset_artifacts or report.get("errors"):
-                    err_msg = "; ".join(report.get("errors", ["No assets found"]))
+                if not asset_artifacts or len(asset_artifacts) < len(script.scenes):
+                    err_msg = "; ".join(report.get("errors") or [f"Only {len(asset_artifacts)}/{len(script.scenes)} scene assets acquired"])
                     self.db.update_job_status(job_id, WorkflowState.FAILED_ASSETS.value)
                     raise PipelineError(f"Asset acquisition failed: {err_msg}", category="BLOCKED", stage="ASSETS")
 

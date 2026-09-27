@@ -410,7 +410,7 @@ def _parse_json_to_script_document(
 
 
 def _clean_json_text(text: str) -> str:
-    """Clean markdown code block wrappers from JSON strings."""
+    """Clean markdown code block wrappers from JSON strings and fix common LLM formatting issues."""
     text = text.strip()
     if text.startswith("```json"):
         text = text[7:]
@@ -418,7 +418,33 @@ def _clean_json_text(text: str) -> str:
         text = text[3:]
     if text.endswith("```"):
         text = text[:-3]
+    text = text.strip()
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        text = text[start : end + 1]
+
+    # Remove trailing commas before closing braces/brackets
+    text = re.sub(r",\s*([}\]])", r"\1", text)
     return text.strip()
+
+
+def _robust_parse_json(text: str) -> dict:
+    """Attempt robust parsing of LLM-generated JSON, applying regex repairs if necessary."""
+    cleaned = _clean_json_text(text)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        # Attempt repair 1: auto-quote unquoted keys { key: ... } or , key: ...
+        repaired = re.sub(r"([{,]\s*)([a-zA-Z_][a-zA-Z0-9_\-]*)\s*:", r'\1"\2":', cleaned)
+        repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
+        try:
+            return json.loads(repaired)
+        except json.JSONDecodeError:
+            pass
+        # Re-raise original decode error on cleaned
+        return json.loads(cleaned)
 
 
 class OpenAICompatibleLLMProvider(LLMProvider):
@@ -650,7 +676,7 @@ class OpenAICompatibleLLMProvider(LLMProvider):
             ],
             "response_format": {"type": "json_object"},
             "temperature": 0.7,
-            "max_tokens": 1024,
+            "max_tokens": 4096,
             "stream": self.stream,
         }
         if self.extra_body:
@@ -665,101 +691,118 @@ class OpenAICompatibleLLMProvider(LLMProvider):
             headers["Authorization"] = f"Bearer {self.api_key}"
         headers.update(self.extra_headers)
 
-        req_data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(url, data=req_data, headers=headers, method="POST")
-
-        start_t = time.time()
-        last_chunk_t = start_t
-        accumulated_content: List[str] = []
-        thinking_chunks: List[str] = []
-
         try:
-            with urllib.request.urlopen(req, timeout=self.idle_timeout) as resp:
-                if self.stream:
-                    for line_bytes in _iter_response_lines(resp):
-                        now = time.time()
-                        if now - start_t > self.timeout:
-                            raise TimeoutError(
-                                f"{self.provider_name} LLM timeout (total_timeout): "
-                                f"request to '{url}' for model '{self.model_name}' timed out after {now - start_t:.1f}s "
-                                f"(streaming=True, think={think_enabled})."
-                            )
-                        if isinstance(line_bytes, bytes):
-                            line = line_bytes.decode("utf-8").strip()
+            last_decode_err = None
+            for attempt_idx in range(1, 4):
+                cur_user_prompt = user_prompt
+                if attempt_idx > 1:
+                    cur_user_prompt += "\nCRITICAL: Respond ONLY with valid, RFC 8259 compliant JSON. Ensure all property names and strings are double-quoted, all commas are present between elements, and no trailing commas exist."
+
+                payload["messages"] = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": cur_user_prompt},
+                ]
+                req_data = json.dumps(payload).encode("utf-8")
+                req = urllib.request.Request(url, data=req_data, headers=headers, method="POST")
+
+                start_t = time.time()
+                last_chunk_t = start_t
+                accumulated_content: List[str] = []
+                thinking_chunks: List[str] = []
+
+                try:
+                    with urllib.request.urlopen(req, timeout=self.idle_timeout) as resp:
+                        if self.stream:
+                            for line_bytes in _iter_response_lines(resp):
+                                now = time.time()
+                                if now - start_t > self.timeout:
+                                    raise TimeoutError(
+                                        f"{self.provider_name} LLM timeout (total_timeout): "
+                                        f"request to '{url}' for model '{self.model_name}' timed out after {now - start_t:.1f}s "
+                                        f"(streaming=True, think={think_enabled})."
+                                    )
+                                if isinstance(line_bytes, bytes):
+                                    line = line_bytes.decode("utf-8").strip()
+                                else:
+                                    line = str(line_bytes).strip()
+                                if not line:
+                                    continue
+                                if line.startswith("data: "):
+                                    data_str = line[6:].strip()
+                                    if data_str == "[DONE]":
+                                        break
+                                    try:
+                                        chunk = json.loads(data_str)
+                                        choices = chunk.get("choices", [])
+                                        if choices:
+                                            delta = choices[0].get("delta", {})
+                                            content_chunk = delta.get("content", "")
+                                            thinking_chunk = delta.get("thinking") or delta.get("reasoning_content") or ""
+                                            if content_chunk:
+                                                accumulated_content.append(content_chunk)
+                                            if thinking_chunk:
+                                                thinking_chunks.append(thinking_chunk)
+                                    except json.JSONDecodeError:
+                                        pass
+                                elif line.startswith("{"):
+                                    try:
+                                        chunk = json.loads(line)
+                                        if "choices" in chunk and isinstance(chunk["choices"], list) and chunk["choices"]:
+                                            first_choice = chunk["choices"][0]
+                                            if "message" in first_choice and isinstance(first_choice["message"], dict):
+                                                c = first_choice["message"].get("content", "")
+                                                if c:
+                                                    accumulated_content.append(c)
+                                                    break
+                                            elif "delta" in first_choice and isinstance(first_choice["delta"], dict):
+                                                c = first_choice["delta"].get("content", "")
+                                                th = first_choice["delta"].get("thinking") or first_choice["delta"].get("reasoning_content") or ""
+                                                if c:
+                                                    accumulated_content.append(c)
+                                                if th:
+                                                    thinking_chunks.append(th)
+                                        elif "message" in chunk and isinstance(chunk["message"], dict):
+                                            msg = chunk["message"]
+                                            c = msg.get("content", "")
+                                            th = msg.get("thinking", "")
+                                            if c:
+                                                accumulated_content.append(c)
+                                            if th:
+                                                thinking_chunks.append(th)
+                                    except json.JSONDecodeError:
+                                        pass
+                                last_chunk_t = time.time()
+                            content = "".join(accumulated_content).strip()
                         else:
-                            line = str(line_bytes).strip()
-                        if not line:
-                            continue
-                        if line.startswith("data: "):
-                            data_str = line[6:].strip()
-                            if data_str == "[DONE]":
-                                break
-                            try:
-                                chunk = json.loads(data_str)
-                                choices = chunk.get("choices", [])
-                                if choices:
-                                    delta = choices[0].get("delta", {})
-                                    content_chunk = delta.get("content", "")
-                                    thinking_chunk = delta.get("thinking") or delta.get("reasoning_content") or ""
-                                    if content_chunk:
-                                        accumulated_content.append(content_chunk)
-                                    if thinking_chunk:
-                                        thinking_chunks.append(thinking_chunk)
-                            except json.JSONDecodeError:
-                                pass
-                        elif line.startswith("{"):
-                            try:
-                                chunk = json.loads(line)
-                                if "choices" in chunk and isinstance(chunk["choices"], list) and chunk["choices"]:
-                                    first_choice = chunk["choices"][0]
-                                    if "message" in first_choice and isinstance(first_choice["message"], dict):
-                                        c = first_choice["message"].get("content", "")
-                                        if c:
-                                            accumulated_content.append(c)
-                                            break
-                                    elif "delta" in first_choice and isinstance(first_choice["delta"], dict):
-                                        c = first_choice["delta"].get("content", "")
-                                        th = first_choice["delta"].get("thinking") or first_choice["delta"].get("reasoning_content") or ""
-                                        if c:
-                                            accumulated_content.append(c)
-                                        if th:
-                                            thinking_chunks.append(th)
-                                elif "message" in chunk and isinstance(chunk["message"], dict):
-                                    msg = chunk["message"]
-                                    c = msg.get("content", "")
-                                    th = msg.get("thinking", "")
-                                    if c:
-                                        accumulated_content.append(c)
-                                    if th:
-                                        thinking_chunks.append(th)
-                            except json.JSONDecodeError:
-                                pass
-                        last_chunk_t = time.time()
-                    content = "".join(accumulated_content).strip()
-                else:
-                    res_body = resp.read().decode("utf-8")
-                    raw_json = json.loads(res_body)
-                    content = raw_json["choices"][0]["message"]["content"]
+                            res_body = resp.read().decode("utf-8")
+                            raw_json = json.loads(res_body)
+                            content = raw_json["choices"][0]["message"]["content"]
 
-            if not content:
-                raise RuntimeError(
-                    f"{self.provider_name} LLM returned empty content for model '{self.model_name}'. "
-                    f"Ensure valid output structure or check model token limit."
-                )
+                    if not content:
+                        raise RuntimeError(
+                            f"{self.provider_name} LLM returned empty content for model '{self.model_name}'. "
+                            f"Ensure valid output structure or check model token limit."
+                        )
 
-            cleaned_content = _clean_json_text(content)
-            parsed = json.loads(cleaned_content)
-            return _parse_json_to_script_document(
-                parsed=parsed,
-                topic=topic,
-                content_id=content_id,
-                language=language,
-                raw_response=content,
-                provider_name=self.provider_name,
-                model_name=self.model_name,
-                valid_source_refs=valid_source_refs,
-                has_research=has_research,
-            )
+                    parsed = _robust_parse_json(content)
+                    return _parse_json_to_script_document(
+                        parsed=parsed,
+                        topic=topic,
+                        content_id=content_id,
+                        language=language,
+                        raw_response=content,
+                        provider_name=self.provider_name,
+                        model_name=self.model_name,
+                        valid_source_refs=valid_source_refs,
+                        has_research=has_research,
+                    )
+                except json.JSONDecodeError as jerr:
+                    last_decode_err = jerr
+                    if attempt_idx < 3:
+                        time.sleep(1.0)
+                        continue
+                    safe_msg = redact_api_key(str(jerr))
+                    raise RuntimeError(f"{self.provider_name} LLM call failed: {safe_msg}") from jerr
 
         except urllib.error.HTTPError as err:
             try:
@@ -1097,8 +1140,7 @@ class OllamaLLMProvider(LLMProvider):
                     f"Ensure think=False or increase num_predict limit."
                 )
 
-            cleaned_content = _clean_json_text(content)
-            parsed = json.loads(cleaned_content)
+            parsed = _robust_parse_json(content)
             return _parse_json_to_script_document(
                 parsed=parsed,
                 topic=topic,
@@ -1165,9 +1207,12 @@ class GeminiLLMProvider(OpenAICompatibleLLMProvider):
 
         resolved_api_key = (
             api_key
-            or os.getenv("GEMINI_API_KEY")
-            or os.getenv("AUTOPILOT_GEMINI_API_KEY")
-            or getattr(CONFIG, "gemini_api_key", "")
+            if api_key is not None
+            else (
+                os.getenv("GEMINI_API_KEY")
+                or os.getenv("AUTOPILOT_GEMINI_API_KEY")
+                or getattr(CONFIG, "gemini_api_key", "")
+            )
         )
 
         resolved_base = (
@@ -1190,7 +1235,7 @@ class GeminiLLMProvider(OpenAICompatibleLLMProvider):
             if thinking_budget is not None
             else getattr(CONFIG, "gemini_thinking_budget", None)
         )
-        if t_budget is not None:
+        if t_budget is not None and t_budget > 0:
             extra_body["thinking"] = {"thinking_budget": t_budget}
 
         super().__init__(
@@ -1310,13 +1355,13 @@ def get_llm_provider(
     if key in ("mock", "mock_script", "mock_llm", "local_stub"):
         from autopilot.providers.mock_script import MockScriptProvider
         return MockScriptProvider()
-    elif key == "ollama":
+    elif key in ("ollama", "ollama-local", "ollama_local"):
         return OllamaLLMProvider(model_name=model_name, base_url=base_url, **kwargs)
-    elif key == "gemini":
+    elif key in ("gemini", "gemini-flash", "gemini_flash", "gemini-pro", "gemini_pro", "google"):
         return GeminiLLMProvider(api_key=api_key, model_name=model_name, base_url=base_url, **kwargs)
-    elif key == "openrouter":
+    elif key in ("openrouter", "open_router"):
         return OpenRouterLLMProvider(api_key=api_key, model_name=model_name, base_url=base_url, **kwargs)
-    elif key in ("openai_compatible", "openai"):
+    elif key in ("openai_compatible", "openai", "openai-compatible", "openai_compat"):
         return OpenAICompatibleLLMProvider(api_key=api_key, model_name=model_name, base_url=base_url, **kwargs)
     else:
         raise ValueError(

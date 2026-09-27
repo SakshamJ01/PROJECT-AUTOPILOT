@@ -1,0 +1,52 @@
+====================================================================
+PROJECT-AUTOPILOT — FRESH RESET PRE-CLEANUP MANIFEST
+====================================================================
+Timestamp (UTC): 2026-09-25T05:38:30Z
+Project Root: C:\Users\Saksham\Documents\PROJECT-AUTOPILOT
+Git Branch: master
+Git HEAD: 29b1c3a5544f80e8137eb4b9db26624843c7059d
+Git Status: clean
+
+ENVIRONMENT:
+Python: Python 3.14.4
+Node: v24.15.0
+npm: 11.12.1
+Rust: rustc 1.98.1 (48a229cea 2026-09-01)
+Cargo: cargo 1.98.1 (797e8a9bc 2026-08-05)
+
+DATA LOCATIONS TO BE RESET / RECREATED:
+1. SQLite Database:
+   - Path: autopilot\artifacts\autopilot.db (plus -wal / -shm)
+   - Size: ~3.17 MB (3,166,208 bytes)
+   - Tables: 40 tables
+   - Action: Clean and re-initialize with fresh schema
+
+2. Job Artifacts:
+   - Path: autopilot\artifacts\jobs\
+   - Files: 5,213 files
+   - Size: ~1,325.68 MB
+   - Action: Purge old generated jobs, recreate empty directory
+
+3. Runtime Logs:
+   - Path: autopilot\artifacts\logs\
+   - Files: 3,258 files
+   - Size: ~8.92 MB
+   - Action: Purge old runtime logs, allow fresh logs to generate
+
+4. Expired OAuth Token:
+   - Path: autopilot\credentials\youtube_token.json (1,173 bytes)
+   - Action: Remove expired/revoked token so new auth starts clean
+
+5. Temporary / Disposable Duplicate Credentials:
+   - Files: client_secret.json.json, client_secrets.json.json
+   - Action: Remove duplicate extension leftovers, preserve primary client_secret.json
+
+PRESERVED ITEMS:
+- All source code (desktop/src, desktop/src-tauri, autopilot/autopilot)
+- All test suites (autopilot/tests, desktop/src/**/*.test.tsx)
+- All documentation & manifests
+- Google OAuth Client Secrets (autopilot\credentials\client_secret.json)
+- MoneyPrinterTurbo repository and virtual environment
+- Ollama models
+- System tools (Python, Node, npm, Rust)
+====================================================================

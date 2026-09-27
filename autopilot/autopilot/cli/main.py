@@ -3,6 +3,8 @@ Only health is required now; production commands deferred.
 """
 from __future__ import annotations
 import sys
+import os
+import re
 import platform
 import subprocess
 import sqlite3
@@ -383,7 +385,8 @@ def run_produce(
     # Ensure schema exported
     generate_json_schema("schemas/content-contract-v1.json")
 
-    job_id = f"prod-{topic.replace(' ', '-')[:30]}-{uuid.uuid4().hex[:8]}"
+    clean_slug = re.sub(r"[^a-zA-Z0-9_\-]", "", topic.replace(" ", "-")).strip(" .-_")[:30] or "job"
+    job_id = f"prod-{clean_slug}-{uuid.uuid4().hex[:8]}"
     db = DBManager(CONFIG.db_path)
     db.init_schema()
 
@@ -633,7 +636,8 @@ def run_research(topic: str, provider_name: str = "local") -> int:
 
     db = DBManager(CONFIG.db_path)
     db.init_schema()
-    request_id = f"res-{topic.replace(' ', '-')[:20]}-{uuid.uuid4().hex[:6]}"
+    clean_slug = re.sub(r"[^a-zA-Z0-9_\-]", "", topic.replace(" ", "-")).strip(" .-_")[:20] or "res"
+    request_id = f"res-{clean_slug}-{uuid.uuid4().hex[:6]}"
     logger = StructuredLogger(job_id=request_id, stage="research")
 
     # Create request
@@ -3371,7 +3375,8 @@ def main() -> int:
         if args.command == "run":
             import uuid
             from autopilot.core.pipeline import PipelineOrchestrator
-            job_id = getattr(args, "job", None) or f"run-{args.topic.replace(' ', '-')[:30]}-{uuid.uuid4().hex[:8]}"
+            clean_slug = re.sub(r"[^a-zA-Z0-9_\-]", "", args.topic.replace(" ", "-")).strip(" .-_")[:30] or "job"
+            job_id = getattr(args, "job", None) or f"run-{clean_slug}-{uuid.uuid4().hex[:8]}"
             orchestrator = PipelineOrchestrator(CONFIG)
             try:
                 res = orchestrator.run_pipeline(

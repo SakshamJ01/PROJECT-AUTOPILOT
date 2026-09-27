@@ -9,6 +9,7 @@ import json
 import shutil
 import hashlib
 import tempfile
+import time
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -229,37 +230,47 @@ def safe_download_media(
     os.close(tmp_fd)
     tmp_path = Path(tmp_path_str)
 
+    retries = 2
     try:
-        with opener.open(req, timeout=timeout) as response:
-            content_type = response.headers.get("Content-Type", "application/octet-stream")
-            content_length = response.headers.get("Content-Length")
-            if content_length and int(content_length) > max_bytes:
-                raise ValueError(
-                    f"Remote file size ({content_length} bytes) exceeds limit ({max_bytes} bytes)"
-                )
+        content_type = "application/octet-stream"
+        for attempt in range(retries + 1):
+            try:
+                with opener.open(req, timeout=timeout) as response:
+                    content_type = response.headers.get("Content-Type", "application/octet-stream")
+                    content_length = response.headers.get("Content-Length")
+                    if content_length and int(content_length) > max_bytes:
+                        raise ValueError(
+                            f"Remote file size ({content_length} bytes) exceeds limit ({max_bytes} bytes)"
+                        )
 
-            bytes_received = 0
-            hasher = hashlib.sha256()
+                    bytes_received = 0
+                    hasher = hashlib.sha256()
 
-            with open(tmp_path, "wb") as f_out:
-                while True:
-                    chunk = response.read(65536)
-                    if not chunk:
-                        break
-                    bytes_received += len(chunk)
-                    if bytes_received > max_bytes:
-                        raise ValueError(f"Download exceeded maximum permitted size ({max_bytes} bytes)")
-                    hasher.update(chunk)
-                    f_out.write(chunk)
+                    with open(tmp_path, "wb") as f_out:
+                        while True:
+                            chunk = response.read(65536)
+                            if not chunk:
+                                break
+                            bytes_received += len(chunk)
+                            if bytes_received > max_bytes:
+                                raise ValueError(f"Download exceeded maximum permitted size ({max_bytes} bytes)")
+                            hasher.update(chunk)
+                            f_out.write(chunk)
 
-            if bytes_received == 0:
-                raise ValueError("Downloaded zero bytes from media URL")
+                    if bytes_received == 0:
+                        raise ValueError("Downloaded zero bytes from media URL")
 
-            sha256 = hasher.hexdigest()
-            if expected_hash and sha256 != expected_hash:
-                raise ValueError(
-                    f"Checksum mismatch: expected {expected_hash}, got {sha256}"
-                )
+                    sha256 = hasher.hexdigest()
+                    if expected_hash and sha256 != expected_hash:
+                        raise ValueError(
+                            f"Checksum mismatch: expected {expected_hash}, got {sha256}"
+                        )
+                break
+            except urllib.error.HTTPError as h_exc:
+                if h_exc.code in (429, 503) and attempt < retries:
+                    time.sleep(2.0 * (attempt + 1))
+                    continue
+                raise
 
         # Store in cache
         cached_stored = asset_cache.put(url, tmp_path, content_type=content_type)

@@ -21,12 +21,15 @@ def get_tts_provider(name: str = "mock") -> Optional[TTSProvider]:
         return None
     elif name_clean in ("mock", "mock_tts"):
         return MockTTSProvider()
-    elif name_clean == "kokoro":
+    elif name_clean in ("kokoro", "kokoro-local", "kokoro_local"):
         return KokoroTTSProvider()
-    elif name_clean in ("windows_sapi", "sapi"):
+    elif name_clean in ("edge_tts", "edgetts", "edge", "edge-tts", "edge-tts (default)", "edge_tts (default)"):
+        from autopilot.providers.edge_tts_provider import EdgeTTSProvider
+        return EdgeTTSProvider()
+    elif name_clean in ("windows_sapi", "windows-sapi", "windows_sapi (default)", "sapi", "windows"):
         from autopilot.providers.sapi_tts_provider import WindowsSAPITTSProvider
         return WindowsSAPITTSProvider()
     else:
         raise ValueError(
-            f"Unknown TTS provider: '{name}'. Available: 'none', 'mock', 'kokoro', 'windows_sapi'"
+            f"Unknown TTS provider: '{name}'. Available: 'none', 'mock', 'kokoro', 'edge_tts', 'windows_sapi'"
         )

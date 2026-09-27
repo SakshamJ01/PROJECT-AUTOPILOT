@@ -144,8 +144,39 @@ class FFmpegRenderer:
                         cap_file = segment_dir / f"caption_{idx}.txt"
                         cap_file.write_text(cap, encoding="utf-8")
                         esc_cap_path = _escape_filter_path(cap_file)
+                        
+                        # Dynamic safe-zone vertical placement driven by PlatformGeometry & saliency
+                        from autopilot.core.kinetic_typography import KineticTypographyEngine
+                        from autopilot.core.timeline import CaptionPosition, PlatformSafeZone
+
+                        cap_pos_raw = s.get("caption_plan", {}).get("position") or s.get("crop_framing", {}).get("caption_safe_zone") or "LOWER"
+                        try:
+                            cap_pos_enum = CaptionPosition(str(cap_pos_raw).upper())
+                        except Exception:
+                            cap_pos_enum = CaptionPosition.LOWER
+
+                        platform_raw = s.get("caption_plan", {}).get("platform_safe_zone") or "YOUTUBE_SHORTS"
+                        try:
+                            platform_enum = PlatformSafeZone(str(platform_raw).upper())
+                        except Exception:
+                            platform_enum = PlatformSafeZone.YOUTUBE_SHORTS
+
+                        saliency_y = s.get("crop_framing", {}).get("saliency_y", 0.5)
+                        _, cap_y = KineticTypographyEngine().compute_caption_coordinates(
+                            position=cap_pos_enum,
+                            platform=platform_enum,
+                            saliency_y=saliency_y,
+                        )
+
+                        font_color = "white"
+                        style_preset = s.get("caption_plan", {}).get("style_preset", "hormozi_yellow_pop")
+                        if "yellow" in style_preset:
+                            font_color = "white"
+                        elif "neon" in style_preset:
+                            font_color = "white"
+
                         extra_filters.append(
-                            f"drawtext=fontfile={font}:textfile={esc_cap_path}:fontsize=42:fontcolor=white:borderw=4:bordercolor=black:line_spacing=14:x=(w-text_w)/2:y=1380"
+                            f"drawtext=fontfile={font}:textfile={esc_cap_path}:fontsize=44:fontcolor={font_color}:borderw=5:bordercolor=black:line_spacing=14:x=(w-text_w)/2:y={cap_y}"
                         )
 
             v_filter_full = v_base

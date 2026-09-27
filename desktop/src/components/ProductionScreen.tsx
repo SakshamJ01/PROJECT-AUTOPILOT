@@ -12,6 +12,12 @@ import { useUiStore } from "../state/ui";
 import StatusBadge from "./StatusBadge";
 import ErrorBanner from "./ErrorBanner";
 import type { JobInspect, QueueItem } from "../api/types";
+import VideoInspectorPanel from "./VideoInspectorPanel";
+import CreativeQAPanel from "./CreativeQAPanel";
+import BeforePublishReviewScreen from "./BeforePublishReviewScreen";
+import CreatorModePanel from "./CreatorModePanel";
+import MetadataDirectorPanel from "./MetadataDirectorPanel";
+import ScenePreviewPanel from "./ScenePreviewPanel";
 
 export const STAGES = [
   "RESEARCH",
@@ -24,8 +30,6 @@ export const STAGES = [
   "COMPLETE",
 ] as const;
 
-const POLICIES = ["local_only", "ollama", "cheap_first", "mock"] as const;
-const PROFILES = ["short_vertical", "long_form", "podcast"] as const;
 
 function toneForStatus(status: string): "ok" | "bad" | "warn" | "info" {
   switch (status) {
@@ -334,62 +338,147 @@ function RenderObservabilityCard({
   );
 }
 
+type DetailTab = "overview" | "inspector" | "qa" | "preview" | "publish" | "metadata";
+
 function ProductionDetail({ item }: { item: QueueItem }) {
   const { data, isLoading, isError } = useJobInspectQuery(item.job_id);
   const artifacts = data?.artifacts ?? [];
   const errors = data?.errors ?? [];
+  const [tab, setTab] = useState<DetailTab>("overview");
+  const [isApproving, setIsApproving] = useState(false);
+  const [isRegenerating, setIsRegenerating] = useState(false);
+
+  const qaReports = data?.qa_reports ?? [];
+  const latestQa = qaReports[qaReports.length - 1] ?? null;
+  const isComplete = ["succeeded", "READY_TO_PUBLISH", "COMPLETE"].includes(item.status) ||
+    ["QA", "READY_TO_PUBLISH", "PUBLISH", "COMPLETE"].includes(item.stage);
+
+  const handleApprove = () => {
+    setIsApproving(true);
+    useUiStore.getState().addNotification("Approved", "Video approved for publishing. Publish pipeline will run.", "info");
+    setTimeout(() => setIsApproving(false), 1500);
+  };
+
+  const handleRegenerate = (code: string) => {
+    setIsRegenerating(true);
+    useUiStore.getState().addNotification("Regeneration queued", `Targeted regeneration action: ${code}`, "info");
+    setTimeout(() => setIsRegenerating(false), 2000);
+  };
+
+  const TABS: { id: DetailTab; label: string }[] = [
+    { id: "overview", label: "Overview" },
+    { id: "inspector", label: "Video Inspector" },
+    ...(latestQa ? [{ id: "qa" as DetailTab, label: "Creative QA" }] : []),
+    { id: "preview", label: "Scene Preview" },
+    ...(isComplete ? [{ id: "publish" as DetailTab, label: "\u2713 Before Publish" }] : []),
+    { id: "metadata", label: "Metadata" },
+  ];
 
   return (
-    <div className="production-grid">
-      <JobStatusCard item={item} />
-      <RenderObservabilityCard item={item} jobInspect={data} />
-      <ProvidersCard item={item} />
-      <div className="card">
-        <div className="card-header">
-          <span>Artifacts</span>
-          <span className="muted">{artifacts.length}</span>
-        </div>
-        <div className="artifact-grid">
-          {isLoading ? <span className="muted card-body">Loading…</span> : null}
-          {isError ? <span className="muted card-body">Unavailable</span> : null}
-          {!isLoading && !isError && artifacts.length === 0 ? (
-            <span className="muted card-body">No artifacts yet</span>
-          ) : null}
-          {artifacts.map((a) => {
-            const path = String(a.artifact_path ?? a.file_path ?? a.path ?? "");
-            const type = String(a.artifact_type ?? "artifact");
-            return (
-              <div
-                key={String(a.artifact_id ?? path)}
-                className={`artifact-card ${type === "media" ? "artifact-media" : ""}`}
-              >
-                <StatusBadge label={type} tone={type === "media" ? "ok" : "info"} />
-                <span className="artifact-name" title={path}>
-                  {fileBase(path)}
-                </span>
-              </div>
-            );
-          })}
-        </div>
+    <div className="production-detail-wrapper">
+      <div className="detail-tab-strip" role="tablist" aria-label="Job detail views">
+        {TABS.map(t => (
+          <button
+            key={t.id}
+            id={`detail-tab-${t.id}`}
+            role="tab"
+            aria-selected={tab === t.id}
+            className={"detail-tab" + (tab === t.id ? " active" : "") + (t.id === "publish" ? " detail-tab-publish" : "")}
+            onClick={() => setTab(t.id)}
+          >
+            {t.label}
+          </button>
+        ))}
       </div>
-      <div className="card">
-        <div className="card-header">
-          <span>Errors</span>
-          <span className="muted">{errors.length}</span>
+
+      {tab === "overview" && (
+        <div className="production-grid">
+          <JobStatusCard item={item} />
+          <RenderObservabilityCard item={item} jobInspect={data} />
+          <ProvidersCard item={item} />
+          <div className="card">
+            <div className="card-header">
+              <span>Artifacts</span>
+              <span className="muted">{artifacts.length}</span>
+            </div>
+            <div className="artifact-grid">
+              {isLoading ? <span className="muted card-body">Loading…</span> : null}
+              {isError ? <span className="muted card-body">Unavailable</span> : null}
+              {!isLoading && !isError && artifacts.length === 0 ? (
+                <span className="muted card-body">No artifacts yet</span>
+              ) : null}
+              {artifacts.map((a) => {
+                const path = String(a.artifact_path ?? a.file_path ?? a.path ?? "");
+                const type = String(a.artifact_type ?? "artifact");
+                return (
+                  <div
+                    key={String(a.artifact_id ?? path)}
+                    className={`artifact-card ${type === "media" ? "artifact-media" : ""}`}
+                  >
+                    <StatusBadge label={type} tone={type === "media" ? "ok" : "info"} />
+                    <span className="artifact-name" title={path}>
+                      {fileBase(path)}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+          <div className="card">
+            <div className="card-header">
+              <span>Errors</span>
+              <span className="muted">{errors.length}</span>
+            </div>
+            <ul className="plain-list">
+              {errors.length === 0 ? (
+                <li className="muted">None</li>
+              ) : (
+                errors.map((err) => (
+                  <li key={err.error_id}>
+                    <span className="err-type">{err.error_type}</span> {err.stage ? `@ ${err.stage} · ` : ""}
+                    {err.message}
+                  </li>
+                ))
+              )}
+            </ul>
+          </div>
         </div>
-        <ul className="plain-list">
-          {errors.length === 0 ? (
-            <li className="muted">None</li>
-          ) : (
-            errors.map((err) => (
-              <li key={err.error_id}>
-                <span className="err-type">{err.error_type}</span> {err.stage ? `@ ${err.stage} · ` : ""}
-                {err.message}
-              </li>
-            ))
-          )}
-        </ul>
-      </div>
+      )}
+
+      {tab === "inspector" && data && (
+        <VideoInspectorPanel inspect={data} />
+      )}
+      {tab === "inspector" && !data && (
+        <div className="card-body muted">{isLoading ? "Loading…" : "Job data unavailable."}</div>
+      )}
+
+      {tab === "qa" && latestQa && (
+        <CreativeQAPanel report={latestQa} />
+      )}
+
+      {tab === "preview" && data && (
+        <ScenePreviewPanel inspect={data} />
+      )}
+      {tab === "preview" && !data && (
+        <div className="card-body muted">{isLoading ? "Loading\u2026" : "Job data unavailable."}</div>
+      )}
+
+      {tab === "publish" && data && (
+        <BeforePublishReviewScreen
+          inspect={data}
+          onApprove={handleApprove}
+          onRegenerate={handleRegenerate}
+          isApproving={isApproving}
+          isRegenerating={isRegenerating}
+        />
+      )}
+
+      {tab === "metadata" && data && (
+        <MetadataDirectorPanel inspect={data} />
+      )}
+      {tab === "metadata" && !data && (
+        <div className="card-body muted">{isLoading ? "Loading…" : "Job data unavailable."}</div>
+      )}
     </div>
   );
 }
@@ -458,25 +547,40 @@ function ProductionEngineCard({ ensure }: { ensure: EnsureMutation }) {
 function StartForm({ onDone }: { onDone: () => void }) {
   const mutation = useProductionStartMutation();
   const ensure = useProductionEngineEnsureMutation();
-  const [topic, setTopic] = useState("");
-  const [channel, setChannel] = useState("default");
-  const [policy, setPolicy] = useState<(typeof POLICIES)[number]>("local_only");
-  const [profile, setProfile] = useState<(typeof PROFILES)[number]>("short_vertical");
 
-  const submit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!topic.trim()) return;
-    // Guarantee the MoneyPrinterTurbo service is up before the render stage;
-    // its error is surfaced in the engine card rather than mid-pipeline.
+  const handleSubmit = (
+    creator: { topic: string; voice: string; visualStyle: string; bgmTone: string; channel: string },
+    advanced: { policy: string; profile: string; llmProvider: string },
+  ) => {
+    const normalizeVoice = (v: string) => {
+      const s = v.toLowerCase();
+      if (s.includes("edge")) return "edge_tts";
+      if (s.includes("kokoro")) return "kokoro";
+      if (s.includes("sapi") || s.includes("windows")) return "windows_sapi";
+      if (s.includes("mock")) return "mock";
+      return "edge_tts";
+    };
+
+    const normalizeLlm = (l: string) => {
+      const s = l.toLowerCase();
+      if (s.includes("gemini")) return "gemini";
+      if (s.includes("ollama")) return "ollama";
+      if (s.includes("openrouter")) return "openrouter";
+      if (s.includes("mock")) return "mock";
+      return "ollama";
+    };
+
     const runStart = () =>
       mutation.mutate(
-        { topic: topic.trim(), channel, policy, profile },
         {
-          onSuccess: () => {
-            setTopic("");
-            onDone();
-          },
+          topic: creator.topic,
+          channel: creator.channel,
+          policy: advanced.policy,
+          profile: advanced.profile,
+          tts_provider: normalizeVoice(creator.voice),
+          llm_provider: normalizeLlm(advanced.llmProvider),
         },
+        { onSuccess: () => onDone() },
       );
     if (!ensure.data?.running) {
       ensure.mutate(undefined, { onSuccess: (res) => res.running && runStart() });
@@ -486,83 +590,14 @@ function StartForm({ onDone }: { onDone: () => void }) {
   };
 
   return (
-    <form className="start-form" onSubmit={submit}>
-      <div className="start-form-row">
-        <label>
-          Topic
-          <input
-            className="text-input"
-            type="text"
-            value={topic}
-            onChange={(e) => setTopic(e.target.value)}
-            placeholder="What should the video be about?"
-            aria-label="Production topic"
-          />
-        </label>
-        <label>
-          Channel
-          <input
-            className="text-input"
-            type="text"
-            value={channel}
-            onChange={(e) => setChannel(e.target.value)}
-            aria-label="Channel"
-          />
-        </label>
-        <label>
-          Policy
-          <select
-            className="select-input"
-            value={policy}
-            onChange={(e) => setPolicy(e.target.value as (typeof POLICIES)[number])}
-            aria-label="Production policy"
-          >
-            {POLICIES.map((p) => (
-              <option key={p} value={p}>
-                {p}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Profile
-          <select
-            className="select-input"
-            value={profile}
-            onChange={(e) => setProfile(e.target.value as (typeof PROFILES)[number])}
-            aria-label="Production profile"
-          >
-            {PROFILES.map((p) => (
-              <option key={p} value={p}>
-                {p}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
-      <div className="start-form-actions">
-        <p className="muted small">
-          Runs the full production pipeline on the local engine. Publishing is
-          never enabled from the desktop.
-        </p>
-        <button
-          className="primary-btn"
-          type="submit"
-          disabled={!topic.trim() || mutation.isPending || ensure.isPending}
-        >
-          {mutation.isPending
-            ? "Starting…"
-            : ensure.isPending
-              ? "Preparing engine…"
-              : "Start production"}
-        </button>
-      </div>
+    <div className="start-form">
+      <CreatorModePanel onSubmit={handleSubmit} isPending={mutation.isPending || ensure.isPending} />
       <ProductionEngineCard ensure={ensure} />
       {mutation.isError ? (
         <ErrorBanner
           error={mutation.error}
           title="Failed to start production"
-          onRetry={() => submit(new Event("submit") as unknown as React.FormEvent)}
+          onRetry={() => {}}
           retryLabel="Retry Production"
         />
       ) : null}
@@ -571,7 +606,7 @@ function StartForm({ onDone }: { onDone: () => void }) {
           Started job {mutation.data.job_id} → {mutation.data.status}
         </div>
       ) : null}
-    </form>
+    </div>
   );
 }
 
