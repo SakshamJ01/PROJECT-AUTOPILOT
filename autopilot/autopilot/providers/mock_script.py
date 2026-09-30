@@ -4,6 +4,8 @@ Produces deterministic, clearly-identified demo content.
 """
 from __future__ import annotations
 
+from typing import Optional
+
 from autopilot.providers.contracts import LLMProvider, ProviderHealth, CapabilityMetadata, CostUsageMetadata, ProviderErrorType
 from autopilot.core.contracts import ScriptDocument, ScriptScene, ContentItem
 from autopilot.core.duration import estimate_duration
@@ -90,7 +92,7 @@ class MockScriptProvider(LLMProvider):
             ScriptScene(
                 scene_id="scene-01",
                 order=1,
-                narration="Deep sea vents create life without sunlight.",
+                narration=scene1_narration,
                 visual_intent=scene1_intent,
                 asset_query=scene1_query,
                 estimated_duration_seconds=4.0,
@@ -100,8 +102,8 @@ class MockScriptProvider(LLMProvider):
             ScriptScene(
                 scene_id="scene-02",
                 order=2,
-                narration="Chemosynthetic bacteria form the food web base.",
-                visual_intent=f"B-roll montage of {motif} imagery",
+                narration=f"A closer look at {topic} reveals patterns most people miss.",
+                visual_intent=f"B-roll montage of {motif} imagery illustrating {topic}",
                 asset_query=f"stock footage {topic}",
                 estimated_duration_seconds=4.0,
                 scene_type="broll",
@@ -110,9 +112,9 @@ class MockScriptProvider(LLMProvider):
             ScriptScene(
                 scene_id="scene-03",
                 order=3,
-                narration="Tube worms thrive on chemical energy alone.",
-                visual_intent="Underwater footage of tube worm colonies at vents",
-                asset_query="tube worms hydrothermal vent",
+                narration=f"Researchers documented exactly how {topic} behaves in practice.",
+                visual_intent=f"Documentary field footage of {topic} in its real environment",
+                asset_query=f"{topic} documentary footage",
                 estimated_duration_seconds=4.0,
                 scene_type="broll",
                 transition_hint="cut",
@@ -120,9 +122,9 @@ class MockScriptProvider(LLMProvider):
             ScriptScene(
                 scene_id="scene-04",
                 order=4,
-                narration="This discovery changed biology textbooks forever.",
-                visual_intent="Scientists celebrating deep sea discovery",
-                asset_query="deep sea research celebration",
+                narration=f"That is why {topic} matters far more than it first appears.",
+                visual_intent=f"Presenter explaining the significance of {topic} to camera",
+                asset_query=f"{topic} explainer presenter",
                 estimated_duration_seconds=4.5,
                 scene_type="talking_head",
                 transition_hint="fade_out",

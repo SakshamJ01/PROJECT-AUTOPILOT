@@ -20,10 +20,11 @@ from autopilot.core.duration import estimate_duration
 # Pacing contract, shared by the generation prompt and the script-time guard.
 # TTS_WORDS_PER_SECOND was measured from real Edge TTS output: 73 spoken words
 # rendered as 32.88s of narration (2.22 words/sec). Creative QA blocks any scene
-# whose speech exceeds 4.5s, which caps a scene at ~10 words; 12 is allowed as
-# slack for a scene that lands right on the boundary.
+# whose speech exceeds 4.5s, which caps a scene at 10 words (10 / 2.2 = 4.5s).
+# The guard and the prompt must agree: 12 words would be 5.5s and would always be
+# rejected downstream, so the ceiling is 10 and corrective retries rewrite offenders.
 TTS_WORDS_PER_SECOND = 2.2
-MAX_SCENE_SPEECH_WORDS = 12
+MAX_SCENE_SPEECH_WORDS = 10
 
 
 def redact_api_key(text: str) -> str:
@@ -253,7 +254,7 @@ def _build_prompts_and_evidence(
         "1. DURATION: Generate 7 to 8 useful scenes so total video narration targets 32-38 seconds of natural speech (approx 70 to 85 spoken words total across all scenes).\n"
         "2. STRUCTURE: Script MUST follow the progression: HOOK (Scene 1) -> EXPLANATION / FACTS (Middle Scenes) -> INTENTIONAL PAYOFF / ENDING (Final Scene).\n"
         "3. INTENTIONAL ENDING: The final scene MUST be an intentional conclusion (payoff returning to hook, strongest final fact, seamless loop back, or payoff statement). NEVER end abruptly or use generic filler like 'thanks for watching'.\n"
-        "4. SCENE NARRATION: Punchy, conversational, spoken English. 8 to 10 words per scene. One clear idea per scene. HARD LIMIT: never exceed 12 words in a scene (measured Edge TTS rate is ~2.2 words/sec; 12 words = ~5.5s, pacing gate blocks >4.5s). If you write 13+ words, the script WILL BE REJECTED. Count your words.\n"
+        "4. SCENE NARRATION: Punchy, conversational, spoken English. 8 to 10 words per scene. One clear idea per scene. HARD LIMIT: never exceed 10 words in a scene (measured Edge TTS rate is ~2.2 words/sec; 10 words = ~4.5s, the pacing gate maximum). If you write 11+ words, the script WILL BE REJECTED. Count your words.\n"
         "5. VISUAL INTENT: Describe concrete, tangible physical subjects suitable for photography.\n"
         "6. ASSET QUERY: 2-3 words naming concrete physical photographic subjects.\n"
         "7. ON_SCREEN_TEXT: 2-4 uppercase words for visual title card.\n"
@@ -280,7 +281,7 @@ def _build_prompts_and_evidence(
             f"- You MUST create a hook scene plus at least {cardinality} separate fact scenes (one distinct scene per item/fact).\n"
             f"- Dedicate exactly one clear scene/fact unit to each item (e.g. scene-01: Hook, scene-02: Fact 1, scene-03: Fact 2, scene-04: Fact 3, followed by optional CTA).\n"
             f"- DO NOT combine multiple items into a single scene.\n"
-            f"- Keep narration punchy (8-10 words per scene, never over 12) and make each scene independently visualizable."
+            f"- Keep narration punchy (8-10 words per scene, never over {MAX_SCENE_SPEECH_WORDS}) and make each scene independently visualizable."
         )
     if has_research:
         user_prompt_lines.append("\nSUPPLIED RESEARCH EVIDENCE:")
@@ -509,13 +510,7 @@ class OpenAICompatibleLLMProvider(LLMProvider):
             or "http://localhost:11434/v1"
         )
         self.base_url = raw_base.rstrip("/")
-        self.api_key = (
-            api_key
-            or os.getenv("OPENAI_API_KEY")
-            or os.getenv("OPENROUTER_API_KEY")
-            or os.getenv("OPENROUTER_KEY")
-            or ""
-        )
+        self.api_key = self._resolve_api_key(api_key)
         default_timeout = getattr(CONFIG, "ollama_timeout", 180.0)
         env_timeout = (
             os.getenv("OPENAI_TIMEOUT")
@@ -528,6 +523,22 @@ class OpenAICompatibleLLMProvider(LLMProvider):
         self.extra_headers = extra_headers or {}
         self.extra_body = extra_body or {}
         self.model_name = self._resolve_model_name(model_name)
+
+    def _resolve_api_key(self, explicit_api_key: Optional[str]) -> str:
+        """Resolve the credential without ever borrowing another provider's key.
+
+        An explicitly supplied value always wins -- including an empty string -- so a
+        caller (and the test suite) can explicitly assert that a provider is
+        unconfigured instead of silently inheriting OPENAI/OPENROUTER credentials.
+        """
+        if explicit_api_key is not None:
+            return explicit_api_key
+        return (
+            os.getenv("OPENAI_API_KEY")
+            or os.getenv("OPENROUTER_API_KEY")
+            or os.getenv("OPENROUTER_KEY")
+            or ""
+        )
 
     def _discover_available_models(self) -> list[str]:
         """Fetch list of available models from endpoint via /models or /api/tags."""
@@ -1312,10 +1323,13 @@ class OpenRouterLLMProvider(OpenAICompatibleLLMProvider):
 
         resolved_api_key = (
             api_key
-            or os.getenv("OPENROUTER_API_KEY")
-            or os.getenv("AUTOPILOT_OPENROUTER_API_KEY")
-            or os.getenv("OPENROUTER_KEY")
-            or getattr(CONFIG, "openrouter_api_key", "")
+            if api_key is not None
+            else (
+                os.getenv("OPENROUTER_API_KEY")
+                or os.getenv("AUTOPILOT_OPENROUTER_API_KEY")
+                or os.getenv("OPENROUTER_KEY")
+                or getattr(CONFIG, "openrouter_api_key", "")
+            )
         )
 
         resolved_base = (
@@ -1389,9 +1403,12 @@ class AtriaLLMProvider(OpenAICompatibleLLMProvider):
 
         resolved_api_key = (
             api_key
-            or os.getenv("ATRIA_API_KEY")
-            or os.getenv("AUTOPILOT_ATRIA_API_KEY")
-            or getattr(CONFIG, "atria_api_key", "")
+            if api_key is not None
+            else (
+                os.getenv("ATRIA_API_KEY")
+                or os.getenv("AUTOPILOT_ATRIA_API_KEY")
+                or getattr(CONFIG, "atria_api_key", "")
+            )
         )
 
         resolved_base = (

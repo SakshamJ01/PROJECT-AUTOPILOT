@@ -16,11 +16,10 @@ dependencies = [
     "edge-tts>=7.2.8",
     "pillow>=12.3.0",
     "open-clip-torch>=3.3.0",
-]
-
-[project.optional-dependencies]
-dev = [
-    "pytest>=7.0",
+    "faster-whisper>=1.0.0",
+    "kokoro-onnx>=0.4.0",
+    "tzdata>=2024.1",
+    "crawl4ai>=0.4.0",
 ]
 
 [project.scripts]
@@ -36,9 +35,11 @@ testpaths = ["tests"]
 addopts = "-v --tb=short -m 'not live'"
 markers = [
     "live: opt-in live network integration tests (excluded by default)",
+    "use_real_provider_credentials: opt in to real provider credentials from .env",
 ]
 
 [dependency-groups]
 dev = [
+    "pytest>=7.0",
     "mypy>=2.3.1",
 ]

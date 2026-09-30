@@ -49,3 +49,7 @@ __pycache__/
 venv/
 build/
 dist/
+
+# ===== Render/QA probe scratch (regenerated on demand, never source) =====
+.tmp_hash/
+*.tmp_hash/
