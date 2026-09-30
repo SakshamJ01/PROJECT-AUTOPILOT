@@ -213,9 +213,13 @@ def test_semantic_relevance_rejection_in_asset_pipeline(tmp_path):
             db=db,
             config=cfg,
         )
-        # Should be rejected for low semantic relevance
+        # Should be rejected: the candidate is visually unrelated to the
+        # scene, so the semantic/visual gate must block it.
         assert len(artifacts) == 0
-        assert any("Semantic relevance score too low" in str(r) for r in report.get("rejections", []))
+        reasons = " | ".join(str(r) for r in report.get("rejections", []))
+        assert report.get("rejections"), "irrelevant asset must be rejected with a recorded reason"
+        lowered = reasons.lower()
+        assert ("semantic relevance" in lowered) or ("visual gate" in lowered), reasons
 
 
 def test_renderer_avoids_cross_scene_audio_bleed():

@@ -583,6 +583,18 @@
           "description": "Extensible: talking_head|broll|image|text|screen|generated_visual|montage",
           "title": "Scene Type",
           "type": "string"
+        },
+        "word_timestamps": {
+          "items": {
+            "$ref": "#/$defs/WordTimestamp"
+          },
+          "title": "Word Timestamps",
+          "type": "array"
+        },
+        "preferred_asset_type": {
+          "default": "VIDEO",
+          "title": "Preferred Asset Type",
+          "type": "string"
         }
       },
       "required": [
@@ -666,6 +678,34 @@
         "text"
       ],
       "title": "VoiceSegment",
+      "type": "object"
+    },
+    "WordTimestamp": {
+      "properties": {
+        "word": {
+          "title": "Word",
+          "type": "string"
+        },
+        "start_sec": {
+          "title": "Start Sec",
+          "type": "number"
+        },
+        "end_sec": {
+          "title": "End Sec",
+          "type": "number"
+        },
+        "probability": {
+          "default": 1.0,
+          "title": "Probability",
+          "type": "number"
+        }
+      },
+      "required": [
+        "word",
+        "start_sec",
+        "end_sec"
+      ],
+      "title": "WordTimestamp",
       "type": "object"
     }
   },

@@ -680,7 +680,7 @@ class TimelineCompiler:
                 "profile": timeline.profile_id,
                 "total_duration_sec": timeline.total_measured_duration_sec,
             },
-            production_engine="moneyprinterturbo",
+            production_engine="ffmpeg",
             engine_version="v1.0.0",
             timeline_id=timeline.timeline_id,
             timeline_version=timeline.timeline_version,

@@ -15,14 +15,19 @@ class Config(BaseModel):
     db_path: Path = Field(default_factory=lambda: Path(__file__).resolve().parent.parent.parent / "artifacts" / "autopilot.db")
     log_level: str = "INFO"
     provider_default_llm: str = "local_stub"
-    provider_default_tts: str = "local_stub"
-    provider_default_asr: str = "local_stub"
-    provider_default_asset: str = "local"
+    provider_default_tts: str = "edge_tts"
+    provider_default_asr: str = "faster_whisper"
+    provider_default_asset: str = "pexels"
     provider_default_publisher: str = "local_stub"
     max_render_resolution: str = "1080p"
     target_aspect_ratio: str = "9:16"
     synthetic_smoke_enabled: bool = True
-    default_production_engine: str = "moneyprinterturbo"
+    # P0: the native ffmpeg engine is the production default because it is the
+    # only engine that renders the CLIP-verified assets, the real Edge TTS
+    # segments, and the word-synced kinetic captions we actually produced.
+    # moneyprinterturbo remains available explicitly, but it re-fetches its own
+    # footage/voice and would invalidate all asset/voice QA evidence.
+    default_production_engine: str = "ffmpeg"
     moneyprinter_endpoint: str = "http://127.0.0.1:8080"
     moneyprinter_cli_path: Optional[str] = None
     # MoneyPrinterTurbo local API lifecycle (desktop runtime). Autopilot probes
@@ -62,6 +67,17 @@ class Config(BaseModel):
     pexels_timeout: float = 10.0
     pixabay_api_key: Optional[str] = None
     pixabay_timeout: float = 10.0
+
+    # P0 Visual-Semantic Verification (local CLIP gate on downloaded pixels)
+    visual_semantic_enabled: bool = True
+    visual_semantic_min_similarity: float = 0.21  # cosine; validated on real match (0.256) vs decoy (0.177)
+    visual_semantic_model: str = "ViT-B-32"
+    visual_semantic_pretrained: str = "laion2b_s34b_b79k"
+    visual_semantic_max_video_frames: int = 3
+
+    # P0 Asset type discipline: preferred provider cascade for B-roll
+    asset_provider_cascade: str = "pexels,pixabay,openverse,infographics"
+    asset_video_preferred: bool = True
     asset_cache_dir: Path = Field(default_factory=lambda: Path(__file__).resolve().parent.parent.parent / "artifacts" / "asset_cache")
     asset_target_width: int = 1080
     asset_target_height: int = 1920
@@ -261,15 +277,22 @@ class Config(BaseModel):
             "PIXABAY_API_KEY": "pixabay_api_key",
             "AUTOPILOT_PIXABAY_API_KEY": "pixabay_api_key",
             "PIXABAY_TIMEOUT": "pixabay_timeout",
+            "VISUAL_SEMANTIC_ENABLED": "visual_semantic_enabled",
+            "VISUAL_SEMANTIC_MIN_SIMILARITY": "visual_semantic_min_similarity",
+            "VISUAL_SEMANTIC_MODEL": "visual_semantic_model",
+            "VISUAL_SEMANTIC_PRETRAINED": "visual_semantic_pretrained",
+            "VISUAL_SEMANTIC_MAX_VIDEO_FRAMES": "visual_semantic_max_video_frames",
+            "ASSET_PROVIDER_CASCADE": "asset_provider_cascade",
+            "ASSET_VIDEO_PREFERRED": "asset_video_preferred",
         }
         for env_key, field_name in env_map.items():
             val = os.environ.get(env_key)
             if val is not None:
-                if field_name in ("openverse_enabled", "rights_policy_allow_partial", "synthetic_smoke_enabled", "qa_strict_mode", "publish_dry_run_default", "autonomy_auto_publish", "ollama_think", "moneyprinter_autostart"):
+                if field_name in ("openverse_enabled", "rights_policy_allow_partial", "synthetic_smoke_enabled", "qa_strict_mode", "publish_dry_run_default", "autonomy_auto_publish", "ollama_think", "moneyprinter_autostart", "visual_semantic_enabled", "asset_video_preferred"):
                     data[field_name] = val.lower() in ("1", "true", "yes")
-                elif field_name in ("openverse_max_results", "asset_target_width", "asset_target_height", "asset_max_download_bytes", "asset_max_redirects", "qa_caption_max_line_length", "qa_caption_max_lines", "publish_max_retries", "publish_chunk_size_bytes", "queue_default_priority", "queue_max_attempts", "queue_max_concurrency", "queue_max_queued_jobs", "analytics_sync_interval_hours", "analytics_cache_ttl_seconds", "analytics_batch_size", "autonomy_level", "autonomy_max_ideas_per_cycle", "autonomy_max_auto_queue_per_cycle", "autonomy_max_daily_jobs", "autonomy_topic_cooldown_days", "ollama_num_predict", "learning_min_samples", "learning_min_category_observations", "learning_window_days", "learning_full_confidence_samples", "strategy_max_params_per_update", "strategy_min_age_days"):
+                elif field_name in ("openverse_max_results", "asset_target_width", "asset_target_height", "asset_max_download_bytes", "asset_max_redirects", "qa_caption_max_line_length", "qa_caption_max_lines", "publish_max_retries", "publish_chunk_size_bytes", "queue_default_priority", "queue_max_attempts", "queue_max_concurrency", "queue_max_queued_jobs", "analytics_sync_interval_hours", "analytics_cache_ttl_seconds", "analytics_batch_size", "autonomy_level", "autonomy_max_ideas_per_cycle", "autonomy_max_auto_queue_per_cycle", "autonomy_max_daily_jobs", "autonomy_topic_cooldown_days", "ollama_num_predict", "learning_min_samples", "learning_min_category_observations", "learning_window_days", "learning_full_confidence_samples", "strategy_max_params_per_update", "strategy_min_age_days", "visual_semantic_max_video_frames"):
                     data[field_name] = int(val)
-                elif field_name in ("openverse_timeout", "qa_loudness_target_lufs", "qa_max_silence_duration_sec", "qa_silence_threshold_db", "qa_max_black_duration_sec", "qa_max_freeze_duration_sec", "qa_duration_tolerance_sec", "qa_duration_tolerance_pct", "qa_fps_target", "publish_timeout_seconds", "queue_lease_duration_seconds", "queue_poll_interval_seconds", "queue_retry_backoff_base_seconds", "autonomy_similarity_threshold", "autonomy_min_score_threshold", "ollama_timeout", "ollama_idle_timeout", "learning_recency_weight", "strategy_max_weight_delta", "strategy_weight_floor", "strategy_weight_ceiling", "strategy_influence_scale", "moneyprinter_startup_timeout_seconds"):
+                elif field_name in ("openverse_timeout", "qa_loudness_target_lufs", "qa_max_silence_duration_sec", "qa_silence_threshold_db", "qa_max_black_duration_sec", "qa_max_freeze_duration_sec", "qa_duration_tolerance_sec", "qa_duration_tolerance_pct", "qa_fps_target", "publish_timeout_seconds", "queue_lease_duration_seconds", "queue_poll_interval_seconds", "queue_retry_backoff_base_seconds", "autonomy_similarity_threshold", "autonomy_min_score_threshold", "ollama_timeout", "ollama_idle_timeout", "learning_recency_weight", "strategy_max_weight_delta", "strategy_weight_floor", "strategy_weight_ceiling", "strategy_influence_scale", "moneyprinter_startup_timeout_seconds", "visual_semantic_min_similarity"):
                     data[field_name] = float(val)
                 else:
                     data[field_name] = val

@@ -47,8 +47,13 @@ def test_ass_karaoke_highlight_formatting():
     assert "\\k" in ass  # Karaoke / word highlight timing tag present
 
 
-def test_fallback_transcription_when_audio_provided(tmp_path):
-    # Create synthetic test wav file
+def test_silence_is_not_fabricated_into_word_timestamps(tmp_path):
+    """P0: real ASR must never invent words for silent/empty audio.
+
+    Previously this path silently produced fake word timestamps, which
+    corrupted kinetic captions and QA verdicts. Production now fails closed
+    and reports exactly what the model actually heard (nothing).
+    """
     audio_path = tmp_path / "test_audio.wav"
     audio_path.write_bytes(b"RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00D\xac\x00\x00\x88X\x01\x00\x02\x00\x10\x00data\x00\x00\x00\x00")
 
@@ -56,6 +61,38 @@ def test_fallback_transcription_when_audio_provided(tmp_path):
     req = TranscriptionRequest(audio_path=str(audio_path), language="en", word_timestamps=True)
     res = engine.transcribe(req)
 
+    assert res.engine_name == "faster-whisper"
+    # No fabricated words for silence.
+    assert all(len(seg.words) == 0 for seg in res.segments)
+    assert res.srt_content is not None
+    assert res.ass_content is not None
+
+
+def test_missing_audio_raises_instead_of_falling_back(tmp_path):
+    """P0 fail-closed: a missing/corrupt file must raise, never fake-align."""
+    engine = FasterWhisperEngine(allow_fallback=False)
+    req = TranscriptionRequest(audio_path=str(tmp_path / "nope.wav"), word_timestamps=True)
+    try:
+        engine.transcribe(req)
+    except Exception:
+        return
+    raise AssertionError("expected fail-closed error for missing audio")
+
+
+def test_explicit_allow_fallback_still_supported(tmp_path):
+    """Non-production callers may still opt into the deterministic fallback.
+
+    The fallback only engages when real decoding actually fails, so this uses
+    a file that is not decodable audio.
+    """
+    audio_path = tmp_path / "not_audio.wav"
+    audio_path.write_bytes(b"RIFF" + b"this is definitely not decodable audio" * 8)
+
+    engine = FasterWhisperEngine(allow_fallback=True)
+    req = TranscriptionRequest(audio_path=str(audio_path), language="en", word_timestamps=True)
+    res = engine.transcribe(req)
+
+    assert res.engine_name == "fallback-aligner"
     assert res.duration_sec >= 0.0
     assert len(res.segments) >= 1
     assert res.srt_content is not None

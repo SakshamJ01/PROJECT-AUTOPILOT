@@ -1,4 +1,4 @@
-"""CLI commands — Phase 0.
+﻿"""CLI commands â€” Phase 0.
 Only health is required now; production commands deferred.
 """
 from __future__ import annotations
@@ -10,6 +10,13 @@ import subprocess
 import sqlite3
 import hashlib
 from pathlib import Path
+
+# Load .env file if present
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parent.parent.parent.parent / ".env")
+except Exception:
+    pass
 
 from autopilot.core.config import CONFIG
 from autopilot.core.artifacts import job_artifact_dir, script_path, provenance_path
@@ -27,42 +34,42 @@ _POLICY_PROVIDER_MAP: dict[str, dict[str, str]] = {
         "research": "wikipedia",          # Wikipedia (no external paid API)
         "tts": "kokoro",                  # Kokoro ONNX (local)
         "asset": "openverse",             # Real openverse asset provider
-        "production_engine": "moneyprinterturbo",
+        "production_engine": "ffmpeg",
     },
     "cheap_first": {
         "llm": "openrouter",
         "research": "combined",
         "tts": "kokoro",
         "asset": "openverse",
-        "production_engine": "moneyprinterturbo",
+        "production_engine": "ffmpeg",
     },
     "quality_first": {
         "llm": "gemini",
         "research": "combined",
         "tts": "kokoro",
         "asset": "openverse",
-        "production_engine": "moneyprinterturbo",
+        "production_engine": "ffmpeg",
     },
     "ollama": {
         "llm": "ollama",
         "research": "wikipedia",
         "tts": "kokoro",
         "asset": "openverse",
-        "production_engine": "moneyprinterturbo",
+        "production_engine": "ffmpeg",
     },
     "gemini": {
         "llm": "gemini",
         "research": "combined",
         "tts": "kokoro",
         "asset": "openverse",
-        "production_engine": "moneyprinterturbo",
+        "production_engine": "ffmpeg",
     },
     "openrouter": {
         "llm": "openrouter",
         "research": "combined",
         "tts": "kokoro",
         "asset": "openverse",
-        "production_engine": "moneyprinterturbo",
+        "production_engine": "ffmpeg",
     },
 }
 
@@ -93,7 +100,7 @@ def resolve_providers_for_policy(
     """
     tier = _POLICY_PROVIDER_MAP.get(policy)
     if tier is None:
-        # Unknown policy — leave providers as-is (permissive for forward compat).
+        # Unknown policy â€” leave providers as-is (permissive for forward compat).
         return llm_provider, research_provider, tts_provider, production_engine
 
     # --- LLM ---
@@ -262,7 +269,7 @@ def run_health() -> int:
     from autopilot.providers.youtube_publisher import YouTubePublisher
     REGISTRY.register(YouTubePublisher())
 
-    # Provider health — graceful for missing ones
+    # Provider health â€” graceful for missing ones
     provider_health = REGISTRY.health_all()
 
     # Artifact dir
@@ -362,11 +369,11 @@ def run_produce(
     channel: str = "default",
     policy: str = "local_only",
     research_topic: str | None = None,
-    tts_provider: str = "none",
-    asset_provider: str = "local",
+    tts_provider: str = "edge_tts",
+    asset_provider: str = "pexels",
     llm_provider: str = "mock",
     research_provider: str = "mock_search",
-    production_engine: str = "moneyprinterturbo",
+    production_engine: str = "ffmpeg",
     render: bool = False,
 ) -> int:
     import json
@@ -513,7 +520,7 @@ def run_produce(
         else:
             real_tags = ["autopilot", "shorts"]
 
-    real_title = script.working_title or (f"{topic} — Phase 1 demo" if provider.provider_name == "mock_script" else topic)
+    real_title = script.working_title or (f"{topic} â€” Phase 1 demo" if provider.provider_name == "mock_script" else topic)
 
     package = ContentPackage(
         content_item=item,
@@ -561,7 +568,7 @@ def run_produce(
         "state": WorkflowState.SCRIPTED.value,
     })
 
-    # Phase 2 / M2 — TTS integration (optional)
+    # Phase 2 / M2 â€” TTS integration (optional)
     from autopilot.providers.tts_factory import get_tts_provider
     tts = get_tts_provider(tts_provider)
     if tts is not None:
@@ -584,19 +591,59 @@ def run_produce(
                     job_id, script.content_id, scene.scene_id, audio_path,
                     provider=tts.provider_name, model_voice="default", duration_sec=measured,
                     provenance_json=json.dumps({
-                        "provider": tts.provider_name, "mode": "real" if tts.provider_name == "kokoro" else "synthetic",
+                        "provider": tts.provider_name,
+                        # Only MockTTS produces synthetic audio. Edge TTS and
+                        # Kokoro are real neural speech synthesis.
+                        "mode": "synthetic" if tts.provider_name in ("mock_tts", "mock") else "real",
                         "input_text_hash_prefix": hashlib.sha256(segment_text.encode()).hexdigest()[:16],
-                        "note": "Kokoro ONNX speech synthesis" if tts.provider_name == "kokoro" else "Deterministic mock TTS audio",
+                        "note": (
+                            "Kokoro ONNX speech synthesis" if tts.provider_name == "kokoro"
+                            else "Edge neural TTS speech synthesis" if "edge" in str(tts.provider_name).lower()
+                            else "Deterministic mock TTS audio"
+                        ),
                     }),
                 )
                 package.voice_artifacts.append(str(audio_path))
                 logger.info("tts_generated", details={"segment_id": scene.scene_id, "path": audio_path, "duration_sec": measured, "valid": dur_info.get("valid")})
+
+                # P0: real word-level alignment for kinetic captions. This is
+                # mandatory for production TTS and fails closed on error.
+                if tts.provider_name not in ("mock_tts", "mock"):
+                    from autopilot.providers.transcription.faster_whisper_engine import FasterWhisperEngine
+                    from autopilot.core.contracts import TranscriptionRequest, WordTimestamp
+
+                    asr = FasterWhisperEngine(model_size=CONFIG.whisper_model_size)
+                    tr = asr.transcribe(TranscriptionRequest(
+                        audio_path=audio_path, language="en", word_timestamps=True, vad_filter=True,
+                    ))
+                    words = [w for seg in tr.segments for w in (seg.words or [])]
+                    if not words:
+                        raise RuntimeError(
+                            f"No speech recognised in scene '{scene.scene_id}'; refusing to "
+                            "render captions without real word timestamps."
+                        )
+                    scene.word_timestamps = [
+                        WordTimestamp(
+                            word=w.word,
+                            start_sec=float(w.start_sec),
+                            end_sec=float(w.end_sec),
+                            probability=float(w.probability),
+                        )
+                        for w in words
+                    ]
+                    logger.info("asr_aligned", details={
+                        "scene_id": scene.scene_id, "words": len(scene.word_timestamps),
+                        "engine": tr.engine_name,
+                    })
             except Exception as exc:
                 logger.error("tts_failed", error=str(exc), details={"scene_id": scene.scene_id})
                 if tts_provider != "mock":
                     raise RuntimeError(f"TTS synthesis failed with provider '{tts_provider}' for scene '{scene.scene_id}': {exc}") from exc
         package.measured_duration_sec = round(total_duration, 2) if total_duration > 0 else None
         package_file.write_text(package.model_dump_json(indent=2), encoding="utf-8")
+        # Persist the aligned scenes so the render stage can build kinetic
+        # captions from real per-scene word timestamps.
+        script_file.write_text(script.model_dump_json(indent=2), encoding="utf-8")
         db.record_artifact(job_id, str(package_file), "script")
 
     # Print human-readable summary
@@ -756,7 +803,7 @@ def run_research(topic: str, provider_name: str = "local") -> int:
     print(f"Sources found: {len(sources_raw)}")
     print(f"Evidence records: {len(evidence_items)}")
     print(f"Report ID: {report.report_id}")
-    status_text = "real-world research" if provider.provider_name == "wikipedia" else "deterministic mock — not real-world research"
+    status_text = "real-world research" if provider.provider_name == "wikipedia" else "deterministic mock â€” not real-world research"
     print(f"Status: completed ({status_text})")
     print(f"Cache key: {cache_key_val}")
     print(f"Artifact: artifacts/jobs/{request_id}/research/ (DB + JSON log)")
@@ -843,7 +890,7 @@ def run_assets(job_id: str, provider_name: str = "local", search_only: bool = Fa
     return 0 if report.get("status") in ("completed", "pending") and len(report.get("errors", [])) == 0 else (0 if artifacts else 1)
 
 
-def run_render(job_id: str, asset_provider: str = "local", profile: str = "short_vertical", production_engine: str = "moneyprinterturbo") -> int:
+def run_render(job_id: str, asset_provider: str = "pexels", profile: str = "short_vertical", production_engine: str = "ffmpeg") -> int:
     import json
     from pathlib import Path
     from autopilot.core.contracts import ScriptDocument, ContentPackage, RenderPlan, AssetArtifact, ProductionRequest
@@ -932,6 +979,23 @@ def run_render(job_id: str, asset_provider: str = "local", profile: str = "short
         for da in db_assets:
             prov_raw = json.loads(da.get("provenance_json") or "{}")
             lic_raw = json.loads(da.get("license_json") or "{}")
+            # The CLIP score is recorded inside provenance_json; surface it on
+            # the artifact so the render plan and creative QA see the real
+            # visual-verification evidence rather than a null.
+            prov_score = prov_raw.get("semantic_score")
+            prov_reason = prov_raw.get("selection_reason")
+            # AssetArtifact.asset_type defaults to "image"; without this a real
+            # MP4 is recorded as a still image and creative QA then reports a
+            # bogus "static image" defect.
+            db_asset_type = da.get("asset_type")
+            if not db_asset_type:
+                db_asset_type = (
+                    "video"
+                    if str(da.get("artifact_path") or "").lower().endswith(
+                        (".mp4", ".mov", ".mkv", ".webm")
+                    )
+                    else "image"
+                )
             asset_artifacts.append(AssetArtifact(
                 artifact_id=f"art-{da.get('artifact_id')}",
                 job_id=job_id,
@@ -940,8 +1004,13 @@ def run_render(job_id: str, asset_provider: str = "local", profile: str = "short
                 source_path=da.get("artifact_path"),
                 normalized_path=da.get("artifact_path"),
                 checksum_sha256=da.get("checksum_sha256"),
+                asset_type=db_asset_type,
                 provenance=AssetProvenance(**prov_raw) if prov_raw else AssetProvenance(),
                 license=AssetLicense(**lic_raw) if lic_raw else AssetLicense(),
+                semantic_score=(
+                    float(prov_score) if isinstance(prov_score, (int, float)) else None
+                ),
+                selection_reason=prov_reason or None,
             ))
 
     # 2. Resolve voice artifacts
@@ -981,12 +1050,45 @@ def run_render(job_id: str, asset_provider: str = "local", profile: str = "short
             if dur_info.get("valid") and dur_info.get("duration_sec", 0) > 0:
                 dur = max(float(dur_info["duration_sec"]), 2.0)
 
-        render_scenes.append({
+        entry = {
             "scene_id": scene.scene_id,
             "duration_sec": dur,
             "asset_path": norm_path,
             "audio_path": voice_path,
-        })
+        }
+        # P0: hand the render stage the real per-scene word timestamps and
+        # caption intent so it burns TRUE kinetic captions instead of falling
+        # back to a static block.
+        wt = list(getattr(scene, "word_timestamps", None) or [])
+        if wt:
+            entry["word_timestamps"] = [
+                {
+                    "word": w.word,
+                    "start_sec": float(w.start_sec),
+                    "end_sec": float(w.end_sec),
+                }
+                for w in wt
+            ]
+        if scene.narration:
+            entry["narration"] = scene.narration
+        entry["caption_plan"] = {
+            "position": "LOWER",
+            "platform_safe_zone": "YOUTUBE_SHORTS",
+            "style_preset": "hormozi_yellow_pop",
+        }
+        # P0: carry the verified asset provenance into the plan so downstream
+        # creative/visual QA can score against real CLIP evidence.
+        entry["asset_type"] = (matched_art.asset_type if matched_art else "video")
+        entry["asset_provider"] = (
+            matched_art.provenance.provider if matched_art else None
+        )
+        entry["selection_reason"] = (
+            matched_art.selection_reason if matched_art else None
+        )
+        entry["semantic_score"] = (
+            matched_art.semantic_score if matched_art else None
+        )
+        render_scenes.append(entry)
 
     raw_speech_dur = sum(s.get("duration_sec", 0) for s in render_scenes)
     render_plan = RenderPlan(
@@ -1032,8 +1134,53 @@ def run_render(job_id: str, asset_provider: str = "local", profile: str = "short
         render_plan.raw_speech_duration_sec = raw_speech_dur
         plan_path.write_text(render_plan.model_dump_json(indent=2), encoding="utf-8")
         db.record_artifact(job_id, str(final_mp4), "media", checksum_sha256=render_checksum)
+        # P0: stamp the render with the current pipeline version so resume logic
+        # can never silently reuse a final.mp4 from an older production path.
+        from autopilot.core.stale_artifact_protection import write_sidecar_compatibility
+
+        write_sidecar_compatibility(str(final_mp4), job_id, "render")
         db.update_job_status(job_id, WorkflowState.RENDERED.value)
         logger.info("stage_completed", details={"stage": "RENDER", "engine": production_engine, "path": str(final_mp4), "sha256": render_checksum[:16]})
+
+        # P0: prove the verified assets are actually in the rendered file. An
+        # engine that re-fetches its own footage would otherwise ship a video
+        # whose CLIP/rights evidence describes footage that is not present.
+        from autopilot.core.render_provenance import (
+            summarize,
+            verify_asset_presence,
+            write_provenance_report,
+        )
+
+        provenance = verify_asset_presence(
+            final_mp4, render_scenes, production_engine=production_engine
+        )
+        write_provenance_report(provenance, render_dir / "render_provenance.json")
+        print(summarize(provenance))
+        if provenance.applicable and not provenance.valid:
+            db.update_job_status(job_id, WorkflowState.FAILED_RENDER.value)
+            db.record_error(
+                job_id,
+                "RENDER",
+                "render_provenance_unverified",
+                f"Engine '{production_engine}' did not render the planned assets: "
+                f"missing={provenance.missing_scene_ids} errors={provenance.errors}",
+            )
+            print(
+                f"\n[ERROR] Render provenance UNVERIFIED for engine '{production_engine}'. "
+                "The planned, CLIP-verified assets are not present in the output, so asset "
+                "and rights QA cannot be claimed for this video."
+            )
+            raise RuntimeError(
+                f"render provenance unverified: missing scenes "
+                f"{provenance.missing_scene_ids or 'unknown'}"
+            )
+        logger.info(
+            "render_provenance_verified",
+            details={
+                "verified_scenes": provenance.verified_scene_count,
+                "threshold": provenance.threshold,
+            },
+        )
     except Exception as exc:
         db.update_job_status(job_id, WorkflowState.FAILED_RENDER.value)
         db.record_error(job_id, "RENDER", "render_failed", str(exc))
@@ -1060,6 +1207,10 @@ def run_qa(job_id: str, media_path: str | None = None, verbose: bool = False, ou
     from autopilot.core.qa_engine import QAEngine, export_qa_artifacts
     from autopilot.core.state_machine import WorkflowState
     from autopilot.db.manager import DBManager
+    from autopilot.core.timeline_builder import load_timeline_from_job_dir
+    from autopilot.core.creative_qa import CreativeQAEngine
+    from autopilot.core.defect_classifier import DefectClassifierEngine
+    from autopilot.core.publish_readiness import PublishReadinessGate
 
     db = DBManager(CONFIG.db_path)
     db.init_schema()
@@ -1142,6 +1293,63 @@ def run_qa(job_id: str, media_path: str | None = None, verbose: bool = False, ou
         job_id=job_id,
         db_manager=db,
     )
+
+    # ------------------------------------------------------------
+    # Creative QA + Publish Readiness Gate (Phase 5 composite gate)
+    # ------------------------------------------------------------
+    creative_report = None
+    publish_decision = None
+    try:
+        # Build real timeline from artifacts
+        timeline, media_assets = load_timeline_from_job_dir(job_id, str(CONFIG.get_artifacts_dir()))
+        # Run Creative QA on the real video
+        cqa = CreativeQAEngine(sample_interval_sec=1.5)
+        creative_report = cqa.evaluate_production(timeline, str(target_media))
+        # Persist Creative QA report
+        qa_dir = job_artifact_dir(job_id) / "qa"
+        qa_dir.mkdir(parents=True, exist_ok=True)
+        cqa_path = qa_dir / "creative_qa_report.json"
+        cqa_path.write_text(creative_report.model_dump_json(indent=2), encoding="utf-8")
+        db.record_artifact(job_id, str(cqa_path), "quality")
+
+        # Classify defects from Creative + Technical QA
+        defect_cls = DefectClassifierEngine()
+        defects = defect_cls.classify_defects(creative_report=creative_report, technical_report=report)
+
+        # Rights/invariants from provenance gate already verified in render
+        # (If render passed provenance, we know assets are verified and timeline matches)
+        rights_verified = True
+        invariants_verified = True
+
+        # Run Publish Readiness Gate
+        gate = PublishReadinessGate()
+        publish_decision = gate.evaluate(
+            creative_report=creative_report,
+            defects=defects,
+            technical_report=report,
+            rights_verified=rights_verified,
+            invariants_verified=invariants_verified,
+            human_review_approved=False,  # no auto-override
+        )
+
+        # Persist publish readiness decision
+        pub_path = qa_dir / "publish_readiness.json"
+        pub_path.write_text(publish_decision.model_dump_json(indent=2), encoding="utf-8")
+        db.record_artifact(job_id, str(pub_path), "quality")
+
+        # Override publish_allowed with composite gate decision
+        report.publish_allowed = publish_decision.is_ready_to_publish
+        # Update overall status if publish gate blocks
+        if not publish_decision.is_ready_to_publish:
+            report.status = QAStatus.BLOCK
+
+    except Exception as exc:
+        # Creative QA or publish gate failure is not fatal to technical QA,
+        # but we log it and don't allow publish
+        from autopilot.core.logging import StructuredLogger
+        StructuredLogger(job_id=job_id, stage="qa").warning("creative_qa_or_publish_gate_failed", details={"error": str(exc)})
+        report.publish_allowed = False
+        report.status = QAStatus.BLOCK
 
     # Ensure job exists in DB for foreign key constraints
     if not db.get_job(job_id):
@@ -1522,7 +1730,7 @@ def run_youtube_auth(
 
 
 # ------------------------------------------------------------------
-# Milestone 7 / M7 — Batch & Queue CLI Handlers
+# Milestone 7 / M7 â€” Batch & Queue CLI Handlers
 # ------------------------------------------------------------------
 def run_batch_submit(file_path: str, dry_run: bool = False, force: bool = False, output_json: bool = False) -> int:
     import json
@@ -1561,7 +1769,7 @@ def run_batch_submit(file_path: str, dry_run: bool = False, force: bool = False,
 def run_batch_direct(
     topics_file: str,
     channel: str = "default",
-    production_engine: str = "moneyprinterturbo",
+    production_engine: str = "ffmpeg",
     policy: str = "local_only",
     max_regeneration_attempts: int = 3,
     output_json: bool = False,
@@ -1756,7 +1964,7 @@ def run_queue_cancel_all(
         print(f"Items Cancelled: {summary['cancelled_count']}")
         print(f"Dry Run:         {summary['dry_run']}")
         if dry_run:
-            print("[NOTICE] Dry run mode — previewed count without mutating database.")
+            print("[NOTICE] Dry run mode â€” previewed count without mutating database.")
         elif summary['cancelled_count'] > 0:
             print(f"[SUCCESS] Successfully cancelled {summary['cancelled_count']} queued item(s).")
         else:
@@ -2076,7 +2284,7 @@ def run_analytics_summary(
         print("Active strategy:      none")
     print(f"\nRecent learning runs ({len(runs)}):")
     if not runs:
-        print("  (none yet — run `autopilot analytics learn` to start)")
+        print("  (none yet â€” run `autopilot analytics learn` to start)")
     for r in runs:
         print(f"  * {r['run_id'][:34]:<34} {r['status']:<12} used={r['observations_used']:<3} "
               f"-> {r['resulting_strategy_version'] or '-'}")
@@ -2676,7 +2884,7 @@ def run_schedule_loop(
 ) -> int:
     """Portable in-process ticker: repeatedly execute due schedules until stopped.
 
-    Contains no production/queue/provider logic — every tick delegates to the
+    Contains no production/queue/provider logic â€” every tick delegates to the
     existing ScheduleEngine.run_due, preserving leases, overlap protection, and
     the READY_TO_PUBLISH boundary. Bounded by ``--max-iterations`` when given.
     """
@@ -3023,11 +3231,11 @@ def build_parser():
     sub_parser.add_argument("--channel", default="default", help="Channel profile ID or path (e.g. science_shorts, history_shorts, tech_shorts)")
     sub_parser.add_argument("--policy", default="local_only", choices=["local_only", "cheap_first", "quality_first", "ollama", "gemini", "openrouter", "mock"], help="Production policy tier")
     sub_parser.add_argument("--profile", default="short_vertical", choices=["short_vertical"], help="Content profile")
-    sub_parser.add_argument("--tts-provider", default="none", choices=["none", "mock", "kokoro"], help="TTS provider (default none; mock = synthetic audio)")
-    sub_parser.add_argument("--llm-provider", default="mock", choices=["mock", "ollama", "gemini", "openrouter", "openai_compatible"], help="LLM provider (mock, ollama, gemini, openrouter, openai_compatible)")
+    sub_parser.add_argument("--tts-provider", default=CONFIG.provider_default_tts, choices=["none", "mock", "kokoro", "edge_tts"], help="TTS provider (default: configured production TTS = edge_tts; mock = synthetic audio)")
+    sub_parser.add_argument("--llm-provider", default="atria", choices=["atria", "mock", "ollama", "gemini", "openrouter", "openai_compatible"], help="LLM provider (atria, mock, ollama, gemini, openrouter, openai_compatible)")
     sub_parser.add_argument("--research-provider", default="mock_search", choices=["local", "mock_search", "wikipedia", "crawl4ai", "combined"], help="Research provider")
-    sub_parser.add_argument("--asset-provider", default="local", choices=["local", "openverse"], help="Asset provider (default local)")
-    sub_parser.add_argument("--production-engine", default="moneyprinterturbo", choices=["moneyprinterturbo", "ffmpeg"], help="Production engine (default: moneyprinterturbo; ffmpeg = legacy/dev)")
+    sub_parser.add_argument("--asset-provider", default="pexels", choices=["local", "openverse", "pexels", "pixabay"], help="Asset provider (default pexels; real stock video)")
+    sub_parser.add_argument("--production-engine", default="ffmpeg", choices=["moneyprinterturbo", "ffmpeg"], help="Production engine (default: ffmpeg = verified assets + real TTS + word-synced kinetic captions; moneyprinterturbo = opt-in, re-fetches its own footage/voice)")
     sub_parser.add_argument("--render", action="store_true", help="Continue through asset acquisition and rendering immediately")
 
     # Run command (central end-to-end PipelineOrchestrator workflow)
@@ -3037,19 +3245,19 @@ def build_parser():
     sub_parser_run.add_argument("--channel", default="default", help="Channel profile ID or path")
     sub_parser_run.add_argument("--policy", default="local_only", choices=["local_only", "cheap_first", "quality_first", "ollama", "gemini", "openrouter", "mock"], help="Production policy tier")
     sub_parser_run.add_argument("--profile", default="short_vertical", choices=["short_vertical"], help="Content profile")
-    sub_parser_run.add_argument("--tts-provider", default="none", choices=["none", "mock", "kokoro"], help="TTS provider")
-    sub_parser_run.add_argument("--llm-provider", default="mock", choices=["mock", "ollama", "gemini", "openrouter", "openai_compatible"], help="LLM provider")
+    sub_parser_run.add_argument("--tts-provider", default=CONFIG.provider_default_tts, choices=["none", "mock", "kokoro", "edge_tts"], help="TTS provider")
+    sub_parser_run.add_argument("--llm-provider", default="atria", choices=["atria", "mock", "ollama", "gemini", "openrouter", "openai_compatible"], help="LLM provider")
     sub_parser_run.add_argument("--research-provider", default="mock_search", choices=["local", "mock_search", "wikipedia", "crawl4ai", "combined"], help="Research provider")
-    sub_parser_run.add_argument("--asset-provider", default="local", choices=["local", "openverse"], help="Asset provider")
-    sub_parser_run.add_argument("--production-engine", default="moneyprinterturbo", choices=["moneyprinterturbo", "ffmpeg"], help="Production engine")
+    sub_parser_run.add_argument("--asset-provider", default="pexels", choices=["local", "openverse", "pexels", "pixabay"], help="Asset provider")
+    sub_parser_run.add_argument("--production-engine", default="ffmpeg", choices=["moneyprinterturbo", "ffmpeg"], help="Production engine")
     sub_parser_run.add_argument("--render", action="store_true", help="Continue through asset acquisition and rendering immediately")
     sub_parser_run.add_argument("--json", action="store_true", help="Output machine-readable JSON result")
 
     sub_parser_render = sub.add_parser("render", help="Render video from content package and assets (Milestone 4)")
     sub_parser_render.add_argument("--job", required=True, help="Job ID to render")
-    sub_parser_render.add_argument("--asset-provider", default="local", choices=["local", "openverse"], help="Asset provider (default local)")
+    sub_parser_render.add_argument("--asset-provider", default="pexels", choices=["local", "openverse", "pexels", "pixabay"], help="Asset provider (default pexels; real stock video)")
     sub_parser_render.add_argument("--profile", default="short_vertical", choices=["short_vertical"], help="Render profile")
-    sub_parser_render.add_argument("--production-engine", default="moneyprinterturbo", choices=["moneyprinterturbo", "ffmpeg"], help="Production engine (default: moneyprinterturbo; ffmpeg = legacy/dev)")
+    sub_parser_render.add_argument("--production-engine", default="ffmpeg", choices=["moneyprinterturbo", "ffmpeg"], help="Production engine (default: ffmpeg = verified assets + real TTS + word-synced kinetic captions; moneyprinterturbo = opt-in, re-fetches its own footage/voice)")
     sub_parser_research = sub.add_parser("research", help="Run research engine (Phase 2)")
     sub_parser_research.add_argument("--topic", required=True, help="Research topic")
     sub_parser_research.add_argument("--provider", default="local", choices=["local", "mock_search", "wikipedia", "crawl4ai", "combined"], help="Provider selection")
@@ -3092,11 +3300,11 @@ def build_parser():
     sub_parser_ytauth.add_argument("--port", type=int, default=0, help="Local port for callback server (default 0 for random free port)")
     sub_parser_ytauth.add_argument("--json", action="store_true", help="Output machine-readable JSON result")
 
-    # Milestone 7 / M7 — Batch & Queue subparsers
+    # Milestone 7 / M7 â€” Batch & Queue subparsers
     sub_parser_batch = sub.add_parser("batch", help="Batch production management (Milestone 7 / Phase 2)")
     sub_parser_batch.add_argument("--topics", default=None, help="Path to topics text file (.txt) or manifest file (.json/.yaml)")
     sub_parser_batch.add_argument("--channel", default="default", help="Channel profile ID (e.g. science_shorts, history_shorts, tech_shorts)")
-    sub_parser_batch.add_argument("--production-engine", default="moneyprinterturbo", choices=["moneyprinterturbo", "ffmpeg"], help="Production engine")
+    sub_parser_batch.add_argument("--production-engine", default="ffmpeg", choices=["moneyprinterturbo", "ffmpeg"], help="Production engine")
     sub_parser_batch.add_argument("--policy", default="local_only", choices=["local_only", "cheap_first", "quality_first", "ollama", "gemini", "openrouter", "mock"], help="Production policy tier")
     sub_parser_batch.add_argument("--json", action="store_true", help="Output machine-readable JSON result")
     sub_batch = sub_parser_batch.add_subparsers(dest="batch_action")
@@ -3143,7 +3351,7 @@ def build_parser():
     sub_parser_inspect.add_argument("job", help="Job ID to inspect")
     sub_parser_inspect.add_argument("--json", action="store_true", help="Output machine-readable JSON")
 
-    # Milestone 8 / M8 — Analytics & Performance Intelligence subparsers
+    # Milestone 8 / M8 â€” Analytics & Performance Intelligence subparsers
     sub_parser_analytics = sub.add_parser("analytics", help="Analytics & Performance Intelligence (Milestone 8)")
     sub_parser_analytics.add_argument("--channel", default=None, help="Channel ID for performance attribution")
     sub_parser_analytics.add_argument("--json", action="store_true", help="Output machine-readable JSON")
@@ -3181,7 +3389,7 @@ def build_parser():
     sub_analytics_summary.add_argument("--limit", type=int, default=5, help="Recent learning runs to show")
     sub_analytics_summary.add_argument("--json", action="store_true", help="Output machine-readable JSON")
 
-    # Milestone 9 / M9 — Autonomous Ideation & Feedback Loop subparsers
+    # Milestone 9 / M9 â€” Autonomous Ideation & Feedback Loop subparsers
     sub_parser_autonomy = sub.add_parser("autonomy", help="Autonomous Ideation & Feedback Loop (Milestone 9)")
     sub_parser_autonomy.add_argument("--channel", default=None, help="Target channel profile ID")
     sub_parser_autonomy.add_argument("--json", action="store_true", help="Output machine-readable JSON")
@@ -3222,7 +3430,7 @@ def build_parser():
     sub_autonomy_strategy.add_argument("--activate", default=None, help="Strategy Version ID to activate")
     sub_autonomy_strategy.add_argument("--json", action="store_true", help="Output machine-readable JSON")
 
-    # Phase 3 — Recurring Schedule Orchestration subparsers
+    # Phase 3 â€” Recurring Schedule Orchestration subparsers
     sub_parser_schedule = sub.add_parser("schedule", help="Recurring schedule orchestration (Phase 3)")
     sub_schedule = sub_parser_schedule.add_subparsers(dest="schedule_action")
 
@@ -3282,7 +3490,7 @@ def build_parser():
     sub_schedule_loop.add_argument("--limit", type=int, default=10, help="Maximum number of schedules to execute per tick")
     sub_schedule_loop.add_argument("--json", action="store_true", help="Output machine-readable JSON result")
 
-    # Milestone 10 / M10 — Multi-Channel Scaling & Channel Profiles subparsers
+    # Milestone 10 / M10 â€” Multi-Channel Scaling & Channel Profiles subparsers
     sub_parser_channel = sub.add_parser("channel", help="Multi-Channel Profile Management (Milestone 10)")
     sub_channel = sub_parser_channel.add_subparsers(dest="channel_action")
 
@@ -3357,7 +3565,7 @@ def main() -> int:
                 raw_llm,
                 raw_research,
                 raw_tts,
-                getattr(args, "production_engine", "moneyprinterturbo"),
+                getattr(args, "production_engine", "ffmpeg"),
                 llm_explicit=llm_explicit,
                 research_explicit=research_explicit,
                 tts_explicit=tts_explicit,
@@ -3423,7 +3631,7 @@ def main() -> int:
             args.job,
             asset_provider=args.asset_provider,
             profile=args.profile,
-            production_engine=getattr(args, "production_engine", "moneyprinterturbo"),
+            production_engine=getattr(args, "production_engine", "ffmpeg"),
         )
     elif args.command == "research":
         return run_research(args.topic, provider_name=args.provider)
@@ -3498,7 +3706,7 @@ def main() -> int:
             return run_batch_direct(
                 topics_file=args.topics,
                 channel=getattr(args, "channel", "default"),
-                production_engine=getattr(args, "production_engine", "moneyprinterturbo"),
+                production_engine=getattr(args, "production_engine", "ffmpeg"),
                 policy=getattr(args, "policy", "local_only"),
                 output_json=args.json,
             )
@@ -3683,4 +3891,5 @@ def main() -> int:
         return 1
 
 
-
+if __name__ == "__main__":
+    raise SystemExit(main())

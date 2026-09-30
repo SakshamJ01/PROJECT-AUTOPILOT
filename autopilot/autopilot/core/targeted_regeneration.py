@@ -153,6 +153,50 @@ class TargetedRegenerationController:
         self._advance_lineage_and_invalidate(updated, reason=f"Adjusted crop and safe zone for {scene_id}")
         return updated
 
+    def regenerate_script(
+        self,
+        timeline: MaterializedTimeline,
+        new_script_document: Any,
+    ) -> MaterializedTimeline:
+        """SCRIPT defect route: regenerate the script and invalidate ALL dependents.
+
+        A script change invalidates dependent voice, assets, render plan, and
+        QA — the whole production is re-derived from the new script.
+        """
+        updated = copy.deepcopy(timeline)
+        # Attach the new script and clear all derived per-scene artifacts so
+        # nothing stale can be reused.
+        try:
+            setattr(updated, "script_document", new_script_document)
+        except Exception:
+            pass
+        for scene in updated.scenes:
+            # Invalidate derived voice/caption/asset materialization.
+            if scene.narration:
+                scene.narration.word_timestamps = []
+            scene.caption_plan = None
+            scene.selected_assets = []
+        self._advance_lineage_and_invalidate(updated, reason="Script regenerated; all dependents invalidated")
+        return updated
+
+    def route_defect(self, regeneration_target: str) -> List[str]:
+        """Map a defect's regeneration target to the ordered stages to re-run.
+
+        Ensures a defect only re-runs its own dependency chain — never the
+        entire pipeline for every defect.
+        """
+        routing = {
+            "VISUAL_ASSET": ["ASSETS", "RENDER", "QA"],
+            "CROP_FRAMING": ["RENDER", "QA"],
+            "CAPTION_LAYOUT": ["CAPTIONS", "RENDER", "QA"],
+            "VOICE_AUDIO": ["VOICE", "CAPTIONS", "RENDER", "QA"],
+            "AUDIO_MIX": ["AUDIO_MIX", "RENDER", "QA"],
+            "SCRIPT": ["SCRIPT", "VOICE", "ASSETS", "CAPTIONS", "RENDER", "QA"],
+            "FULL_TIMELINE": ["VOICE", "ASSETS", "CAPTIONS", "RENDER", "QA"],
+            "NONE": [],
+        }
+        return routing.get(str(regeneration_target), [])
+
     def recompile_render_plan(
         self,
         timeline: MaterializedTimeline,

@@ -7,16 +7,20 @@ from autopilot.providers.mock_tts import MockTTSProvider
 from autopilot.providers.kokoro_tts_provider import KokoroTTSProvider
 
 
-def get_tts_provider(name: str = "mock") -> Optional[TTSProvider]:
+def get_tts_provider(name: str = "edge_tts") -> Optional[TTSProvider]:
     """Factory helper to retrieve configured TTS provider.
+
+    Production default is Edge TTS (real neural TTS). Mock is only ever
+    returned when explicitly requested by name.
 
     Options:
       - 'none' / 'off' / 'disabled' -> None (no-TTS behavior)
-      - 'mock' / 'mock_tts' -> MockTTSProvider
+      - 'edge_tts' (default) -> EdgeTTSProvider
+      - 'mock' / 'mock_tts' -> MockTTSProvider (explicit opt-in only)
       - 'kokoro' -> KokoroTTSProvider
       - 'windows_sapi' / 'sapi' -> WindowsSAPITTSProvider
     """
-    name_clean = (name or "none").lower().strip()
+    name_clean = (name or "edge_tts").lower().strip()
     if name_clean in ("none", "off", "disabled"):
         return None
     elif name_clean in ("mock", "mock_tts"):

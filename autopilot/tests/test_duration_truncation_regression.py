@@ -307,16 +307,21 @@ class TestUndersizedScriptRejection(unittest.TestCase):
         self.assertTrue(35.0 >= min_dur)
 
     def test_llm_prompts_target_32_to_38_seconds(self):
-        """Verify LLM prompt construction enforces 6-8 scenes and 32-38s narration."""
+        """Verify LLM prompt construction enforces 7-8 scenes and 32-38s narration.
+
+        Scene length is bounded at 8-10 words so the creative QA pacing gate
+        (4.5s per scene at the measured ~2.2 words/sec) can pass.
+        """
         from autopilot.providers.openai_llm_provider import _build_prompts_and_evidence
 
         sys_prompt, user_prompt, _, _ = _build_prompts_and_evidence(
             topic="Test Topic",
             target_duration=35.0,
         )
-        self.assertIn("6 to 8 useful scenes", sys_prompt)
+        self.assertIn("7 to 8 useful scenes", sys_prompt)
         self.assertIn("32-38 seconds", sys_prompt)
-        self.assertIn("85 to 110 spoken words", sys_prompt)
+        self.assertIn("70 to 85 spoken words", sys_prompt)
+        self.assertIn("8 to 10 words per scene", sys_prompt)
         self.assertIn("32-38 seconds", user_prompt)
         self.assertIn("intentional conclusion", user_prompt.lower())
 

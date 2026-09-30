@@ -41,6 +41,19 @@ class PublishReadinessDecision(BaseModel):
     summary: Optional[str] = None
 
 
+def _iter_score_items(report: CreativeQAReport) -> List[Any]:
+    """Return every CreativeQAScoreItem dimension carried by the report."""
+    items: List[Any] = []
+    fields = report.model_fields.keys() if hasattr(report, "model_fields") else report.__fields__.keys()
+    for field in fields:
+        value = getattr(report, field, None)
+        if value is None or isinstance(value, (str, int, float, bool, list, dict)):
+            continue
+        if getattr(value, "status", None) in (CreativeQAStatus.PASS, CreativeQAStatus.WARN, CreativeQAStatus.BLOCK):
+            items.append(value)
+    return items
+
+
 class PublishReadinessGate:
     """Evaluates full composite quality, rights, and technical gates for publication approval."""
 
@@ -75,7 +88,18 @@ class PublishReadinessGate:
         creative_passed = True
         if creative_report.overall_status == CreativeQAStatus.BLOCK:
             creative_passed = False
-            blocking_reasons.append(f"Creative QA hard block (Overall score: {creative_report.overall_score:.1f} < 50)")
+            # Name the dimensions that actually blocked, instead of quoting a
+            # misleading overall-score threshold.
+            blocked = [
+                getattr(item, "name", "?")
+                for item in _iter_score_items(creative_report)
+                if getattr(item, "status", None) == CreativeQAStatus.BLOCK
+            ]
+            detail = ", ".join(blocked) if blocked else "no dimension-level detail available"
+            blocking_reasons.append(
+                f"Creative QA hard block (overall {creative_report.overall_score:.1f}); "
+                f"blocking dimensions: {detail}"
+            )
 
         # 4. Defect Classifier Evaluation
         for d in defects:

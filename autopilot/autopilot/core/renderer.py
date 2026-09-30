@@ -1,5 +1,13 @@
 """M4 Renderer — FFmpeg-based deterministic video renderer.
 Produces 9:16 vertical MP4 from ContentPackage.
+
+P0 rewrite:
+  - TRUE kinetic captions: builds 2-4 word phrases (max 5) from the
+    authoritative Faster-Whisper word timestamps via KineticTypographyEngine
+    and burns an animated .ass subtitle track (entrance timing, emphasis,
+    safe zones). No more "one static text block per scene".
+  - AudioSceneGraph is wired into production: the final mix contains
+    VOICE + BGM + SFX with real sidechain ducking and fades.
 """
 from __future__ import annotations
 import math
@@ -8,7 +16,7 @@ import subprocess
 import hashlib
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Any, Dict
 from autopilot.core.contracts import RenderPlan, RenderOutput, RenderQualityResult, RenderScene
 from autopilot.core.config import CONFIG
 from autopilot.core.ffmpeg_runner import FFmpegRunner
@@ -18,6 +26,17 @@ def _escape_filter_path(p: Path) -> str:
     """Escape path for use in FFmpeg filter parameters without quotes."""
     s = str(p.resolve()).replace("\\", "/")
     return s.replace(":", "\\\\:")
+
+
+def _escape_ass_path(p: Path) -> str:
+    """Escape a .ass subtitle path for the libass `ass` filter.
+
+    libass requires exactly ONE backslash before the drive colon when the
+    path is single-quoted; the double-backslash form used by drawtext is
+    rejected by the ass filter.
+    """
+    s = str(p.resolve()).replace("\\", "/")
+    return s.replace(":", "\\:")
 
 
 def get_system_font() -> Optional[str]:
@@ -32,7 +51,7 @@ def get_system_font() -> Optional[str]:
 
 
 def format_caption(text: str, max_chars: int = 24) -> str:
-    """Format narration text into max 2 readable caption lines for short-form 9:16 portrait video."""
+    """Legacy helper retained for compatibility; kinetic captions supersede it."""
     words = text.split()
     lines = []
     curr: list[str] = []
@@ -55,6 +74,167 @@ def format_caption(text: str, max_chars: int = 24) -> str:
     return "\n".join(lines[:2])
 
 
+def _build_kinetic_ass_for_scene(
+    scene: Dict[str, Any],
+    out_ass: Path,
+    engine: "KineticTypographyEngine",
+) -> bool:
+    """Generate an animated .ass subtitle for ONE scene from word timestamps.
+
+    Returns True on success. Phrases are 2-4 words (max 5) and inherit the
+    authoritative Whisper timing so captions sync to speech.
+    """
+    words_raw = scene.get("word_timestamps") or []
+    narration = scene.get("narration") or ""
+    if not words_raw:
+        return False
+    # Adapt both WordTimestamp shapes (start_sec/end_sec and start/end).
+    words: List[Any] = []
+    for w in words_raw:
+        try:
+            words.append(
+                type(
+                    "W",
+                    (),
+                    {
+                        "word": str(w.get("word", "")),
+                        "start": float(w.get("start", w.get("start_sec", 0.0))),
+                        "end": float(w.get("end", w.get("end_sec", 0.0))),
+                        "confidence": w.get("probability", w.get("confidence", None)),
+                    },
+                )()
+            )
+        except Exception:
+            continue
+    if not words:
+        return False
+
+    from autopilot.core.timeline import CaptionPosition, PlatformSafeZone
+
+    emphasis = scene.get("emphasis_words") or []
+    phrases = engine.segment_words_into_phrases(
+        words, min_words=2, max_words=4, emphasis_keywords=emphasis
+    )
+    if not phrases:
+        return False
+
+    cap_pos_raw = (scene.get("caption_plan") or {}).get("position") or "LOWER"
+    try:
+        cap_pos = CaptionPosition(str(cap_pos_raw).upper())
+    except Exception:
+        cap_pos = CaptionPosition.LOWER
+    platform_raw = (scene.get("caption_plan") or {}).get("platform_safe_zone") or "YOUTUBE_SHORTS"
+    try:
+        platform = PlatformSafeZone(str(platform_raw).upper())
+    except Exception:
+        platform = PlatformSafeZone.YOUTUBE_SHORTS
+
+    ass = engine.generate_ass_script(
+        phrases=phrases,
+        style_preset=(scene.get("caption_plan") or {}).get("style_preset", "hormozi_yellow_pop"),
+        position=cap_pos,
+        platform=platform,
+        saliency_y=(scene.get("crop_framing") or {}).get("saliency_y", 0.5),
+        animated=True,
+    )
+    out_ass.parent.mkdir(parents=True, exist_ok=True)
+    out_ass.write_text(ass, encoding="utf-8")
+    return True
+
+
+def _apply_audio_scene_graph_mix(
+    scenes: List[Dict[str, Any]],
+    segments: List[str],
+    out_video: Path,
+    work_dir: Path,
+) -> bool:
+    """Build the VOICE + BGM + SFX master via AudioSceneGraph and mux it in.
+
+    Deterministic SFX placement is derived from narrative word timestamps
+    (scene boundaries), never fired randomly because a scene exists.
+    Returns True when a mastered mix replaced the segment audio.
+    """
+    from autopilot.core.audio_scene_graph import AudioSceneGraphEngine
+    from autopilot.core.timeline import MaterializedScene, MaterializedTiming, MaterializedAudioPlan
+
+    if not segments:
+        return False
+
+    # Determine per-scene timing and voice paths from the scene dicts.
+    mat_scenes: List[MaterializedScene] = []
+    cursor = 0.0
+    for idx, s in enumerate(scenes):
+        dur = float(s.get("duration_sec", 5.0) or 5.0)
+        voice = s.get("audio_path")
+        sfx_events = []
+        # Deterministic SFX: hook on the FIRST scene, transition on scene
+        # boundaries, payoff on the LAST scene. Placement uses the narrative
+        # word timestamps (start of the first phrase) when available.
+        is_first = idx == 0
+        is_last = idx == len(scenes) - 1
+        words = s.get("word_timestamps") or []
+        first_word_t = 0.0
+        if words:
+            try:
+                first_word_t = float(words[0].get("start", words[0].get("start_sec", 0.0)))
+            except Exception:
+                first_word_t = 0.0
+        if is_first:
+            sfx_events.append({"cue": "whoosh_fast", "time_sec": max(0.0, first_word_t), "volume_db": -6.0})
+        elif is_last:
+            sfx_events.append({"cue": "bass_drop", "time_sec": max(0.0, first_word_t), "volume_db": -6.0})
+        else:
+            sfx_events.append({"cue": "digital_pop", "time_sec": max(0.0, first_word_t), "volume_db": -9.0})
+
+        timing = MaterializedTiming(
+            start_time_sec=round(cursor, 3),
+            end_time_sec=round(cursor + dur, 3),
+            duration_sec=round(dur, 3),
+        )
+        audio_plan = MaterializedAudioPlan(
+            voice_path=voice,
+            sfx_events=sfx_events,
+        )
+        mat_scenes.append(
+            MaterializedScene(
+                scene_id=str(s.get("scene_id", f"scene_{idx}")),
+                timing=timing,
+                audio_plan=audio_plan,
+            )
+        )
+        cursor += dur
+
+    total_dur = cursor
+    engine = AudioSceneGraphEngine()
+    graph = engine.build_scene_graph(mat_scenes, total_duration_sec=total_dur)
+
+    master_path = work_dir / "master_mix.wav"
+    mix = engine.mix_and_master(graph, master_path)
+    if not mix.success or not Path(mix.master_audio_path).exists():
+        return False
+
+    # Mux the mastered audio over the concatenated video.
+    mux_path = work_dir / "muxed.mp4"
+    mux_cmd = [
+        "ffmpeg", "-y",
+        "-i", str(out_video),
+        "-i", str(mix.master_audio_path),
+        "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
+        "-map", "0:v:0", "-map", "1:a:0",
+        "-shortest",
+        str(mux_path),
+    ]
+    r = subprocess.run(mux_cmd, capture_output=True, text=True, timeout=180)
+    if r.returncode != 0 or not mux_path.exists():
+        return False
+    # Promote the muxed file to the final output.
+    import shutil
+
+    shutil.move(str(mux_path), str(out_video))
+    return True
+
+
 class FFmpegRenderer:
     def __init__(self, profile: str = "vertical_short"):
         self.profile = profile
@@ -63,7 +243,12 @@ class FFmpegRenderer:
 
     def render(self, plan: RenderPlan, out_path: str) -> RenderOutput:
         out = Path(out_path)
-        out.parent.mkdir(parents=True, exist_ok=True)
+        # Only create the parent when it is an actual subdirectory; a bare
+        # filename ("out.mp4") resolves to the current directory, which needs
+        # no creation.
+        parent = out.parent
+        if str(parent) not in ("", "."):
+            parent.mkdir(parents=True, exist_ok=True)
         scenes = plan.scenes or []
         if not scenes:
             raise RuntimeError(f"Render plan '{plan.plan_id}' has no scenes.")
@@ -77,6 +262,7 @@ class FFmpegRenderer:
 
         duration = sum(s.get("duration_sec", 5) for s in scenes)
         font = get_system_font()
+        audio_mix_errors: List[str] = []
 
         # Multi-scene render: render segments with motion, badges, and kinetic captions, then concatenate
         import tempfile
@@ -119,6 +305,7 @@ class FFmpegRenderer:
                     v_base = f"[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,zoompan=z='1.05':x='if(lte(on,-1),(x+0.5),min(iw-iw/zoom,x+0.4))':y='ih/2-(ih/zoom/2)':d={frames}:s=1080x1920:fps=25,format=yuv420p"
 
             extra_filters = []
+            kinetic_ass: Optional[Path] = None
             if font:
                 # Title card / badge
                 badge = s.get("on_screen_text")
@@ -135,7 +322,22 @@ class FFmpegRenderer:
                             f"drawtext=fontfile={font}:textfile={esc_badge_path}:fontsize=36:fontcolor=yellow:box=1:boxcolor=black@0.65:boxborderw=10:x=(w-text_w)/2:y=280"
                         )
 
-                # Kinetic caption overlay
+            # P0 TRUE KINETIC CAPTIONS: segment authoritative Whisper word
+            # timestamps into 2-4 word phrases (max 5) and burn an animated
+            # .ass track. Falls back to the legacy static block ONLY when no
+            # word timestamps are available for this scene.
+            from autopilot.core.kinetic_typography import KineticTypographyEngine
+
+            kinetic_engine = KineticTypographyEngine()
+            kinetic_ass = segment_dir / f"captions_{idx}.ass"
+            has_kinetic = _build_kinetic_ass_for_scene(s, kinetic_ass, kinetic_engine)
+            if has_kinetic:
+                # The libass `ass` filter (not `subtitles`) with a quoted,
+                # single-backslash-escaped path is the reliable form on
+                # Windows / ffmpeg 9.
+                esc_ass = _escape_ass_path(kinetic_ass)
+                extra_filters.append(f"ass='{esc_ass}'")
+            elif font:
                 narration = s.get("narration") or s.get("caption_text")
                 if narration:
                     clean_narration = str(narration).replace(":", " - ").replace("'", "")
@@ -144,9 +346,7 @@ class FFmpegRenderer:
                         cap_file = segment_dir / f"caption_{idx}.txt"
                         cap_file.write_text(cap, encoding="utf-8")
                         esc_cap_path = _escape_filter_path(cap_file)
-                        
-                        # Dynamic safe-zone vertical placement driven by PlatformGeometry & saliency
-                        from autopilot.core.kinetic_typography import KineticTypographyEngine
+
                         from autopilot.core.timeline import CaptionPosition, PlatformSafeZone
 
                         cap_pos_raw = s.get("caption_plan", {}).get("position") or s.get("crop_framing", {}).get("caption_safe_zone") or "LOWER"
@@ -162,21 +362,14 @@ class FFmpegRenderer:
                             platform_enum = PlatformSafeZone.YOUTUBE_SHORTS
 
                         saliency_y = s.get("crop_framing", {}).get("saliency_y", 0.5)
-                        _, cap_y = KineticTypographyEngine().compute_caption_coordinates(
+                        _, cap_y = kinetic_engine.compute_caption_coordinates(
                             position=cap_pos_enum,
                             platform=platform_enum,
                             saliency_y=saliency_y,
                         )
 
-                        font_color = "white"
-                        style_preset = s.get("caption_plan", {}).get("style_preset", "hormozi_yellow_pop")
-                        if "yellow" in style_preset:
-                            font_color = "white"
-                        elif "neon" in style_preset:
-                            font_color = "white"
-
                         extra_filters.append(
-                            f"drawtext=fontfile={font}:textfile={esc_cap_path}:fontsize=44:fontcolor={font_color}:borderw=5:bordercolor=black:line_spacing=14:x=(w-text_w)/2:y={cap_y}"
+                            f"drawtext=fontfile={font}:textfile={esc_cap_path}:fontsize=44:fontcolor=white:borderw=5:bordercolor=black:line_spacing=14:x=(w-text_w)/2:y={cap_y}"
                         )
 
             v_filter_full = v_base
@@ -244,6 +437,19 @@ class FFmpegRenderer:
             shutil.copy2(segments[0], str(out))
         else:
             raise RuntimeError(f"No segments rendered for plan {plan.plan_id}")
+
+        # ------------------------------------------------------------------
+        # P0 AUDIO: wire AudioSceneGraph into production.
+        # Build a 3-track mix (VOICE + BGM + SFX) with real sidechain ducking
+        # from the scene voice segments, then mux over the concatenated video.
+        # ------------------------------------------------------------------
+        audio_mix_applied = False
+        try:
+            audio_mix_applied = _apply_audio_scene_graph_mix(scenes, segments, out, segment_dir)
+        except Exception as exc:
+            # Audio mix enhancement must never destroy the render; the voice
+            # track from the segments is still present. Record and continue.
+            audio_mix_errors.append(str(exc))
 
         # Post-render audio stream integrity validation
         probe_cmd = [

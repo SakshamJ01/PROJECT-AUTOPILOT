@@ -4,7 +4,7 @@ Implementations are NOT required yet; only contracts.
 """
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable, Optional
 from pydantic import BaseModel, Field
 from enum import Enum
 
@@ -73,6 +73,40 @@ class ASRProvider(Protocol):
 
     def health_check(self) -> ProviderHealth: ...
     def transcribe(self, audio_path: str, **kwargs) -> dict: ...
+
+
+class TTSProvenance(BaseModel):
+    """Truthful record of what actually synthesized a voice track (P0).
+
+    The selected provider and the ACTUAL generated provider MUST match; this
+    model is the evidence that no silent fallback (e.g. Mock TTS) occurred in
+    production.
+    """
+    actual_provider: str
+    actual_voice_id: str
+    requested_provider: str
+    requested_voice_id: str
+    prosody: dict = Field(default_factory=dict)
+    latency_sec: float = 0.0
+    audio_checksum_sha256: Optional[str] = None
+    audio_path: Optional[str] = None
+    fallback_used: bool = False
+    fallback_reason: Optional[str] = None
+    created_at: str = Field(default_factory=lambda: __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat())
+
+    def provider_is_truthful(self) -> bool:
+        """True iff the actual provider matches the requested provider."""
+        return (self.actual_provider or "").lower() == (self.requested_provider or "").lower()
+
+
+def write_tts_provenance(provenance: "TTSProvenance") -> str:
+    """Write a .provenance.json sidecar next to the audio file; returns its path."""
+    import json
+    from pathlib import Path
+    p = Path(str(provenance.audio_path or "") + ".provenance.json")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(provenance.model_dump(), indent=2), encoding="utf-8")
+    return str(p)
 
 
 @runtime_checkable

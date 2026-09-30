@@ -16,12 +16,28 @@ from autopilot.core.logging import StructuredLogger
 
 
 class FasterWhisperEngine:
-    """Production transcription engine wrapping CTranslate2-based faster-whisper."""
+    """Production transcription engine wrapping CTranslate2-based faster-whisper.
 
-    def __init__(self, model_size: str = "base", device: str = "auto", compute_type: str = "auto"):
+    P0 fail-closed: when real alignment is requested and cannot be produced,
+    this engine RAISES. It never fabricates word timestamps, because fake
+    timestamps silently corrupt kinetic captions and QA verdicts.
+    """
+
+    # Process-level model cache so repeated engine construction does not
+    # re-load (or re-download) the Whisper weights for every job.
+    _MODEL_CACHE: Dict[tuple, Any] = {}
+
+    def __init__(
+        self,
+        model_size: str = "base",
+        device: str = "cpu",
+        compute_type: str = "int8",
+        allow_fallback: bool = False,
+    ):
         self.model_size = model_size
         self.device = device
         self.compute_type = compute_type
+        self.allow_fallback = allow_fallback
         self._model = None
         self.logger = StructuredLogger(stage="transcription")
 
@@ -31,25 +47,43 @@ class FasterWhisperEngine:
 
     @property
     def engine_version(self) -> str:
-        return "v1.1.0"
+        return "v1.2.0"
 
     def is_available(self) -> bool:
         try:
-            import faster_whisper
+            import faster_whisper  # noqa: F401
             return True
         except ImportError:
             return False
 
     def _get_model(self, model_size: str):
-        if self._model is None or self.model_size != model_size:
-            from faster_whisper import WhisperModel
-            self.model_size = model_size
-            # Fall back to CPU/int8 if CUDA is not configured
-            try:
-                self._model = WhisperModel(model_size, device=self.device, compute_type=self.compute_type)
-            except Exception:
-                self._model = WhisperModel(model_size, device="cpu", compute_type="int8")
-        return self._model
+        if self._model is not None and self.model_size == model_size:
+            return self._model
+
+        from faster_whisper import WhisperModel
+
+        self.model_size = model_size
+
+        cache_key = (model_size, self.device, self.compute_type)
+        cached = self._MODEL_CACHE.get(cache_key)
+        if cached is not None:
+            self._model = cached
+            return cached
+
+        # Prefer the requested device, then fall back to the verified
+        # CPU/int8 path which always works in production.
+        try:
+            model = WhisperModel(model_size, device=self.device, compute_type=self.compute_type)
+        except Exception as exc:
+            self.logger.warning(
+                "whisper_device_fallback_cpu_int8",
+                details={"requested_device": self.device, "error": str(exc)},
+            )
+            model = WhisperModel(model_size, device="cpu", compute_type="int8")
+
+        self._MODEL_CACHE[cache_key] = model
+        self._model = model
+        return model
 
     def transcribe(self, request: TranscriptionRequest) -> TranscriptionResult:
         audio_path = Path(request.audio_path)
@@ -57,7 +91,7 @@ class FasterWhisperEngine:
             raise ValueError(f"Audio file does not exist or is empty: {request.audio_path}")
 
         if not self.is_available():
-            return self._fallback_transcription(request)
+            return self._handle_unavailable(request, "faster-whisper package is not installed")
 
         try:
             model = self._get_model(request.model_size or self.model_size)
@@ -112,8 +146,24 @@ class FasterWhisperEngine:
                 engine_version=self.engine_version,
             )
         except Exception as exc:
-            self.logger.warning("faster_whisper_error_fallback", details={"error": str(exc)})
+            self.logger.error(
+                "faster_whisper_failed",
+                str(exc),
+                details={"audio": str(audio_path)},
+            )
+            return self._handle_unavailable(request, f"real ASR failed: {exc}")
+
+    def _handle_unavailable(self, request: TranscriptionRequest, reason: str) -> TranscriptionResult:
+        """P0 fail-closed: never fabricate word timestamps in production."""
+        if self.allow_fallback:
+            self.logger.warning("faster_whisper_fallback_engaged", details={"reason": reason})
             return self._fallback_transcription(request)
+        raise RuntimeError(
+            "Real word-level alignment is required but unavailable "
+            f"({reason}). Refusing to fabricate word timestamps. "
+            "Install faster-whisper, or explicitly construct "
+            "FasterWhisperEngine(allow_fallback=True) for non-production use."
+        )
 
     def _fallback_transcription(self, request: TranscriptionRequest) -> TranscriptionResult:
         """Deterministic fallback when faster-whisper package is not installed in the environment."""

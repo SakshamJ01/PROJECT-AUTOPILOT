@@ -81,6 +81,8 @@ def sample_materialized_timeline(tmp_path: Path) -> MaterializedTimeline:
                 asset_path=str(img1),
                 media_type="image",
                 duration_sec=2.4,
+                # Recorded by the real CLIP visual-semantic gate in production.
+                provenance={"semantic_score": 0.86, "provider": "pexels", "media_kind": "image"},
                 crop_framing=CropFraming(saliency_x=0.5, saliency_y=0.45, caption_safe_zone=CaptionPosition.LOWER),
             )
         ],
@@ -104,6 +106,7 @@ def sample_materialized_timeline(tmp_path: Path) -> MaterializedTimeline:
                 asset_path=str(img2),
                 media_type="image",
                 duration_sec=2.6,
+                provenance={"semantic_score": 0.84, "provider": "pexels", "media_kind": "image"},
                 crop_framing=CropFraming(saliency_x=0.5, saliency_y=0.55, caption_safe_zone=CaptionPosition.TOP),
             )
         ],

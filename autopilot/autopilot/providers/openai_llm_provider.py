@@ -17,6 +17,14 @@ from autopilot.providers.contracts import LLMProvider, ProviderHealth, Capabilit
 from autopilot.core.contracts import ScriptDocument, ScriptScene
 from autopilot.core.duration import estimate_duration
 
+# Pacing contract, shared by the generation prompt and the script-time guard.
+# TTS_WORDS_PER_SECOND was measured from real Edge TTS output: 73 spoken words
+# rendered as 32.88s of narration (2.22 words/sec). Creative QA blocks any scene
+# whose speech exceeds 4.5s, which caps a scene at ~10 words; 12 is allowed as
+# slack for a scene that lands right on the boundary.
+TTS_WORDS_PER_SECOND = 2.2
+MAX_SCENE_SPEECH_WORDS = 12
+
 
 def redact_api_key(text: str) -> str:
     """Redact bearer tokens and secret keys from strings."""
@@ -162,7 +170,7 @@ def _build_prompts_and_evidence(
         '    {\n'
         '      "scene_id": "scene-01",\n'
         '      "order": 1,\n'
-        '      "narration": "Punchy hook or intro narration (10-18 words)",\n'
+        '      "narration": "Punchy hook or intro narration (8-10 words)",\n'
         '      "visual_intent": "Concrete physical photographic description",\n'
         '      "asset_query": "2-3 word photographic search query",\n'
         '      "on_screen_text": "2-4 WORD UPPERCASE BADGE",\n'
@@ -174,7 +182,7 @@ def _build_prompts_and_evidence(
         '    {\n'
         '      "scene_id": "scene-02",\n'
         '      "order": 2,\n'
-        '      "narration": "First substantive fact or point (10-18 words)",\n'
+        '      "narration": "First substantive fact or point (8-10 words)",\n'
         '      "visual_intent": "Concrete physical photographic description",\n'
         '      "asset_query": "2-3 word photographic search query",\n'
         '      "on_screen_text": "2-4 WORD UPPERCASE BADGE",\n'
@@ -186,7 +194,7 @@ def _build_prompts_and_evidence(
         '    {\n'
         '      "scene_id": "scene-03",\n'
         '      "order": 3,\n'
-        '      "narration": "Next substantive fact or context (10-18 words)",\n'
+        '      "narration": "Next substantive fact or context (8-10 words)",\n'
         '      "visual_intent": "Concrete physical photographic description",\n'
         '      "asset_query": "2-3 word photographic search query",\n'
         '      "on_screen_text": "2-4 WORD UPPERCASE BADGE",\n'
@@ -198,7 +206,7 @@ def _build_prompts_and_evidence(
         '    {\n'
         '      "scene_id": "scene-04",\n'
         '      "order": 4,\n'
-        '      "narration": "Additional surprising fact or depth (10-18 words)",\n'
+        '      "narration": "Additional surprising fact or depth (8-10 words)",\n'
         '      "visual_intent": "Concrete physical photographic description",\n'
         '      "asset_query": "2-3 word photographic search query",\n'
         '      "on_screen_text": "2-4 WORD UPPERCASE BADGE",\n'
@@ -210,7 +218,7 @@ def _build_prompts_and_evidence(
         '    {\n'
         '      "scene_id": "scene-05",\n'
         '      "order": 5,\n'
-        '      "narration": "Key insight or climax building toward payoff (12-18 words)",\n'
+        '      "narration": "Key insight or climax building toward payoff (8-10 words)",\n'
         '      "visual_intent": "Concrete physical photographic description",\n'
         '      "asset_query": "2-3 word photographic search query",\n'
         '      "on_screen_text": "2-4 WORD UPPERCASE BADGE",\n'
@@ -222,7 +230,7 @@ def _build_prompts_and_evidence(
         '    {\n'
         '      "scene_id": "scene-06",\n'
         '      "order": 6,\n'
-        '      "narration": "Intentional conclusion or payoff connecting back to hook (12-18 words)",\n'
+        '      "narration": "Intentional conclusion or payoff connecting back to hook (8-10 words)",\n'
         '      "visual_intent": "Concrete physical photographic description",\n'
         '      "asset_query": "2-3 word photographic search query",\n'
         '      "on_screen_text": "2-4 WORD UPPERCASE BADGE",\n'
@@ -242,10 +250,10 @@ def _build_prompts_and_evidence(
         f"- Hook Style: {channel_hook_style}\n"
         f"- Visual Motif: {channel_visual_motif}\n"
         "EDITORIAL QUALITY RULES:\n"
-        "1. DURATION: Generate 6 to 8 useful scenes so total video narration targets 32-38 seconds of natural speech (approx 85 to 110 spoken words total across all scenes).\n"
+        "1. DURATION: Generate 7 to 8 useful scenes so total video narration targets 32-38 seconds of natural speech (approx 70 to 85 spoken words total across all scenes).\n"
         "2. STRUCTURE: Script MUST follow the progression: HOOK (Scene 1) -> EXPLANATION / FACTS (Middle Scenes) -> INTENTIONAL PAYOFF / ENDING (Final Scene).\n"
         "3. INTENTIONAL ENDING: The final scene MUST be an intentional conclusion (payoff returning to hook, strongest final fact, seamless loop back, or payoff statement). NEVER end abruptly or use generic filler like 'thanks for watching'.\n"
-        "4. SCENE NARRATION: Punchy, conversational, spoken English. 13 to 18 words per scene. One clear idea per scene.\n"
+        "4. SCENE NARRATION: Punchy, conversational, spoken English. 8 to 10 words per scene. One clear idea per scene. HARD LIMIT: never exceed 12 words in a scene (measured Edge TTS rate is ~2.2 words/sec; 12 words = ~5.5s, pacing gate blocks >4.5s). If you write 13+ words, the script WILL BE REJECTED. Count your words.\n"
         "5. VISUAL INTENT: Describe concrete, tangible physical subjects suitable for photography.\n"
         "6. ASSET QUERY: 2-3 words naming concrete physical photographic subjects.\n"
         "7. ON_SCREEN_TEXT: 2-4 uppercase words for visual title card.\n"
@@ -262,7 +270,7 @@ def _build_prompts_and_evidence(
 
     user_prompt_lines = [
         f"Write a {int(target_duration)}-second vertical video script about: {topic}",
-        f"Target spoken narration duration is 32-38 seconds (approx 85-110 total spoken words across 6 to 8 useful scenes).",
+        f"Target spoken narration duration is 32-38 seconds (approx 70-85 total spoken words across 7 to 8 useful scenes).",
         "Scene 1 MUST be a strong hook. The final scene MUST be an intentional conclusion/payoff.",
     ]
     if cardinality:
@@ -272,7 +280,7 @@ def _build_prompts_and_evidence(
             f"- You MUST create a hook scene plus at least {cardinality} separate fact scenes (one distinct scene per item/fact).\n"
             f"- Dedicate exactly one clear scene/fact unit to each item (e.g. scene-01: Hook, scene-02: Fact 1, scene-03: Fact 2, scene-04: Fact 3, followed by optional CTA).\n"
             f"- DO NOT combine multiple items into a single scene.\n"
-            f"- Keep narration punchy (10-18 words per scene) and make each scene independently visualizable."
+            f"- Keep narration punchy (8-10 words per scene, never over 12) and make each scene independently visualizable."
         )
     if has_research:
         user_prompt_lines.append("\nSUPPLIED RESEARCH EVIDENCE:")
@@ -367,6 +375,25 @@ def _parse_json_to_script_document(
     total_duration = sum(s.estimated_duration_seconds for s in scenes)
     if total_duration <= 0:
         total_duration = estimate_duration(" ".join(s.narration for s in scenes))
+
+    # Fail fast on pacing violations. The creative QA gate blocks any scene whose
+    # speech runs past 4.5s (measured Edge TTS rate is ~2.2 words/sec, so ~11
+    # words is the ceiling). Catching an over-long scene here costs one LLM call;
+    # catching it after assets, voice, and render costs a full production run.
+    over_long = [
+        (s.scene_id, len(s.narration.split()))
+        for s in scenes
+        if s.narration and len(s.narration.split()) > MAX_SCENE_SPEECH_WORDS
+    ]
+    if over_long:
+        detail = ", ".join(f"{sid}={count}w" for sid, count in over_long)
+        raise ValueError(
+            f"LLM script for topic '{topic}' violates the pacing budget: {detail}. "
+            f"Each spoken scene must be {MAX_SCENE_SPEECH_WORDS} words or fewer "
+            f"({int(MAX_SCENE_SPEECH_WORDS / TTS_WORDS_PER_SECOND * 10) / 10}s of speech at the "
+            f"measured {TTS_WORDS_PER_SECOND} words/sec). Rewrite the script with more, "
+            f"shorter scenes instead of lengthening individual ones."
+        )
 
     # Validate returned source_references against supplied evidence
     returned_refs = parsed.get("source_references") or []
@@ -637,6 +664,7 @@ class OpenAICompatibleLLMProvider(LLMProvider):
         # When targeting Ollama endpoint, route via Ollama-specific transport behind the provider abstraction
         # to properly support think=false, streaming chunk accumulation, and token bounds without OpenAI-layer thinking bottlenecks
         is_ollama = "11434" in self.base_url or "ollama" in self.base_url.lower()
+        think_enabled = False
         if is_ollama:
             from autopilot.core.config import CONFIG
             think_enabled = (
@@ -1343,6 +1371,77 @@ class OpenRouterLLMProvider(OpenAICompatibleLLMProvider):
         return super().generate_script(*args, **kwargs)
 
 
+class AtriaLLMProvider(OpenAICompatibleLLMProvider):
+    """Atria ASI LLM provider for Atria Dawn model.
+    Endpoint: https://api.atria-asi.ai/v1
+    """
+    provider_name = "atria"
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model_name: Optional[str] = None,
+        base_url: Optional[str] = None,
+        timeout: float = 120.0,
+        **kwargs,
+    ) -> None:
+        from autopilot.core.config import CONFIG
+
+        resolved_api_key = (
+            api_key
+            or os.getenv("ATRIA_API_KEY")
+            or os.getenv("AUTOPILOT_ATRIA_API_KEY")
+            or getattr(CONFIG, "atria_api_key", "")
+        )
+
+        resolved_base = (
+            base_url
+            or os.getenv("ATRIA_BASE_URL")
+            or os.getenv("ATRIA_ENDPOINT")
+            or getattr(CONFIG, "atria_endpoint", "https://api.atria-asi.ai/v1")
+        ).rstrip("/")
+
+        resolved_model = (
+            model_name
+            or os.getenv("ATRIA_MODEL")
+            or os.getenv("AUTOPILOT_ATRIA_MODEL")
+            or getattr(CONFIG, "atria_model", "Atria-Dawn-Preview")
+        )
+
+        # Atria may be slower; disable streaming and use longer timeout
+        super().__init__(
+            base_url=resolved_base,
+            api_key=resolved_api_key,
+            model_name=resolved_model,
+            timeout=timeout,
+            stream=False,
+            **kwargs,
+        )
+
+    def _resolve_model_name(self, explicit_model: Optional[str] = None) -> Optional[str]:
+        if explicit_model:
+            return explicit_model
+        from autopilot.core.config import CONFIG
+        return (
+            os.getenv("ATRIA_MODEL")
+            or os.getenv("AUTOPILOT_ATRIA_MODEL")
+            or getattr(CONFIG, "atria_model", "Atria-Dawn-Preview")
+        )
+
+    def generate_script(self, *args, **kwargs) -> ScriptDocument:
+        if not self.api_key:
+            raise RuntimeError(
+                "Atria API key not configured. Set ATRIA_API_KEY or AUTOPILOT_ATRIA_API_KEY, "
+                "or configure atria_api_key in autopilot config."
+            )
+        if not self.model_name:
+            raise RuntimeError(
+                "Atria LLM provider requires an explicit ATRIA_MODEL to be configured "
+                "(default: 'Atria-Dawn-Preview')."
+            )
+        return super().generate_script(*args, **kwargs)
+
+
 def get_llm_provider(
     provider_name: str = "ollama",
     model_name: Optional[str] = None,
@@ -1361,10 +1460,12 @@ def get_llm_provider(
         return GeminiLLMProvider(api_key=api_key, model_name=model_name, base_url=base_url, **kwargs)
     elif key in ("openrouter", "open_router"):
         return OpenRouterLLMProvider(api_key=api_key, model_name=model_name, base_url=base_url, **kwargs)
+    elif key in ("atria", "atria-dawn", "atria_dawn", "atria_asi"):
+        return AtriaLLMProvider(api_key=api_key, model_name=model_name, base_url=base_url, **kwargs)
     elif key in ("openai_compatible", "openai", "openai-compatible", "openai_compat"):
         return OpenAICompatibleLLMProvider(api_key=api_key, model_name=model_name, base_url=base_url, **kwargs)
     else:
         raise ValueError(
             f"Unknown LLM provider: '{provider_name}'. "
-            f"Supported providers: 'ollama', 'gemini', 'openrouter', 'openai_compatible', 'mock'."
+            f"Supported providers: 'ollama', 'gemini', 'openrouter', 'atria', 'openai_compatible', 'mock'."
         )

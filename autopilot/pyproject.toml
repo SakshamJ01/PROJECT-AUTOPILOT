@@ -12,6 +12,10 @@ dependencies = [
     "pydantic>=2.0",
     "google-auth>=2.0.0",
     "google-auth-oauthlib>=1.0.0",
+    "python-dotenv>=1.2.3",
+    "edge-tts>=7.2.8",
+    "pillow>=12.3.0",
+    "open-clip-torch>=3.3.0",
 ]
 
 [project.optional-dependencies]
@@ -32,4 +36,9 @@ testpaths = ["tests"]
 addopts = "-v --tb=short -m 'not live'"
 markers = [
     "live: opt-in live network integration tests (excluded by default)",
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=2.3.1",
 ]

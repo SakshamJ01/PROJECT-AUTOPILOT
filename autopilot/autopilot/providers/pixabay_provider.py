@@ -5,12 +5,13 @@ Safe, commercial-ready, rights-verified, and resilient to network/API key failur
 from __future__ import annotations
 import json
 import os
+import time
 import urllib.request
 import urllib.parse
 import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from autopilot.core.config import CONFIG
 from autopilot.providers.asset_contracts import AssetProvider
@@ -22,6 +23,13 @@ from autopilot.core.contracts import (
 from autopilot.core.asset_cache import safe_download_media, AssetCache, sanitize_filename
 from autopilot.core.asset_normalizer import normalize_asset
 from autopilot.core.rights_gate import evaluate_rights_gate
+
+# Module-level rate limiting, circuit breaker, and caching.
+_LAST_PIXABAY_REQUEST_TIME: float = 0.0
+_PIXABAY_CIRCUIT_BROKEN_UNTIL: float = 0.0
+_MIN_PIXABAY_REQUEST_INTERVAL: float = 0.5
+_PIXABAY_SEARCH_CACHE: Dict[str, Tuple[float, List[AssetCandidate]]] = {}
+_PIXABAY_SEARCH_CACHE_TTL: float = 3600.0
 
 
 class PixabayAssetProvider(AssetProvider):
@@ -37,7 +45,11 @@ class PixabayAssetProvider(AssetProvider):
     cost_meta = CostUsageMetadata(estimated_usd=0.0, provider_type="pixabay_api")
 
     def __init__(self, api_key: Optional[str] = None, timeout: Optional[float] = None):
-        self.api_key = api_key or os.environ.get("PIXABAY_API_KEY") or CONFIG.pixabay_api_key or ""
+        # An explicitly supplied key (including "") is authoritative. Only
+        # fall back to environment/config when the caller passes nothing.
+        if api_key is None:
+            api_key = os.environ.get("PIXABAY_API_KEY") or CONFIG.pixabay_api_key or ""
+        self.api_key = api_key
         self.timeout = timeout or CONFIG.pixabay_timeout or 10.0
         self.base_url = "https://pixabay.com/api/videos/"
         self.cache = AssetCache()
@@ -78,13 +90,24 @@ class PixabayAssetProvider(AssetProvider):
             )
 
     def search(self, request: dict, max_results: int = 5, **kwargs) -> List[AssetCandidate]:
-        """Search Pixabay Videos for media matching query."""
+        """Search Pixabay Videos with retries, backoff, rate limiting, and caching."""
+        global _LAST_PIXABAY_REQUEST_TIME, _PIXABAY_CIRCUIT_BROKEN_UNTIL, _PIXABAY_SEARCH_CACHE
+
         if not self.api_key:
             return []
 
         query = request.get("query") or request.get("b_roll_search_query") or request.get("visual_concept") or ""
         if not query.strip():
             return []
+
+        if time.time() < _PIXABAY_CIRCUIT_BROKEN_UNTIL:
+            return []
+
+        cache_key = f"{query.strip().lower()}:{max_results}"
+        if cache_key in _PIXABAY_SEARCH_CACHE:
+            cached_ts, cached_cands = _PIXABAY_SEARCH_CACHE[cache_key]
+            if time.time() - cached_ts < _PIXABAY_SEARCH_CACHE_TTL:
+                return [c.model_copy(deep=True) for c in cached_cands]
 
         params = {
             "key": self.api_key,
@@ -94,13 +117,35 @@ class PixabayAssetProvider(AssetProvider):
         }
         url = f"{self.base_url}?{urllib.parse.urlencode(params)}"
 
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Autopilot/4.0"})
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                if resp.status != 200:
+        payload = None
+        for attempt in range(3):
+            elapsed = time.time() - _LAST_PIXABAY_REQUEST_TIME
+            if elapsed < _MIN_PIXABAY_REQUEST_INTERVAL:
+                time.sleep(_MIN_PIXABAY_REQUEST_INTERVAL - elapsed)
+            try:
+                _LAST_PIXABAY_REQUEST_TIME = time.time()
+                req = urllib.request.Request(url, headers={"User-Agent": "Autopilot/4.0"})
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    if resp.status == 200:
+                        payload = json.loads(resp.read().decode("utf-8"))
+                        break
                     return []
-                payload = json.loads(resp.read().decode("utf-8"))
-        except Exception:
+            except urllib.error.HTTPError as exc:
+                if exc.code == 429:
+                    # Break the circuit for a real cooldown window, otherwise
+                    # every subsequent request hammers a rate-limited API.
+                    _PIXABAY_CIRCUIT_BROKEN_UNTIL = time.time() + 60.0
+                    return []
+                if exc.code >= 500 and attempt < 2:
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                return []
+            except Exception:
+                if attempt < 2:
+                    time.sleep(1.0 * (attempt + 1))
+                    continue
+                return []
+        if payload is None:
             return []
 
         candidates: List[AssetCandidate] = []
@@ -162,45 +207,58 @@ class PixabayAssetProvider(AssetProvider):
             )
             candidates.append(cand)
 
+        if candidates:
+            _PIXABAY_SEARCH_CACHE[cache_key] = (time.time(), [c.model_copy(deep=True) for c in candidates])
         return candidates[:max_results]
 
     def select(self, candidates: List[AssetCandidate], criteria: Optional[dict] = None) -> AssetSelection:
-        """Select best candidate after verifying rights."""
+        """Select the best-scoring rights-cleared candidate (never score=1.0)."""
+        from autopilot.core.asset_scoring import score_candidates
+
         if not candidates:
             return AssetSelection(
-                candidate_id="none",
-                selected=False,
+                selection_id="sel-empty",
+                selected_candidates=[],
+                selected_id=None,
+                status="rejected",
                 reason="No candidate assets provided for selection",
             )
-        for c in candidates:
+        scored = score_candidates(candidates, criteria or {})
+        for c in scored:
             gate = evaluate_rights_gate(c.license)
-            if gate.allowed:
+            if gate.allowed and c.score > 0.0:
                 return AssetSelection(
-                    candidate_id=c.candidate_id,
-                    selected=True,
-                    reason=f"Selected verified Pixabay asset: {c.candidate_id}",
-                    score=1.0,
-                    license=c.license,
-                    provenance=c.provenance,
+                    selection_id=f"sel-{c.candidate_id}",
+                    selected_candidates=scored,
+                    selected_id=c.candidate_id,
+                    status="selected",
+                    reason=f"Selected Pixabay asset {c.candidate_id} (score {c.score:.3f}, license {c.license.license_name})",
+                    score=c.score,
+                    semantic_score=c.provenance.semantic_score,
                 )
         return AssetSelection(
-            candidate_id="none",
-            selected=False,
-            reason="All Pixabay candidates failed rights gate",
+            selection_id="sel-none-cleared",
+            selected_candidates=scored,
+            selected_id=None,
+            status="rejected",
+            reason="All Pixabay candidates failed rights gate or visual-semantic gate",
         )
 
     def download(self, candidate: AssetCandidate, out_path: str, **kwargs) -> str:
-        """Download asset to disk safely using AssetCache."""
+        """Download asset to disk safely using the safe media downloader + cache."""
         dest = Path(out_path)
         dest.parent.mkdir(parents=True, exist_ok=True)
-        cached = self.cache.get_or_download(
-            candidate.url,
-            target_path=dest,
+        if not candidate.source_url:
+            raise ValueError(f"Pixabay candidate {candidate.candidate_id} has no download URL")
+        return safe_download_media(
+            candidate.source_url,
+            dest,
             timeout=self.timeout,
+            max_bytes=CONFIG.asset_max_download_bytes,
         )
-        return str(cached)
 
     def normalize(self, artifact_path: str, out_path: str, **kwargs) -> str:
         """Normalize downloaded asset to target 9:16 format."""
+        # normalize_asset returns the output path as a string.
         norm_result = normalize_asset(artifact_path, out_path, **kwargs)
-        return str(norm_result.get("normalized_path") or out_path)
+        return str(norm_result or out_path)

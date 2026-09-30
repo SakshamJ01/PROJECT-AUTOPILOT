@@ -27,6 +27,7 @@ class RegenerationTargetType(str, Enum):
     CAPTION_LAYOUT = "CAPTION_LAYOUT"
     VOICE_AUDIO = "VOICE_AUDIO"
     AUDIO_MIX = "AUDIO_MIX"
+    SCRIPT = "SCRIPT"
     FULL_TIMELINE = "FULL_TIMELINE"
     NONE = "NONE"
 
@@ -162,7 +163,52 @@ class DefectClassifierEngine:
                 )
             )
 
-        # 8. Technical QA Ingestion (if provided)
+        # 8. Black Frames (P0)
+        if creative_report.black_frames.status in (CreativeQAStatus.BLOCK, CreativeQAStatus.WARN):
+            defects.append(
+                DefectItem(
+                    code="BLACK_FRAMES_DETECTED",
+                    severity=DefectSeverity.BLOCK if creative_report.black_frames.status == CreativeQAStatus.BLOCK else DefectSeverity.WARN,
+                    confidence=0.95,
+                    metric="Black Frames",
+                    evidence=creative_report.black_frames.evidence,
+                    recommended_action="Re-render; replace black source segments with valid footage.",
+                    regeneration_target=RegenerationTargetType.VISUAL_ASSET,
+                )
+            )
+
+        # 9. Freeze / Static Sections (P0)
+        if creative_report.freeze_sections.status in (CreativeQAStatus.BLOCK, CreativeQAStatus.WARN):
+            defects.append(
+                DefectItem(
+                    code="FROZEN_SECTION_DETECTED",
+                    severity=DefectSeverity.BLOCK if creative_report.freeze_sections.status == CreativeQAStatus.BLOCK else DefectSeverity.WARN,
+                    confidence=0.93,
+                    metric="Freeze/Static Sections",
+                    evidence=creative_report.freeze_sections.evidence,
+                    recommended_action="Re-render with motion or additional B-roll coverage for static sections.",
+                    regeneration_target=RegenerationTargetType.VISUAL_ASSET,
+                )
+            )
+
+        # 10. Listicle Structure Defect (P0) — routes back to SCRIPT
+        if creative_report.listicle_structure.status in (CreativeQAStatus.BLOCK, CreativeQAStatus.WARN):
+            defects.append(
+                DefectItem(
+                    code="LISTICLE_STRUCTURE_DEFECT",
+                    severity=DefectSeverity.BLOCK if creative_report.listicle_structure.status == CreativeQAStatus.BLOCK else DefectSeverity.WARN,
+                    confidence=0.97,
+                    metric="Listicle Structure",
+                    evidence=creative_report.listicle_structure.evidence,
+                    recommended_action=(
+                        "Regenerate the SCRIPT with N substantively distinct items; this "
+                        "invalidates dependent voice, asset, and render artifacts."
+                    ),
+                    regeneration_target=RegenerationTargetType.SCRIPT,
+                )
+            )
+
+        # 11. Technical QA Ingestion (if provided)
         if technical_report:
             t_findings = getattr(technical_report, "findings", []) or []
             for f in t_findings:

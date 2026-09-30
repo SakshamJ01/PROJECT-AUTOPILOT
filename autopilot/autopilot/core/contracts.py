@@ -58,6 +58,10 @@ class ScriptScene(BaseModel):
     estimated_duration_seconds: float = Field(default=5.0, gt=0, description="Must be positive")
     transition_hint: Optional[str] = None
     scene_type: str = Field(default="talking_head", description="Extensible: talking_head|broll|image|text|screen|generated_visual|montage")
+    # P0: authoritative per-scene word timestamps from the truth-alignment pass
+    word_timestamps: List[WordTimestamp] = Field(default_factory=list)
+    # P0: asset type discipline — VIDEO | IMAGE | INFOGRAPHIC | ANIMATION
+    preferred_asset_type: str = "VIDEO"
 
     @field_validator("narration")
     @classmethod
@@ -263,11 +267,14 @@ class AssetProvenance(BaseModel):
     job_id: Optional[str] = None
     content_id: Optional[str] = None
     scene_id: Optional[str] = None
+    # P0: real visual-semantic evidence (CLIP on downloaded pixels)
+    semantic_score: Optional[float] = None
+    visual_semantic: Optional[Dict[str, Any]] = None
 
 
 class AssetCandidate(BaseModel):
     candidate_id: str = Field(..., min_length=1)
-    asset_type: str = "image"  # image | video | audio
+    asset_type: str = "image"  # video | image | infographic | animation | audio
     source_url: Optional[str] = None
     source_id: Optional[str] = None
     title: Optional[str] = None
@@ -279,6 +286,9 @@ class AssetCandidate(BaseModel):
     path_local: Optional[str] = None
     is_duplicate: bool = False
     tags: List[str] = Field(default_factory=list)
+    # P0: explainable scoring + selection evidence
+    score_breakdown: Dict[str, Any] = Field(default_factory=dict)
+    selection_reason: Optional[str] = None
 
 
 class AssetSelection(BaseModel):
@@ -289,6 +299,9 @@ class AssetSelection(BaseModel):
     selected_id: Optional[str] = None
     status: str = "pending"  # selected | rejected | pending
     reason: Optional[str] = None
+    # P0: the actual score that drove selection (was silently dropped before)
+    score: float = 0.0
+    semantic_score: Optional[float] = None
 
 
 class AssetArtifact(BaseModel):
@@ -306,6 +319,9 @@ class AssetArtifact(BaseModel):
     license: AssetLicense = Field(default_factory=AssetLicense)
     validated: bool = False
     validation_result: Optional[str] = None  # PASS / WARN / BLOCK
+    # P0: explicit selection evidence
+    selection_reason: Optional[str] = None
+    semantic_score: Optional[float] = None
 
 
 class AssetValidationResult(BaseModel):
@@ -472,6 +488,18 @@ from autopilot.core.timeline import (
 )
 
 
+# NOTE on ordering: the timeline import above also imports a `WordTimestamp`
+# (fields start/end). With `from __future__ import annotations` the canonical
+# contracts.WordTimestamp below must be the FINAL binding in this module so
+# that ScriptScene.word_timestamps and consumers such as FasterWhisperEngine
+# (which build start_sec/end_sec) resolve to this definition.
+class WordTimestamp(BaseModel):
+    word: str
+    start_sec: float
+    end_sec: float
+    probability: float = 1.0
+
+
 class RenderScene(BaseModel):
     scene_id: str
     asset_path: Optional[str] = None
@@ -502,7 +530,7 @@ class RenderOutput(BaseModel):
     render_timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     render_version: str = "v1.0.0"
     profile: str = "vertical_short"
-    production_engine: str = "moneyprinterturbo"
+    production_engine: str = "ffmpeg"
     engine_version: str = "v1.0.0"
 
 class RenderMetadata(BaseModel):
@@ -546,8 +574,8 @@ class ProductionRequest(BaseModel):
     output_path: Optional[str] = None
     video_ratio: Optional[str] = "9:16"
     target_resolution: str = "1080x1920"
-    engine_name: str = "moneyprinterturbo"
-    production_engine: str = "moneyprinterturbo"
+    engine_name: str = "ffmpeg"
+    production_engine: str = "ffmpeg"
     timeout_seconds: int = 600
     bgm_volume: float = 0.2
     options: Dict[str, Any] = Field(default_factory=dict)
@@ -582,7 +610,7 @@ class ProductionResult(BaseModel):
     audio_present: bool = True
     captions_path: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
-    engine_name: str = "moneyprinterturbo"
+    engine_name: str = "ffmpeg"
     engine_version: str = "v1.0.0"
     provenance: Optional[Union[ProvenanceRecord, Dict[str, Any]]] = None
     artifact_paths: List[str] = Field(default_factory=list)
@@ -604,13 +632,6 @@ class ProductionEngineProtocol(Protocol):
         ...
 
 
-class WordTimestamp(BaseModel):
-    word: str
-    start_sec: float
-    end_sec: float
-    probability: float = 1.0
-
-
 class SegmentTimestamp(BaseModel):
     segment_id: int
     text: str
@@ -626,6 +647,8 @@ class TranscriptionRequest(BaseModel):
     generate_ass: bool = True
     generate_srt: bool = True
     model_size: str = "base"
+    word_timestamps: bool = True
+    vad_filter: bool = False
 
 
 class TranscriptionResult(BaseModel):
@@ -1854,7 +1877,7 @@ class ProductionPolicyTier(str, Enum):
 class ProductionPolicy(BaseModel):
     """Production policy layer regulating engine, voice, research depth, and quality gates."""
     policy_tier: ProductionPolicyTier = ProductionPolicyTier.LOCAL_ONLY
-    production_engine: str = "moneyprinterturbo"
+    production_engine: str = "ffmpeg"
     voice_provider: str = "kokoro"
     research_depth: str = "standard"  # standard, deep, fast
     transcription_model: str = "base"

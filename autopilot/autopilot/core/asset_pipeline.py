@@ -25,6 +25,12 @@ from autopilot.providers.pixabay_provider import PixabayAssetProvider
 from autopilot.core.infographics_generator import InfographicsAssetProvider
 from autopilot.core.asset_scoring import score_candidates
 from autopilot.core.rights_gate import evaluate_rights_gate
+from autopilot.core.visual_semantic import (
+    visual_semantic_verify,
+    visual_semantic_enabled,
+    visual_semantic_min_similarity,
+    VisualSemanticUnavailable,
+)
 from autopilot.core.asset_cache import safe_download_media, compute_file_sha256, compute_image_phash, AssetCache
 from autopilot.core.asset_normalizer import normalize_asset
 from autopilot.core.media_inspection import inspect_media
@@ -84,6 +90,50 @@ def get_asset_provider(name: str = "local") -> AssetProvider:
         return LocalAssetProvider()
     else:
         raise ValueError(f"Unknown asset provider: '{name}'. Available: 'local', 'openverse', 'pexels', 'pixabay', 'infographics'")
+
+
+def build_asset_cascade(primary_name: str = "pexels", allow_fallback: bool = True) -> List[AssetProvider]:
+    """Build the P0 video-first provider cascade.
+
+    Spec order: Pexels VIDEO -> Pixabay VIDEO -> Openverse VIDEO -> Openverse IMAGE
+    -> Autopilot infographic/diagram -> local safety net.
+
+    Providers are only included when their live health check passes (correct
+    endpoint, valid key, reachable). A provider present in source code but not
+    healthy is NOT considered integrated.
+    """
+    if not allow_fallback:
+        return []
+    order = [p.strip().lower() for p in str(getattr(CONFIG, "asset_provider_cascade", "pexels,pixabay,openverse,infographics")).split(",") if p.strip()]
+    # Ensure primary is first
+    primary = (primary_name or "pexels").strip().lower()
+    if primary in order:
+        order.remove(primary)
+    order.insert(0, primary)
+
+    cascade: List[AssetProvider] = []
+    seen: set[str] = set()
+    for name in order:
+        if name in seen or name == "local":
+            continue
+        seen.add(name)
+        try:
+            prov = get_asset_provider(name)
+            healthy = prov.health_check().healthy
+            if healthy:
+                cascade.append(prov)
+        except Exception:
+            continue
+    # Safety nets (always last): generated infographic, then local fixtures.
+    try:
+        cascade.append(InfographicsAssetProvider())
+    except Exception:
+        pass
+    try:
+        cascade.append(LocalAssetProvider())
+    except Exception:
+        pass
+    return cascade
 
 
 def derive_visual_subject_query(scene: ScriptScene, topic: str) -> str:
@@ -188,34 +238,7 @@ def process_scene_assets(
     db_mgr.create_job(job_id=job_id, topic=script.topic)
 
     primary_provider = get_asset_provider(provider_name)
-    fallback_providers: List[AssetProvider] = []
-    if allow_fallback:
-        if provider_name == "openverse":
-            try:
-                from autopilot.providers.pexels_provider import PexelsAssetProvider
-                p = PexelsAssetProvider()
-                if p.health_check().healthy:
-                    fallback_providers.append(p)
-            except Exception:
-                pass
-            try:
-                from autopilot.providers.pixabay_provider import PixabayAssetProvider
-                px = PixabayAssetProvider()
-                if px.health_check().healthy:
-                    fallback_providers.append(px)
-            except Exception:
-                pass
-            fallback_providers.append(InfographicsAssetProvider())
-            fallback_providers.append(LocalAssetProvider())
-        elif provider_name in ("pexels", "pixabay"):
-            fallback_providers.append(OpenverseAssetProvider())
-            fallback_providers.append(InfographicsAssetProvider())
-            fallback_providers.append(LocalAssetProvider())
-        elif provider_name == "local":
-            fallback_providers.append(InfographicsAssetProvider())
-        else:
-            fallback_providers.append(InfographicsAssetProvider())
-            fallback_providers.append(LocalAssetProvider())
+    fallback_providers: List[AssetProvider] = build_asset_cascade(provider_name, allow_fallback)
 
     report = AssetQualityReport(job_id=job_id)
     artifacts: List[AssetArtifact] = []
@@ -355,6 +378,11 @@ def process_scene_assets(
                 # 5. Safe Download & Cache
                 is_video = (selected_candidate.asset_type == "video") or (selected_candidate.source_url and str(selected_candidate.source_url).endswith((".mp4", ".mov", ".mkv", ".webm")))
                 file_ext = ".mp4" if is_video else ".png"
+                # Record the media type we actually downloaded, not whatever the
+                # provider claimed: a video mislabeled as an image later reads as
+                # a "static image" defect to creative QA and misrepresents the
+                # asset in the render plan.
+                detected_asset_type = "video" if is_video else "image"
                 source_dest = job_asset_dir / f"src_{scene.scene_id}_{selected_candidate.candidate_id}{file_ext}"
                 try:
                     downloaded_path_str = active_prov.download(selected_candidate, str(source_dest))
@@ -363,6 +391,19 @@ def process_scene_assets(
                     err_msg = f"Download failed for {selected_candidate.candidate_id} from {active_pname}: {exc}"
                     report.warnings.append(err_msg)
                     scene_errors.append(err_msg)
+                    # The candidate is dropped WITHOUT ever reaching the
+                    # pixel-level visual-semantic gate, so it stays UNVERIFIED.
+                    # Record that explicitly instead of dropping it silently.
+                    report.rejections.append({
+                        "candidate_id": selected_candidate.candidate_id,
+                        "scene_id": scene.scene_id,
+                        "reason": (
+                            "Unverified candidate dropped: download failed before the visual gate "
+                            f"could verify it ({exc})"
+                        ),
+                        "title": selected_candidate.title,
+                        "provider": str(active_pname),
+                    })
                     continue
 
                 # 6. Media Inspection
@@ -371,7 +412,68 @@ def process_scene_assets(
                     err_msg = f"Downloaded media inspection failed for scene {scene.scene_id}: {inspection.get('errors')}"
                     report.warnings.append(err_msg)
                     scene_errors.append(err_msg)
+                    # Unusable media never reaches the visual gate either.
+                    report.rejections.append({
+                        "candidate_id": selected_candidate.candidate_id,
+                        "scene_id": scene.scene_id,
+                        "reason": (
+                            "Unverified candidate dropped: media inspection failed before the "
+                            f"visual gate could verify it ({inspection.get('errors')})"
+                        ),
+                        "title": selected_candidate.title,
+                        "provider": str(active_pname),
+                    })
                     continue
+
+                # 6b. P0 VISUAL-SEMANTIC VERIFICATION ON DOWNLOADED PIXELS.
+                # Real CLIP gate against scene narration + visual_intent + asset_query.
+                # Provider-generated tags are never used as semantic evidence.
+                # HARD FAILURE is preferable to an unrelated asset.
+                visual_evidence: Optional[Dict[str, Any]] = None
+                gated_providers = ("pexels", "pixabay", "openverse")
+                if active_pname in gated_providers and visual_semantic_enabled():
+                    try:
+                        visual_evidence = visual_semantic_verify(
+                            downloaded_path,
+                            query=active_query,
+                            visual_intent=scene.visual_intent or "",
+                            narration=scene.narration or "",
+                            min_similarity=visual_semantic_min_similarity(),
+                            max_video_frames=int(getattr(CONFIG, "visual_semantic_max_video_frames", 3)),
+                        )
+                    except VisualSemanticUnavailable as vs_exc:
+                        # The authoritative semantic verifier cannot run. We must
+                        # NOT accept unverified stock as semantically relevant.
+                        err_msg = (
+                            f"Visual-semantic verifier unavailable for scene {scene.scene_id} "
+                            f"({active_pname}): {vs_exc}. Refusing to accept unverified asset."
+                        )
+                        report.errors.append(err_msg)
+                        scene_errors.append(err_msg)
+                        continue
+                    except Exception as vs_exc:
+                        err_msg = f"Visual-semantic verification error for scene {scene.scene_id}: {vs_exc}"
+                        report.warnings.append(err_msg)
+                        scene_errors.append(err_msg)
+                        continue
+
+                    if not visual_evidence.get("passed_gate"):
+                        report.rejections.append({
+                            "candidate_id": selected_candidate.candidate_id,
+                            "scene_id": scene.scene_id,
+                            "reason": (
+                                f"VISUAL GATE REJECT: {visual_evidence.get('reason')} "
+                                f"(query='{active_query}')"
+                            ),
+                            "title": selected_candidate.title,
+                            "provider": active_pname,
+                        })
+                        # Do not fall through to "better to show something";
+                        # try the next candidate/provider instead.
+                        continue
+                    # Real verification passed: record the authoritative score.
+                    selected_candidate.provenance.semantic_score = visual_evidence.get("visual_semantic_score")
+                    selected_candidate.provenance.visual_semantic = visual_evidence
 
                 source_sha256 = compute_file_sha256(downloaded_path)
                 seen_checksums.add(source_sha256)
@@ -382,7 +484,7 @@ def process_scene_assets(
                     normalized_path_str = active_prov.normalize(
                         str(downloaded_path),
                         str(normalized_dest),
-                        asset_type=selected_candidate.asset_type,
+                        asset_type=detected_asset_type,
                         target_width=CONFIG.asset_target_width,
                         target_height=CONFIG.asset_target_height,
                     )
@@ -405,7 +507,17 @@ def process_scene_assets(
                     job_id=job_id,
                     content_id=script.content_id,
                     scene_id=scene.scene_id,
+                    semantic_score=selected_candidate.provenance.semantic_score,
+                    visual_semantic=selected_candidate.provenance.visual_semantic,
                 )
+
+                asset_selection_reason = selection_reason
+                if visual_evidence and visual_evidence.get("passed_gate"):
+                    asset_selection_reason = (
+                        f"{selection_reason} | VISUAL-SEMANTIC VERIFIED "
+                        f"CLIP={visual_evidence.get('visual_semantic_score'):.3f} "
+                        f"model={visual_evidence.get('model')}"
+                    )
 
                 artifact_id = f"art-{job_id}-{scene.scene_id}"
                 artifact = AssetArtifact(
@@ -415,13 +527,13 @@ def process_scene_assets(
                     scene_id=scene.scene_id,
                     source_path=str(downloaded_path.resolve()),
                     normalized_path=str(normalized_path.resolve()),
-                    asset_type=selected_candidate.asset_type,
+                    asset_type=detected_asset_type,
                     dimensions=AssetDimensions(
                         width=CONFIG.asset_target_width,
                         height=CONFIG.asset_target_height,
                     ),
                     media_info=AssetMediaInfo(
-                        mime_type="image/png",
+                        mime_type="video/mp4" if is_video else "image/png",
                         file_size_bytes=normalized_path.stat().st_size,
                     ),
                     checksum_sha256=norm_sha256,
@@ -429,6 +541,8 @@ def process_scene_assets(
                     license=selected_candidate.license,
                     validated=True,
                     validation_result="PASS",
+                    selection_reason=asset_selection_reason,
+                    semantic_score=selected_candidate.provenance.semantic_score,
                 )
                 artifacts.append(artifact)
 

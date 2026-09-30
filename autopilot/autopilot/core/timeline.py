@@ -371,7 +371,7 @@ class RenderPlan(BaseModel):
     scenes: List[Dict[str, Any]] = Field(default_factory=list)
     audio_segments: List[Dict[str, Any]] = Field(default_factory=list)
     global_config: Dict[str, Any] = Field(default_factory=dict)
-    production_engine: str = "moneyprinterturbo"
+    production_engine: str = "ffmpeg"
     engine_version: str = "v1.0.0"
     version: str = TIMELINE_SCHEMA_VERSION
     rendered_duration_sec: Optional[float] = None

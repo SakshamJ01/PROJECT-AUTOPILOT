@@ -175,6 +175,54 @@ def test_audio_mastering_produces_44100_stereo(tmp_path):
 # 4. Faster-Whisper Truth Pass & Pronunciation QA Tests
 # ---------------------------------------------------------------------------
 
+class _DeterministicStubWhisper:
+    """Stub aligner that returns evenly spaced words for a known phrase.
+
+    These tests exercise the pronunciation/timing QA logic, not Whisper
+    itself (real Whisper is covered in test_transcription_engine.py). The
+    previous fake production fallback made them pass on silent audio by
+    inventing words; production now refuses to do that, so the alignment
+    input is injected explicitly here.
+    """
+
+    def __init__(self, words, duration_sec=2.0):
+        self._words = list(words)
+        self._duration = duration_sec
+        self.engine_name = "stub-aligner"
+        self.engine_version = "test"
+
+    def transcribe(self, request):
+        n = max(1, len(self._words))
+        step = self._duration / n
+        word_objs = [
+            CoreWordTimestamp(
+                word=w,
+                start_sec=round(i * step, 3),
+                end_sec=round((i + 1) * step, 3),
+                probability=1.0,
+            )
+            for i, w in enumerate(self._words)
+        ]
+        seg = SegmentTimestamp(
+            segment_id=1,
+            start_sec=0.0,
+            end_sec=self._duration,
+            text=" ".join(self._words),
+            words=word_objs,
+        )
+        return TranscriptionResult(
+            text=" ".join(self._words),
+            language="en",
+            duration_sec=self._duration,
+            segments=[seg],
+            words=word_objs,
+            srt_content="",
+            ass_content="",
+            engine_name=self.engine_name,
+            engine_version=self.engine_version,
+        )
+
+
 def test_audio_truth_pipeline_clean_narration(tmp_path):
     """Verify truth pass extracts authoritative timestamps for clean narration."""
     # Create test audio wav
@@ -185,10 +233,13 @@ def test_audio_truth_pipeline_clean_narration(tmp_path):
         wf.setframerate(44100)
         wf.writeframes(b"\x00\x00\x00\x00" * 88200) # 2.0s
 
-    pipeline = AudioTruthPipeline()
+    phrase = "Video narration audio voiceover"
+    pipeline = AudioTruthPipeline(
+        whisper_engine=_DeterministicStubWhisper(phrase.split(), duration_sec=2.0)
+    )
     report = pipeline.execute_truth_pass(
         audio_path=test_wav,
-        expected_text="Video narration audio voiceover",
+        expected_text=phrase,
         expected_duration_sec=2.0,
     )
 
@@ -260,7 +311,14 @@ def test_audio_truth_pipeline_detects_abnormal_pauses(tmp_path):
 
 def test_neural_voice_studio_scene_processing(tmp_path):
     """Verify NeuralVoiceStudio synthesizes, masters, and aligns a scene narration."""
-    studio = NeuralVoiceStudio()
+    studio = NeuralVoiceStudio(
+        truth_pipeline=AudioTruthPipeline(
+            whisper_engine=_DeterministicStubWhisper(
+                "NA-SA deployed A-I in twenty twenty-six for fifty million dollars".split(),
+                duration_sec=4.0,
+            )
+        )
+    )
     result = studio.process_scene_narration(
         scene_id="scene-01",
         raw_text="NASA deployed AI in 2026 for $50M.",
@@ -323,7 +381,14 @@ def test_neural_voice_studio_materialized_timeline_integration(tmp_path):
     )
 
     # 3. Process timeline through Neural Voice Studio
-    studio = NeuralVoiceStudio()
+    studio = NeuralVoiceStudio(
+        truth_pipeline=AudioTruthPipeline(
+            whisper_engine=_DeterministicStubWhisper(
+                "NA-SA explored Mars in twenty twenty-six".split(),
+                duration_sec=4.0,
+            )
+        )
+    )
     binding = ChannelVoiceBinding(
         channel_id="chan-01",
         default_voice_id="en-US-ChristopherNeural",

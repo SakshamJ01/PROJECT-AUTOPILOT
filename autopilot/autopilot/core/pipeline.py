@@ -40,7 +40,7 @@ from autopilot.core.qa_engine import QAEngine, export_qa_artifacts
 from autopilot.core.publisher import PublishingEngine
 from autopilot.providers.production.factory import get_production_engine
 from autopilot.providers.transcription.faster_whisper_engine import FasterWhisperEngine
-from autopilot.core.contracts import ProductionRequest, TranscriptionRequest
+from autopilot.core.contracts import ProductionRequest, TranscriptionRequest, WordTimestamp
 
 
 class PipelineError(Exception):
@@ -473,6 +473,21 @@ class PipelineOrchestrator:
                             measured = scene_res.duration_sec
                             total_duration += measured
                             voice_artifacts.append(str(Path(final_path).resolve()))
+
+                            # P0: attach the REAL per-scene word timestamps from
+                            # the Faster-Whisper truth pass so kinetic captions are
+                            # grounded in measured speech, not estimates.
+                            authoritative = getattr(scene_res.qa_report, "authoritative_words", None) or []
+                            if authoritative:
+                                scene.word_timestamps = [
+                                    WordTimestamp(
+                                        word=w.word,
+                                        start_sec=float(w.start_sec),
+                                        end_sec=float(w.end_sec),
+                                        probability=float(w.probability),
+                                    )
+                                    for w in authoritative
+                                ]
                             self.db.record_voice_artifact(
                                 job_id=job_id,
                                 content_id=job_id,
@@ -486,26 +501,34 @@ class PipelineOrchestrator:
                 pkg_path.write_text(package.model_dump_json(indent=2), encoding="utf-8")
 
 
-                # Run transcription alignment if voice segments exist and asr_provider is enabled
+                # Reference subtitles are generated from the FIRST voice segment
+                # (per-scene captions are built later from each scene's own
+                # authoritative word timestamps). This stage must NOT be
+                # silently skipped: real ASR is mandatory.
                 if voice_artifacts:
                     try:
-                        asr_provider = getattr(self.config, "provider_default_asr", "local_stub")
-                        if asr_provider != "local_stub":
-                            whisper_engine = FasterWhisperEngine(model_size=self.config.whisper_model_size)
-                            combined_voice = voice_artifacts[0]
-                            trans_res = whisper_engine.transcribe(
-                                TranscriptionRequest(audio_path=combined_voice, language="en", word_timestamps=True)
-                            )
-                            srt_file = art_dir / "voice" / "subtitles.srt"
-                            ass_file = art_dir / "voice" / "subtitles.ass"
-                            if trans_res.srt_content:
-                                srt_file.write_text(trans_res.srt_content, encoding="utf-8")
-                                self.db.record_artifact(job_id, str(srt_file), "subtitles")
-                            if trans_res.ass_content:
-                                ass_file.write_text(trans_res.ass_content, encoding="utf-8")
-                                self.db.record_artifact(job_id, str(ass_file), "subtitles_ass")
+                        whisper_engine = FasterWhisperEngine(model_size=self.config.whisper_model_size)
+                        combined_voice = voice_artifacts[0]
+                        trans_res = whisper_engine.transcribe(
+                            TranscriptionRequest(audio_path=combined_voice, language="en", word_timestamps=True)
+                        )
+                        srt_file = art_dir / "voice" / "subtitles.srt"
+                        ass_file = art_dir / "voice" / "subtitles.ass"
+                        if trans_res.srt_content:
+                            srt_file.write_text(trans_res.srt_content, encoding="utf-8")
+                            self.db.record_artifact(job_id, str(srt_file), "subtitles")
+                        if trans_res.ass_content:
+                            ass_file.write_text(trans_res.ass_content, encoding="utf-8")
+                            self.db.record_artifact(job_id, str(ass_file), "subtitles_ass")
                     except Exception as t_err:
-                        logger.warning("transcription_stage_skipped", details={"error": str(t_err)})
+                        logger.error("transcription_stage_failed", details={"error": str(t_err)})
+                        self.db.update_job_status(job_id, WorkflowState.FAILED_TTS.value)
+                        self.db.record_error(job_id, "VOICE", "asr_failed", str(t_err))
+                        raise PipelineError(
+                            f"Real word-level alignment is required but failed: {t_err}",
+                            category="RETRYABLE",
+                            stage="VOICE",
+                        )
 
                 self.db.update_job_status(job_id, WorkflowState.VOICE_READY.value)
                 logger.info("stage_completed", details={"stage": "VOICE", "provider": tts_provider, "duration_sec": total_duration})
@@ -691,6 +714,15 @@ class PipelineOrchestrator:
                 dur_info = extract_duration(voice_path)
                 if dur_info.get("valid") and dur_info.get("duration_sec", 0) > 0:
                     dur = max(float(dur_info["duration_sec"]), 2.0)
+            # P0: attach authoritative per-scene word timestamps (from the
+            # truth-alignment pass) so the renderer can emit true kinetic
+            # captions instead of one static text block per scene.
+            scene_words = None
+            if getattr(scene, "word_timestamps", None):
+                scene_words = [
+                    {"word": w.word, "start": w.start_sec, "end": w.end_sec}
+                    for w in scene.word_timestamps
+                ]
             render_scenes.append({
                 "scene_id": scene.scene_id,
                 "duration_sec": dur,
@@ -700,11 +732,32 @@ class PipelineOrchestrator:
                 "on_screen_text": scene.on_screen_text,
                 "emphasis_words": scene.emphasis_words or [],
                 "transition_hint": scene.transition_hint,
+                "word_timestamps": scene_words,
+                "caption_plan": {
+                    "position": "LOWER",
+                    "platform_safe_zone": "YOUTUBE_SHORTS",
+                    "style_preset": "hormozi_yellow_pop",
+                },
+                "asset_type": (matched_art.asset_type if matched_art else "image"),
+                "asset_provider": (matched_art.provenance.provider if matched_art else None),
+                "selection_reason": (matched_art.selection_reason if matched_art else None),
+                "semantic_score": (matched_art.semantic_score if matched_art else None),
             })
 
         plan_expected_dur = sum(s.get("duration_sec", 0) for s in render_scenes)
 
-        if final_mp4.exists() and final_mp4.stat().st_size > 0:
+        # P0 STALE ARTIFACT PROTECTION: a previously rendered final.mp4 may
+        # only be reused if it explicitly proves compatibility with the
+        # current pipeline version. Otherwise it is invalidated and re-rendered.
+        from autopilot.core.stale_artifact_protection import (
+            load_sidecar_compatibility,
+            is_artifact_compatible,
+        )
+        existing_render_compatible = is_artifact_compatible(
+            load_sidecar_compatibility(str(final_mp4))
+        )
+
+        if existing_render_compatible and final_mp4.exists() and final_mp4.stat().st_size > 0:
             probe = inspect_media(str(final_mp4))
             if probe.get("valid"):
                 actual_dur = float(probe.get("format", {}).get("duration", 0) or 0)
@@ -724,6 +777,14 @@ class PipelineOrchestrator:
                 if engine_match and ref_dur > 0 and abs(actual_dur - ref_dur) <= 1.5:
                     render_valid = True
                     render_checksum = compute_file_sha256(str(final_mp4))
+        elif final_mp4.exists():
+            logger.warning(
+                "stale_render_invalidated",
+                details={
+                    "path": str(final_mp4),
+                    "reason": "artifact predates current pipeline version; refusing to reuse",
+                },
+            )
 
         render_plan = RenderPlan(
             plan_id=f"plan-{job_id}",
@@ -765,7 +826,43 @@ class PipelineOrchestrator:
                 render_plan.raw_speech_duration_sec = plan_expected_dur
                 plan_path.write_text(render_plan.model_dump_json(indent=2), encoding="utf-8")
 
+                # P0: prove the verified assets are actually in the rendered
+                # file before any downstream QA treats them as evidence.
+                from autopilot.core.render_provenance import (
+                    summarize,
+                    verify_asset_presence,
+                    write_provenance_report,
+                )
+
+                provenance = verify_asset_presence(
+                    str(final_mp4),
+                    render_scenes,
+                    production_engine=target_production_engine,
+                )
+                write_provenance_report(provenance, str(final_mp4.parent / "render_provenance.json"))
+                logger.info("render_provenance_report", details={"summary": summarize(provenance)})
+                if provenance.applicable and not provenance.valid:
+                    self.db.record_error(
+                        job_id,
+                        "RENDER",
+                        "render_provenance_unverified",
+                        f"Engine '{target_production_engine}' did not render the planned "
+                        f"assets: missing={provenance.missing_scene_ids}",
+                    )
+                    raise PipelineError(
+                        f"Render provenance unverified: engine '{target_production_engine}' "
+                        f"did not render the planned assets (missing "
+                        f"{provenance.missing_scene_ids or 'unknown'}); asset and rights QA "
+                        "cannot be claimed for this render.",
+                        category="NON_RETRYABLE",
+                        stage="RENDER",
+                    )
+
                 self.db.record_artifact(job_id, str(final_mp4), "media", checksum_sha256=render_checksum)
+                # P0: stamp the fresh render with the current pipeline version
+                from autopilot.core.stale_artifact_protection import write_sidecar_compatibility
+
+                write_sidecar_compatibility(str(final_mp4), job_id, "render")
                 self.db.update_job_status(job_id, WorkflowState.RENDERED.value)
                 logger.info("stage_completed", details={"stage": "RENDER", "engine": target_production_engine, "path": str(final_mp4), "sha256": render_checksum[:16]})
             except Exception as exc:
