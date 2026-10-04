@@ -1,4 +1,4 @@
-﻿"""M4 Renderer â€” FFmpeg-based deterministic video renderer.
+"""M4 Renderer â€” FFmpeg-based deterministic video renderer.
 Produces 9:16 vertical MP4 from ContentPackage.
 
 P0 rewrite:
@@ -23,6 +23,8 @@ from autopilot.core.ffmpeg_runner import FFmpegRunner
 
 
 TRANSITION_DURATION_SEC = float(getattr(CONFIG, "render_transition_duration_sec", 0.35))
+# xfade requires both inputs to share a frame rate; the renderer encodes at 25.
+_XFADE_FPS = 25
 
 
 def _resolve_xfade_hint(hint: Any) -> Optional[str]:
@@ -38,6 +40,91 @@ def _resolve_xfade_hint(hint: Any) -> Optional[str]:
         return "fadeblack"
     if hint_str in ("dissolve", "slideup", "slideright", "slidedown", "slideleft", "wipe", "glitch"):
         return "fade"
+def _build_xfade_chain(
+    n_segments: int,
+    scene_durs: List[float],
+    trans_hints: List[Optional[str]],
+) -> tuple[str, str, str]:
+    """Build the silent-handle xfade filtergraph for a multi-scene render.
+
+    Returns ``(filter_complex, video_out_label, audio_out_label)``.
+
+    Design (verified against ffmpeg's xfade/acrossfade semantics):
+
+    Each non-final segment is rendered ``T`` seconds longer than its scene
+    duration. That extra tail is pure silence (``apad``) and continued video
+    motion, so it carries no narration and no burned caption drift: a scene's
+    content still starts exactly on its plan boundary.
+
+    ``xfade`` output length is ``offset + duration(second_input)``. With
+    ``offset_k = sum(scene_durs[0..k])`` and segment ``k+1`` being
+    ``d_{k+1} + T`` long, the accumulated stream is
+    ``sum(d[0..k+1]) + T`` and the next offset is exactly its length minus ``T``
+    -- the largest legal value. Total length is therefore exactly
+    ``sum(d)``: the handles are absorbed, not lost, so the narration-truncation
+    guard and the audio scene graph timeline are unaffected.
+
+    Audio is joined with ``acrossfade`` using ``c1=nofade:c2=nofade`` rather
+    than plain ``concat``. Both filters must consume the same ``T``, because the
+    burned ``.ass`` captions live inside the video and must shift together with
+    the narration; a zero-length audio join would desync them. ``nofade`` keeps
+    the incoming scene's first syllables at full level -- the default triangular
+    curves would ramp every scene's opening word in from silence.
+    """
+    parts: List[str] = []
+    for i in range(n_segments):
+        # Normalise timebase/fps/SAR so xfade's inputs are strictly comparable.
+        parts.append(
+            f"[{i}:v]settb=AVTB,setpts=PTS-STARTPTS,fps={_XFADE_FPS},setsar=1[xv{i}]"
+        )
+        parts.append(
+            f"[{i}:a]asettb=AVTB,aresample=44100,"
+            f"aformat=sample_fmts=fltp:channel_layouts=stereo[xa{i}]"
+        )
+
+    cur_v = "xv0"
+    cur_a = "xa0"
+    for k in range(1, n_segments):
+        hint = trans_hints[k - 1] if (k - 1) < len(trans_hints) else None
+        offset = sum(scene_durs[:k])
+        nxt_v = f"xv{k}"
+        nxt_a = f"xa{k}"
+        out_v = f"xvx{k}"
+        out_a = f"xax{k}"
+        if hint is None:
+            # Hard cut: plain concat of the two halves, consuming no handle.
+            parts.append(f"[{cur_v}][{nxt_v}]concat=n=2:v=1:a=0[{out_v}]")
+            parts.append(f"[{cur_a}][{nxt_a}]concat=n=2:v=0:a=1[{out_a}]")
+        else:
+            t_eff = _effective_handle(k, scene_durs)
+            parts.append(
+                f"[{cur_v}][{nxt_v}]xfade=transition={hint}:"
+                f"duration={t_eff:.3f}:offset={offset:.3f}[{out_v}]"
+            )
+            parts.append(
+                f"[{cur_a}][{nxt_a}]acrossfade=d={t_eff:.3f}:c1=nofade:c2=nofade[{out_a}]"
+            )
+        cur_v, cur_a = out_v, out_a
+
+    return ";".join(parts), cur_v, cur_a
+
+
+def _effective_handle(index: int, scene_durs: List[float]) -> float:
+    """Clamp the transition handle so it can never overrun a short scene."""
+    t = TRANSITION_DURATION_SEC
+    try:
+        prev_d = float(scene_durs[index - 1])
+        next_d = float(scene_durs[index])
+    except Exception:
+        return t
+    # Mirrors the timeline invariant: a transition may not exceed ~45% of the
+    # smaller adjacent scene, which also keeps xfade's offset strictly legal.
+    limit = 0.45 * min(prev_d, next_d)
+    if limit <= 0:
+        return t
+    return min(t, limit)
+
+
 def _escape_filter_path(p: Path) -> str:
     """Escape path for use in FFmpeg filter parameters without quotes."""
     s = str(p.resolve()).replace("\\", "/")
@@ -349,12 +436,13 @@ class FFmpegRenderer:
                     scene_voice = str(ap2)
                     break
             dur_content = float(s.get("duration_sec", 5)) if isinstance(s, dict) else float(getattr(s, "duration_sec", 5))
-            T = TRANSITION_DURATION_SEC
-            seg_dur = dur_content + (T if (use_xfade and idx < len(scenes) - 1) else 0.0)
-            # Clamp handle to avoid ffmpeg offset issues if short
-            if use_xfade and idx < len(scenes) - 1:
-                next_d = float(scenes[idx + 1].get("duration_sec", 5)) if isinstance(scenes[idx + 1], dict) else float(getattr(scenes[idx + 1], "duration_sec", 5))
-                seg_dur = max(dur_content, dur_content + min(T, 0.45 * min(dur_content, next_d)))
+            # A segment only gets a silent handle when the boundary AFTER it is
+            # a real transition. Extending across a cut would leave an unconsumed
+            # tail in the output and inflate the total duration by T per cut.
+            seg_handle = 0.0
+            if use_xfade and idx < len(scenes) - 1 and _trans_hints[idx] is not None:
+                seg_handle = _effective_handle(idx + 1, scene_durs)
+            seg_dur = dur_content + seg_handle
             frames = max(25, int(math.ceil(seg_dur * 25))) if seg_dur > 0 else 25
             is_scene_video = str(scene_image).lower().endswith((".mp4", ".mov", ".mkv", ".webm"))
             seg_cmd = ["ffmpeg", "-y"]
@@ -459,7 +547,7 @@ class FFmpegRenderer:
             else:
                 a_filter = f"[{audio_input_index}:a]aformat=sample_rates=44100:channel_layouts=stereo"
             # Pad with silence to fill handle in xfade case
-            if use_xfade and idx < len(scenes) - 1:
+            if seg_handle > 0:
                 a_filter += f",apad=whole_dur={dur_content:.3f}"
             a_filter += f"[a{idx}]"
 
@@ -491,18 +579,29 @@ class FFmpegRenderer:
             concat_inputs = []
             for seg in segments:
                 concat_inputs.extend(["-i", seg])
-            concat_filter = ""
-            for i in range(len(segments)):
-                concat_filter += f"[{i}:v][{i}:a]"
-            concat_filter += f"concat=n={len(segments)}:v=1:a=1[outv][outa]"
-            # NOTE: No -t flag here â€” each segment is already individually
+
+            if use_xfade:
+                concat_filter, outv_label, outa_label = _build_xfade_chain(
+                    n_segments=len(segments),
+                    scene_durs=scene_durs,
+                    trans_hints=_trans_hints,
+                )
+            else:
+                outv_label, outa_label = "outv", "outa"
+                concat_filter = ""
+                for i in range(len(segments)):
+                    concat_filter += f"[{i}:v][{i}:a]"
+                concat_filter += f"concat=n={len(segments)}:v=1:a=1[outv][outa]"
+
+            # NOTE: No -t flag here — each segment is already individually
             # clipped to its scene duration.  A redundant -t on the concat
             # would truncate the output because H.264 GOP alignment causes
             # each encoded segment to be slightly shorter than requested,
             # and the accumulated shortfall compounds across many scenes.
             concat_cmd = ["ffmpeg", "-y"] + concat_inputs + [
                 "-filter_complex", concat_filter,
-                "-map", "[outv]", "-map", "[outa]",
+                "-map", f"[{outv_label}]",
+                "-map", f"[{outa_label}]",
                 "-pix_fmt", "yuv420p", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
                 "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2", "-r", "25", "-threads", "2",
                 str(out),
