@@ -1,4 +1,4 @@
-"""M4 Renderer — FFmpeg-based deterministic video renderer.
+﻿"""M4 Renderer â€” FFmpeg-based deterministic video renderer.
 Produces 9:16 vertical MP4 from ContentPackage.
 
 P0 rewrite:
@@ -22,6 +22,22 @@ from autopilot.core.config import CONFIG
 from autopilot.core.ffmpeg_runner import FFmpegRunner
 
 
+TRANSITION_DURATION_SEC = float(getattr(CONFIG, "render_transition_duration_sec", 0.35))
+
+
+def _resolve_xfade_hint(hint: Any) -> Optional[str]:
+    if hint is None:
+        return None
+    try:
+        hint_str = str(hint).strip().lower()
+    except Exception:
+        return None
+    if hint_str in ("cut", "none", "", "0"):
+        return None
+    if hint_str in ("fade", "fadeblack", "xfade", "fade_in", "fadein", "fadeout", "fade-out"):
+        return "fadeblack"
+    if hint_str in ("dissolve", "slideup", "slideright", "slidedown", "slideleft", "wipe", "glitch"):
+        return "fade"
 def _escape_filter_path(p: Path) -> str:
     """Escape path for use in FFmpeg filter parameters without quotes."""
     s = str(p.resolve()).replace("\\", "/")
@@ -285,7 +301,36 @@ class FFmpegRenderer:
                     f"Missing required visual asset for scene '{s.get('scene_id', idx)}' in job '{plan.job_id}': {ap}"
                 )
 
-        duration = sum(s.get("duration_sec", 5) for s in scenes)
+        scene_durs = [float(s.get("duration_sec", 5)) for s in scenes]
+        duration = sum(scene_durs)
+        _trans_hints = []
+        for i in range(1, len(scenes)):
+            _trans_hints.append(_resolve_xfade_hint(scenes[i].get("transition_hint")) if isinstance(scenes[i], dict) else _resolve_xfade_hint(getattr(scenes[i], "transition_hint", None)))
+        # If rendering as non-dict (RenderScene objects) we should also check getattr; but plan.scenes are dicts in practice
+        # recompute robustly for objects too
+        if any(isinstance(s, RenderScene) or not isinstance(s, dict) for s in scenes):
+            scene_durs = []
+            for s in scenes:
+                try:
+                    scene_durs.append(float(s.get("duration_sec", 5)))
+                except Exception:
+                    try:
+                        scene_durs.append(float(getattr(s, "duration_sec", 5)))
+                    except Exception:
+                        scene_durs.append(5.0)
+            duration = sum(scene_durs)
+            _trans_hints = []
+            for i in range(1, len(scene_durs)):
+                src = scenes[i]
+                hint = None
+                if isinstance(src, dict):
+                    hint = src.get("transition_hint")
+                try:
+                    hint = getattr(src, "transition_hint", hint)
+                except Exception:
+                    pass
+                _trans_hints.append(_resolve_xfade_hint(hint))
+        use_xfade = any(h is not None for h in _trans_hints) and len(scenes) > 1
         font = get_system_font()
         audio_mix_errors: List[str] = []
 
@@ -303,8 +348,14 @@ class FFmpegRenderer:
                 if ap2 and Path(ap2).exists() and s2.get("scene_id") == s.get("scene_id"):
                     scene_voice = str(ap2)
                     break
-            dur = s.get("duration_sec", 5)
-            frames = max(25, int(math.ceil(dur * 25)))
+            dur_content = float(s.get("duration_sec", 5)) if isinstance(s, dict) else float(getattr(s, "duration_sec", 5))
+            T = TRANSITION_DURATION_SEC
+            seg_dur = dur_content + (T if (use_xfade and idx < len(scenes) - 1) else 0.0)
+            # Clamp handle to avoid ffmpeg offset issues if short
+            if use_xfade and idx < len(scenes) - 1:
+                next_d = float(scenes[idx + 1].get("duration_sec", 5)) if isinstance(scenes[idx + 1], dict) else float(getattr(scenes[idx + 1], "duration_sec", 5))
+                seg_dur = max(dur_content, dur_content + min(T, 0.45 * min(dur_content, next_d)))
+            frames = max(25, int(math.ceil(seg_dur * 25))) if seg_dur > 0 else 25
             is_scene_video = str(scene_image).lower().endswith((".mp4", ".mov", ".mkv", ".webm"))
             seg_cmd = ["ffmpeg", "-y"]
             if is_scene_video:
@@ -404,16 +455,20 @@ class FFmpegRenderer:
 
             # Audio filter: apply DC-blocking highpass and loudnorm on voice, format to 44.1kHz stereo for clean AAC encoding
             if scene_voice and Path(scene_voice).exists():
-                a_filter = f"[{audio_input_index}:a]highpass=f=60,loudnorm=I=-18:LRA=11:TP=-1.5,aformat=sample_rates=44100:channel_layouts=stereo[a{idx}]"
+                a_filter = f"[{audio_input_index}:a]highpass=f=60,loudnorm=I=-18:LRA=11:TP=-1.5,aformat=sample_rates=44100:channel_layouts=stereo"
             else:
-                a_filter = f"[{audio_input_index}:a]aformat=sample_rates=44100:channel_layouts=stereo[a{idx}]"
+                a_filter = f"[{audio_input_index}:a]aformat=sample_rates=44100:channel_layouts=stereo"
+            # Pad with silence to fill handle in xfade case
+            if use_xfade and idx < len(scenes) - 1:
+                a_filter += f",apad=whole_dur={dur_content:.3f}"
+            a_filter += f"[a{idx}]"
 
             seg_cmd.extend([
                 "-filter_complex",
                 f"{v_filter_full};{a_filter}",
                 "-map", f"[v{idx}]",
                 "-map", f"[a{idx}]",
-                "-t", str(dur),
+                "-t", f"{seg_dur:.3f}",
                 "-pix_fmt", "yuv420p",
                 "-c:v", "libx264",
                 "-preset", "ultrafast",
@@ -440,7 +495,7 @@ class FFmpegRenderer:
             for i in range(len(segments)):
                 concat_filter += f"[{i}:v][{i}:a]"
             concat_filter += f"concat=n={len(segments)}:v=1:a=1[outv][outa]"
-            # NOTE: No -t flag here — each segment is already individually
+            # NOTE: No -t flag here â€” each segment is already individually
             # clipped to its scene duration.  A redundant -t on the concat
             # would truncate the output because H.264 GOP alignment causes
             # each encoded segment to be slightly shorter than requested,
@@ -500,7 +555,7 @@ class FFmpegRenderer:
                 if "invalid audio sample rate" in str(e) or "missing AAC audio stream" in str(e):
                     raise
 
-        # Probe the actual rendered duration from the file — never trust
+        # Probe the actual rendered duration from the file â€” never trust
         # the pre-computed plan sum which can diverge from reality.
         actual_duration = float(duration)  # fallback
         dur_probe_cmd = [
@@ -522,7 +577,7 @@ class FFmpegRenderer:
             raise RuntimeError(
                 f"Rendered video ({actual_duration:.2f}s) is shorter than the "
                 f"narration timeline ({duration:.2f}s) by "
-                f"{duration - actual_duration:.2f}s — audio would be truncated. "
+                f"{duration - actual_duration:.2f}s â€” audio would be truncated. "
                 f"This indicates an encoding issue."
             )
 

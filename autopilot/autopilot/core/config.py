@@ -20,6 +20,7 @@ class Config(BaseModel):
     provider_default_asset: str = "pexels"
     provider_default_publisher: str = "local_stub"
     max_render_resolution: str = "1080p"
+    render_transition_duration_sec: float = 0.35
     target_aspect_ratio: str = "9:16"
     synthetic_smoke_enabled: bool = True
     # P0: the native ffmpeg engine is the production default because it is the
@@ -284,6 +285,7 @@ class Config(BaseModel):
             "VISUAL_SEMANTIC_MAX_VIDEO_FRAMES": "visual_semantic_max_video_frames",
             "ASSET_PROVIDER_CASCADE": "asset_provider_cascade",
             "ASSET_VIDEO_PREFERRED": "asset_video_preferred",
+            "RENDER_TRANSITION_DURATION_SEC": "render_transition_duration_sec",
         }
         for env_key, field_name in env_map.items():
             val = os.environ.get(env_key)
@@ -292,7 +294,7 @@ class Config(BaseModel):
                     data[field_name] = val.lower() in ("1", "true", "yes")
                 elif field_name in ("openverse_max_results", "asset_target_width", "asset_target_height", "asset_max_download_bytes", "asset_max_redirects", "qa_caption_max_line_length", "qa_caption_max_lines", "publish_max_retries", "publish_chunk_size_bytes", "queue_default_priority", "queue_max_attempts", "queue_max_concurrency", "queue_max_queued_jobs", "analytics_sync_interval_hours", "analytics_cache_ttl_seconds", "analytics_batch_size", "autonomy_level", "autonomy_max_ideas_per_cycle", "autonomy_max_auto_queue_per_cycle", "autonomy_max_daily_jobs", "autonomy_topic_cooldown_days", "ollama_num_predict", "learning_min_samples", "learning_min_category_observations", "learning_window_days", "learning_full_confidence_samples", "strategy_max_params_per_update", "strategy_min_age_days", "visual_semantic_max_video_frames"):
                     data[field_name] = int(val)
-                elif field_name in ("openverse_timeout", "qa_loudness_target_lufs", "qa_max_silence_duration_sec", "qa_silence_threshold_db", "qa_max_black_duration_sec", "qa_max_freeze_duration_sec", "qa_duration_tolerance_sec", "qa_duration_tolerance_pct", "qa_fps_target", "publish_timeout_seconds", "queue_lease_duration_seconds", "queue_poll_interval_seconds", "queue_retry_backoff_base_seconds", "autonomy_similarity_threshold", "autonomy_min_score_threshold", "ollama_timeout", "ollama_idle_timeout", "learning_recency_weight", "strategy_max_weight_delta", "strategy_weight_floor", "strategy_weight_ceiling", "strategy_influence_scale", "moneyprinter_startup_timeout_seconds", "visual_semantic_min_similarity"):
+                elif field_name in ("openverse_timeout", "qa_loudness_target_lufs", "qa_max_silence_duration_sec", "qa_silence_threshold_db", "qa_max_black_duration_sec", "qa_max_freeze_duration_sec", "qa_duration_tolerance_sec", "qa_duration_tolerance_pct", "qa_fps_target", "publish_timeout_seconds", "queue_lease_duration_seconds", "queue_poll_interval_seconds", "queue_retry_backoff_base_seconds", "autonomy_similarity_threshold", "autonomy_min_score_threshold", "ollama_timeout", "ollama_idle_timeout", "learning_recency_weight", "strategy_max_weight_delta", "strategy_weight_floor", "strategy_weight_ceiling", "strategy_influence_scale", "moneyprinter_startup_timeout_seconds", "visual_semantic_min_similarity", "render_transition_duration_sec"):
                     data[field_name] = float(val)
                 else:
                     data[field_name] = val
