@@ -28,7 +28,6 @@ LEARNING_FORBIDDEN_MODULES = (
     "autopilot.providers.youtube_analytics",
     "autopilot.providers.mock_analytics",
     "autopilot.providers.openai_llm_provider",
-    "autopilot.providers.local_llm_adapter",
     "autopilot.providers.kokoro_tts_provider",
     "autopilot.providers.sapi_tts_provider",
     "autopilot.providers.crawl4ai_provider",
