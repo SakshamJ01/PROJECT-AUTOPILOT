@@ -28,6 +28,7 @@ from autopilot.core.duration import estimate_duration
 PACING_MAX_SCENE_SECONDS = 4.5
 TTS_WORDS_PER_SECOND = 1.95
 MAX_SCENE_SPEECH_WORDS = int(PACING_MAX_SCENE_SECONDS * TTS_WORDS_PER_SECOND)
+MIN_SCENE_SPEECH_WORDS = 5
 # Scene count the prompt asks for. The advertised duration/word totals are
 # derived from these so the prompt cannot drift from the pacing budget.
 MIN_SCENES = 7
@@ -73,7 +74,7 @@ class PacingBudgetError(ValueError):
             f"\nPACING CORRECTION (mandatory): the previous attempt was REJECTED because these "
             f"scenes exceeded the {MAX_SCENE_SPEECH_WORDS}-word ceiling: {detail}. "
             f"Rewrite those narrations to {MAX_SCENE_SPEECH_WORDS} words or fewer each. "
-            f"Drop filler words, split one idea across two scenes, or cut adjectives. "
+            f"Drop filler words, ensure each scene conveys a concrete fact, and avoid restating the topic. Split one idea across two scenes, or cut adjectives. "
             f"Keep the same facts and the same scene count unless you genuinely need more scenes."
             f"{examples}"
         )
@@ -310,7 +311,7 @@ def _build_prompts_and_evidence(
         f"total across all scenes).\n"
         "2. STRUCTURE: Script MUST follow the progression: HOOK (Scene 1) -> EXPLANATION / FACTS (Middle Scenes) -> INTENTIONAL PAYOFF / ENDING (Final Scene).\n"
         "3. INTENTIONAL ENDING: The final scene MUST be an intentional conclusion (payoff returning to hook, strongest final fact, seamless loop back, or payoff statement). NEVER end abruptly or use generic filler like 'thanks for watching'.\n"
-        f"4. SCENE NARRATION: Punchy, conversational, spoken English. Exactly {MAX_SCENE_SPEECH_WORDS} words or fewer per scene. One clear idea per scene. HARD LIMIT: never exceed {MAX_SCENE_SPEECH_WORDS} words in a scene (measured Edge TTS delivery is ~{TTS_WORDS_PER_SECOND} words/sec, and Creative QA hard-blocks any scene whose speech exceeds {PACING_MAX_SCENE_SECONDS}s). If you write {MAX_SCENE_SPEECH_WORDS + 1}+ words, the script WILL BE REJECTED. Count your words.\n"
+        f"4. SCENE NARRATION: Punchy, conversational, spoken English. Between {MIN_SCENE_SPEECH_WORDS} and {MAX_SCENE_SPEECH_WORDS} words per scene. Below {MIN_SCENE_SPEECH_WORDS} is too thin to convey a fact. One clear idea per scene. Every middle scene MUST deliver one concrete fact, number, date, or causal claim grounded in the evidence. Do NOT write filler scenes that only restate the topic or the hook. Every scene narration must advance the viewers understanding of the topic; if it could apply to any other subject, rewrite it. Do NOT write generic filler like As you can see, Lets dive in, But wait theres more, or generic topic restatements. HARD LIMIT: never exceed {MAX_SCENE_SPEECH_WORDS} words in a scene (measured Edge TTS delivery is ~{TTS_WORDS_PER_SECOND} words/sec, and Creative QA hard-blocks any scene whose speech exceeds {PACING_MAX_SCENE_SECONDS}s). If you write {MAX_SCENE_SPEECH_WORDS + 1}+ words, the script WILL BE REJECTED. Count your words.\n"
         "5. VISUAL INTENT: Describe concrete, tangible physical subjects suitable for photography.\n"
         "6. ASSET QUERY: 2-3 words naming concrete physical photographic subjects.\n"
         "7. ON_SCREEN_TEXT: 2-4 uppercase words for visual title card.\n"
@@ -442,6 +443,21 @@ def _parse_json_to_script_document(
     # ceiling is derived from the gate (see MAX_SCENE_SPEECH_WORDS). Catching an
     # over-long scene here costs one LLM call; catching it after assets, voice,
     # and render costs a full production run.
+    under_long = [
+        (s.scene_id, len(s.narration.split()))
+        for s in scenes
+        if s.narration and len(s.narration.split()) < MIN_SCENE_SPEECH_WORDS
+    ]
+    if under_long:
+        detail = ", ".join(f'{sid}={count}w' for sid, count in under_long)
+        raise PacingBudgetError(
+            f"LLM script for topic '{topic}' violates the script density floor: {detail}. "
+            f"Each spoken scene must be at least {MIN_SCENE_SPEECH_WORDS} words "
+            f"to convey sufficient information. Rewrite under-dense scenes to "
+            f"provide one concrete fact, number, date, or causal claim.",
+            offenders=under_long,
+            offender_text={s.scene_id: s.narration for s in scenes if s.scene_id in {o[0] for o in under_long}},
+        )
     over_long = [
         (s.scene_id, len(s.narration.split()))
         for s in scenes
