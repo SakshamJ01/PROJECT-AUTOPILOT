@@ -306,23 +306,41 @@ class TestUndersizedScriptRejection(unittest.TestCase):
         # 35s narration should pass
         self.assertTrue(35.0 >= min_dur)
 
-    def test_llm_prompts_target_32_to_38_seconds(self):
-        """Verify LLM prompt construction enforces 7-8 scenes and 32-38s narration.
+    def test_llm_prompt_duration_target_matches_the_pacing_budget(self):
+        """The prompt's duration target must follow from the derived word budget.
 
-        Scene length is bounded at 8-10 words so the creative QA pacing gate
-        (4.5s per scene at the measured ~2.2 words/sec) can pass.
+        Scene length is bounded by MAX_SCENE_SPEECH_WORDS, which is itself
+        derived from the 4.5s creative QA pacing gate. The advertised totals
+        (seconds and word count) are therefore computed, not hardcoded, so the
+        prompt cannot drift away from what the gate will actually accept.
         """
-        from autopilot.providers.openai_llm_provider import _build_prompts_and_evidence
+        from autopilot.providers.openai_llm_provider import (
+            MAX_SCENE_SPEECH_WORDS,
+            MAX_SCENES,
+            MIN_SCENES,
+            TTS_WORDS_PER_SECOND,
+            _build_prompts_and_evidence,
+        )
 
         sys_prompt, user_prompt, _, _ = _build_prompts_and_evidence(
             topic="Test Topic",
             target_duration=35.0,
         )
-        self.assertIn("7 to 8 useful scenes", sys_prompt)
-        self.assertIn("32-38 seconds", sys_prompt)
-        self.assertIn("70 to 85 spoken words", sys_prompt)
-        self.assertIn("8 to 10 words per scene", sys_prompt)
-        self.assertIn("32-38 seconds", user_prompt)
+
+        low_words = MIN_SCENES * MAX_SCENE_SPEECH_WORDS
+        high_words = MAX_SCENES * MAX_SCENE_SPEECH_WORDS
+        expected_range = (
+            f"{round(low_words / TTS_WORDS_PER_SECOND)}-"
+            f"{round(high_words / TTS_WORDS_PER_SECOND)} seconds"
+        )
+        expected_words = f"{low_words} to {high_words} spoken words"
+
+        self.assertIn(f"{MIN_SCENES} to {MAX_SCENES} useful scenes", sys_prompt)
+        self.assertIn(expected_range, sys_prompt)
+        self.assertIn(expected_words, sys_prompt)
+        # The hard limit the model must obey, stated explicitly and derived.
+        self.assertIn(f"never exceed {MAX_SCENE_SPEECH_WORDS} words", sys_prompt)
+        self.assertIn(expected_range, user_prompt)
         self.assertIn("intentional conclusion", user_prompt.lower())
 
 

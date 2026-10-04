@@ -147,21 +147,22 @@ def _apply_audio_scene_graph_mix(
     segments: List[str],
     out_video: Path,
     work_dir: Path,
-) -> bool:
+) -> Dict[str, Any]:
     """Build the VOICE + BGM + SFX master via AudioSceneGraph and mux it in.
 
     Deterministic SFX placement is derived from narrative word timestamps
     (scene boundaries), never fired randomly because a scene exists.
-    Returns True when a mastered mix replaced the segment audio.
+    Returns the persisted mix manifest on success, or ``{}`` when no mastered
+    mix replaced the segment audio. The manifest is written to
+    ``<job>/audio/audio_mix_manifest.json`` so QA can verify real ducking.
     """
     from autopilot.core.audio_scene_graph import AudioSceneGraphEngine
-    from autopilot.core.timeline import MaterializedScene, MaterializedTiming, MaterializedAudioPlan
 
     if not segments:
-        return False
+        return {}
 
     # Determine per-scene timing and voice paths from the scene dicts.
-    mat_scenes: List[MaterializedScene] = []
+    rows: List[Dict[str, Any]] = []
     cursor = 0.0
     for idx, s in enumerate(scenes):
         dur = float(s.get("duration_sec", 5.0) or 5.0)
@@ -186,32 +187,51 @@ def _apply_audio_scene_graph_mix(
         else:
             sfx_events.append({"cue": "digital_pop", "time_sec": max(0.0, first_word_t), "volume_db": -9.0})
 
-        timing = MaterializedTiming(
-            start_time_sec=round(cursor, 3),
-            end_time_sec=round(cursor + dur, 3),
-            duration_sec=round(dur, 3),
-        )
-        audio_plan = MaterializedAudioPlan(
-            voice_path=voice,
-            sfx_events=sfx_events,
-        )
-        mat_scenes.append(
-            MaterializedScene(
-                scene_id=str(s.get("scene_id", f"scene_{idx}")),
-                timing=timing,
-                audio_plan=audio_plan,
-            )
-        )
+        rows.append({
+            "scene_id": str(s.get("scene_id", f"scene_{idx}")),
+            "start_sec": round(cursor, 3),
+            "end_sec": round(cursor + dur, 3),
+            "duration_sec": round(dur, 3),
+            "voice_path": voice,
+            "voice_duration_sec": dur,
+            "sfx_events": sfx_events,
+        })
         cursor += dur
 
     total_dur = cursor
     engine = AudioSceneGraphEngine()
-    graph = engine.build_scene_graph(mat_scenes, total_duration_sec=total_dur)
+    graph = engine.build_scene_graph_from_rows(rows, total_duration_sec=total_dur)
 
     master_path = work_dir / "master_mix.wav"
     mix = engine.mix_and_master(graph, master_path)
     if not mix.success or not Path(mix.master_audio_path).exists():
-        return False
+        return {}
+
+    manifest: Dict[str, Any] = {
+        "applied": True,
+        "master_duration_sec": round(total_dur, 3),
+        "mix_manifest": mix.mix_manifest,
+        "stitch_report": getattr(engine, "last_stitch_report", {}),
+        "sfx_manifest": [
+            {
+                "cue": item.get("cue"),
+                "time_sec": round(float(item.get("time_sec", 0.0)), 3),
+                "volume_db": item.get("volume_db"),
+            }
+            for item in (mix.sfx_manifest or [])
+        ],
+    }
+    # A mix that could not be measured must not claim verified ducking.
+    manifest["ducking_verified"] = bool(mix.mix_manifest.get("ducking_verified"))
+    manifest["ducking_db"] = mix.mix_manifest.get("ducking_db")
+
+    # Persist evidence next to the render so QA reads real measured data.
+    job_dir = out_video.parent.parent
+    audio_dir = job_dir / "audio"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    (audio_dir / "audio_mix_manifest.json").write_text(
+        json.dumps(manifest, indent=2), encoding="utf-8"
+    )
 
     # Mux the mastered audio over the concatenated video.
     mux_path = work_dir / "muxed.mp4"
@@ -227,12 +247,17 @@ def _apply_audio_scene_graph_mix(
     ]
     r = subprocess.run(mux_cmd, capture_output=True, text=True, timeout=180)
     if r.returncode != 0 or not mux_path.exists():
-        return False
+        manifest["applied"] = False
+        manifest["mux_error"] = r.stderr[-500:]
+        (audio_dir / "audio_mix_manifest.json").write_text(
+            json.dumps(manifest, indent=2), encoding="utf-8"
+        )
+        return {}
     # Promote the muxed file to the final output.
     import shutil
 
     shutil.move(str(mux_path), str(out_video))
-    return True
+    return manifest
 
 
 class FFmpegRenderer:
@@ -443,13 +468,16 @@ class FFmpegRenderer:
         # Build a 3-track mix (VOICE + BGM + SFX) with real sidechain ducking
         # from the scene voice segments, then mux over the concatenated video.
         # ------------------------------------------------------------------
-        audio_mix_applied = False
+        audio_mix_manifest: Dict[str, Any] = {}
         try:
-            audio_mix_applied = _apply_audio_scene_graph_mix(scenes, segments, out, segment_dir)
+            audio_mix_manifest = _apply_audio_scene_graph_mix(scenes, segments, out, segment_dir)
+            if not audio_mix_manifest.get("applied"):
+                audio_mix_errors.append("audio scene graph mix did not apply")
         except Exception as exc:
             # Audio mix enhancement must never destroy the render; the voice
             # track from the segments is still present. Record and continue.
             audio_mix_errors.append(str(exc))
+        audio_mix_applied = bool(audio_mix_manifest.get("applied"))
 
         # Post-render audio stream integrity validation
         probe_cmd = [
@@ -499,6 +527,24 @@ class FFmpegRenderer:
             )
 
         checksum = hashlib.sha256(out.read_bytes()).hexdigest() if out.exists() else None
+        # Record the mix outcome next to the media so downstream QA never has
+        # to guess whether ducking was measured or silently skipped.
+        if audio_mix_manifest or audio_mix_errors:
+            try:
+                prov_path = out.parent / "render_audio_mix.json"
+                prov_path.write_text(
+                    json.dumps(
+                        {
+                            "audio_mix_applied": audio_mix_applied,
+                            "audio_mix_errors": audio_mix_errors,
+                            "audio_mix_manifest": audio_mix_manifest,
+                        },
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+            except Exception:
+                pass
         output = RenderOutput(
             output_path=str(out),
             duration_sec=actual_duration,

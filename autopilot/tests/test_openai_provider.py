@@ -293,7 +293,7 @@ def test_openai_llm_provider_source_reference_validation():
             {
                 "scene_id": "scene-01",
                 "order": 1,
-                "narration": "Researchers just demonstrated 1,000 stable qubits operating at room temperature.",
+                "narration": "Researchers demonstrated 1,000 stable qubits.",
                 "visual_intent": "Quantum lab animation",
                 "estimated_duration_seconds": 6.0,
                 "scene_type": "broll"

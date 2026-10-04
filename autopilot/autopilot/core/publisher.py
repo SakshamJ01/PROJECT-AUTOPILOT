@@ -97,6 +97,23 @@ class PublishingEngine:
 
         return None
 
+    def _load_publish_readiness(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """Load the composite publish-readiness verdict if one was persisted.
+
+        The technical QA receipt alone is not sufficient authority to publish:
+        the composite gate (creative QA + publish readiness) can block a job
+        whose technical checks all passed. This verdict is authoritative and can
+        only ever reduce permission, so it is used to veto publishing.
+        """
+        base_dir = self.config.get_artifacts_dir()
+        readiness_file = job_artifact_dir(job_id, base_dir=base_dir) / "qa" / "publish_readiness.json"
+        if not readiness_file.exists():
+            return None
+        try:
+            return json.loads(readiness_file.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
     def _load_qa_receipt(self, job_id: str, db: DBManager) -> Optional[Dict[str, Any]]:
         """Load QA receipt from filesystem artifact or SQLite database."""
         base_dir = self.config.get_artifacts_dir()
@@ -341,6 +358,22 @@ class PublishingEngine:
 
         qa_status = str(qa_receipt.get("status") or "").upper()
         qa_publish_allowed = bool(qa_receipt.get("publish_allowed", False))
+
+        # Composite gate veto (authoritative, permission-reducing only).
+        readiness = self._load_publish_readiness(job_id)
+        if readiness is not None and not readiness.get("is_ready_to_publish", False):
+            blocking = "; ".join(readiness.get("blocking_reasons", []) or ["unspecified"])
+            return {
+                "publishable": False,
+                "reason": f"Publishing blocked by the composite publish-readiness gate. Blocking reasons: {blocking}.",
+                "job": job,
+                "media_path": str(media),
+                "media_checksum": media_checksum,
+                "qa_receipt": qa_receipt,
+                "approval": None,
+                "published": False,
+            }
+
         if qa_status in (QAStatus.BLOCK.value.upper(), "FAIL") or not qa_publish_allowed:
             return {
                 "publishable": False,
@@ -525,6 +558,34 @@ class PublishingEngine:
 
         qa_status = qa_receipt.get("status")
         qa_publish_allowed = qa_receipt.get("publish_allowed", False)
+
+        # The composite publish-readiness gate is authoritative and can only
+        # reduce permission. Consult it so a permissive technical receipt can
+        # never fail open past a creative-QA hard block.
+        readiness = self._load_publish_readiness(job_id)
+        if readiness is not None and not readiness.get("is_ready_to_publish", False):
+            blocking = "; ".join(readiness.get("blocking_reasons", []) or ["unspecified"])
+            err = PublishError(
+                error_code="PUBLISH_READINESS_BLOCKED",
+                message=(
+                    "Publishing blocked by the composite publish-readiness gate. "
+                    f"Blocking reasons: {blocking}."
+                ),
+                retryable=False,
+                details=readiness,
+            )
+            db.update_job_status(job_id, WorkflowState.FAILED_PUBLISH.value)
+            db.log_event(
+                job_id,
+                WorkflowState.APPROVED.value,
+                WorkflowState.FAILED_PUBLISH.value,
+                reason="Publish readiness gate blocked publishing",
+            )
+            return PublishResult(
+                success=False,
+                status=PublishStatus.BLOCKED_QA,
+                error=err,
+            )
 
         if qa_status == QAStatus.BLOCK.value or not qa_publish_allowed:
             err = PublishError(

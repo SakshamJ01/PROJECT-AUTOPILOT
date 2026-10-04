@@ -16,6 +16,7 @@ import os
 import struct
 import subprocess
 import wave
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -25,8 +26,18 @@ from autopilot.core.config import CONFIG
 from autopilot.core.timeline import (
     MaterializedAudioPlan,
     MaterializedScene,
+    MaterializedTiming,
     SFXEvent,
 )
+
+
+@dataclass
+class _GraphScene:
+    """Minimal scene shape needed for audio graph construction."""
+
+    scene_id: str
+    timing: MaterializedTiming
+    audio_plan: MaterializedAudioPlan
 
 
 class AudioTrackType(str, Enum):
@@ -214,6 +225,44 @@ class AudioSceneGraphEngine:
         self.cache_dir = CONFIG.get_artifacts_dir() / "audio_assets"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
+    def build_scene_graph_from_rows(
+        self,
+        rows: List[Dict[str, Any]],
+        total_duration_sec: float,
+        bgm_file: Optional[str] = None,
+        bgm_intensity: float = 0.85,
+    ) -> "AudioSceneGraph":
+        """Build the scene graph from plain timeline rows.
+
+        The renderer works with lightweight scene dicts, not validated
+        ``MaterializedScene`` models, so this adapter avoids fabricating a
+        full content scene (assets, narration, visual requirements) just to
+        obtain audio timing.
+        """
+        scenes = []
+        for row in rows:
+            scenes.append(
+                _GraphScene(
+                    scene_id=str(row["scene_id"]),
+                    timing=MaterializedTiming(
+                        start_time_sec=float(row["start_sec"]),
+                        end_time_sec=float(row["end_sec"]),
+                        duration_sec=float(row["duration_sec"]),
+                    ),
+                    audio_plan=MaterializedAudioPlan(
+                        voice_path=str(row["voice_path"]),
+                        voice_duration_sec=float(row.get("voice_duration_sec") or row["duration_sec"]),
+                        sfx_events=[SFXEvent(**e) for e in (row.get("sfx_events") or [])],
+                    ),
+                )
+            )
+        return self.build_scene_graph(
+            scenes,  # type: ignore[arg-type]
+            total_duration_sec=total_duration_sec,
+            bgm_file=bgm_file,
+            bgm_intensity=bgm_intensity,
+        )
+
     def build_scene_graph(
         self,
         scenes: List[MaterializedScene],
@@ -321,9 +370,9 @@ class AudioSceneGraphEngine:
             })
 
         # 4. Mix stems with FFmpeg
-        # Voice (0dB, mastered), BGM (ducked ~-24dB), SFX (-6dB)
+        # Voice (0dB, mastered), BGM sidechain-ducked under the voice, SFX (-6dB)
         voice_vol = 1.0
-        bgm_vol = 0.12  # approx -18 to -22 dB
+        bgm_vol = 0.12  # approx -18 to -22 dB baseline before ducking
         sfx_vol = 0.50  # approx -6 dB
 
         cmd = [
@@ -337,10 +386,30 @@ class AudioSceneGraphEngine:
         for sfx_item in prepared_sfx:
             cmd.extend(["-i", sfx_item["path"]])
 
-        # Construct complex filter graph
+        # Construct complex filter graph.
+        # The BGM is genuinely sidechain-compressed by the voice track. A static
+        # gain here would only *look* like ducking in the manifest while leaving
+        # music competing with narration, so the duck depth is measured from the
+        # rendered stem afterwards rather than asserted.
+        duck_threshold = 0.02
+        duck_ratio = 12.0
+        duck_attack_ms = max(1, int(self.attack_ms / 5))
+        duck_release_ms = max(1, int(self.release_ms / 5))
+        bgm_ducked_stem = self.cache_dir / f"bgm_ducked_{int(dur * 100)}.wav"
+
         filter_parts = [
-            f"[0:a]volume=1.0,aformat=sample_rates=44100:channel_layouts=stereo[a_voice]",
-            f"[1:a]volume={bgm_vol},afade=t=in:ss=0:d=1.0,afade=t=out:st={max(0, dur-1.5):.2f}:d=1.5,aformat=sample_rates=44100:channel_layouts=stereo[a_bgm]",
+            f"[0:a]volume={voice_vol},aformat=sample_rates=44100:channel_layouts=stereo[a_voice]",
+            # [main][sidechain] -> ducked music bed
+            f"[1:a][a_voice]sidechaincompress="
+            f"threshold={duck_threshold}:ratio={duck_ratio}:attack={duck_attack_ms}:release={duck_release_ms}:makeup=1"
+            f"[bgm_ducked]",
+            # One branch feeds the master mix, the other is emitted on its own so
+            # the duck depth can be measured from real audio.
+            f"[bgm_ducked]asplit=2[bgm_for_mix][bgm_for_measure]",
+            f"[bgm_for_mix]volume={bgm_vol},"
+            f"afade=t=in:ss=0:d=1.0,afade=t=out:st={max(0, dur - 1.5):.2f}:d=1.5,"
+            f"aformat=sample_rates=44100:channel_layouts=stereo[a_bgm]",
+            f"[bgm_for_measure]aformat=sample_rates=44100:channel_layouts=stereo[a_bgm_measure]",
         ]
 
         mix_inputs = ["[a_voice]", "[a_bgm]"]
@@ -363,11 +432,21 @@ class AudioSceneGraphEngine:
             "-ar", "44100",
             "-ac", "2",
             str(out_p),
+            # Also emit the ducked music bed on its own so the duck depth can be
+            # measured from real audio instead of being asserted from settings.
+            "-map", "[a_bgm_measure]",
+            "-t", f"{dur:.3f}",
+            "-c:a", "pcm_s16le",
+            str(bgm_ducked_stem),
         ])
 
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
             if r.returncode == 0 and out_p.exists() and out_p.stat().st_size > 0:
+                ducking = self._measure_ducking_db(
+                    voice_path=stitched_voice_path,
+                    bgm_path=bgm_ducked_stem,
+                )
                 return AudioMixResult(
                     master_audio_path=str(out_p),
                     duration_sec=dur,
@@ -381,6 +460,17 @@ class AudioSceneGraphEngine:
                         "voice_stems": len(scene_graph.voice_segments),
                         "sfx_cues": len(prepared_sfx),
                         "ducking_points": len(scene_graph.ducking_envelope),
+                        "ducking_method": "sidechaincompress",
+                        "ducking_threshold": duck_threshold,
+                        "ducking_ratio": duck_ratio,
+                        "ducking_attack_ms": duck_attack_ms,
+                        "ducking_release_ms": duck_release_ms,
+                        "bgm_ducked_stem": str(bgm_ducked_stem) if bgm_ducked_stem.exists() else None,
+                        "measurement": ducking,
+                        # Only claim verified ducking when it was actually
+                        # measured to be audible under the voice.
+                        "ducking_verified": bool(ducking.get("ducking_verified")),
+                        "ducking_db": ducking.get("ducking_db"),
                     },
                     success=True,
                 )
@@ -401,6 +491,93 @@ class AudioSceneGraphEngine:
             success=True,
         )
 
+    # Minimum measured reduction required before ducking is called verified.
+    DUCKING_VERIFIED_MIN_DB = 2.0
+
+    def _measure_ducking_db(
+        self,
+        voice_path: str | Path,
+        bgm_path: str | Path,
+        window_ms: int = 50,
+    ) -> Dict[str, Any]:
+        """Measure how far the music bed drops while the voice is speaking.
+
+        Compares RMS of the ducked BGM stem during speech-active windows against
+        windows where the voice is silent. A real sidechain setup shows a clear
+        positive reduction; a static gain shows ~0 dB, which is reported as
+        unverified rather than passed off as working ducking.
+        """
+        result: Dict[str, Any] = {
+            "ducking_verified": False,
+            "ducking_db": None,
+            "method": "windowed_rms_of_ducked_bgm_stem",
+        }
+        voice_p, bgm_p = Path(voice_path), Path(bgm_path)
+        if not voice_p.exists() or not bgm_p.exists():
+            result["error"] = "stem_missing"
+            return result
+
+        try:
+            import numpy as np
+
+            sr = 44100
+
+            def _load_mono(path: Path):
+                raw = subprocess.run(
+                    ["ffmpeg", "-v", "error", "-i", str(path),
+                     "-f", "f32le", "-ac", "1", "-ar", str(sr), "-"],
+                    capture_output=True, timeout=60,
+                )
+                if raw.returncode != 0 or not raw.stdout:
+                    raise RuntimeError("decode_failed")
+                return np.frombuffer(raw.stdout, dtype=np.float32)
+
+            voice = _load_mono(voice_p)
+            bgm = _load_mono(bgm_p)
+            n = min(len(voice), len(bgm))
+            if n == 0:
+                result["error"] = "empty_stem"
+                return result
+            voice, bgm = voice[:n], bgm[:n]
+
+            win = max(1, int(sr * window_ms / 1000))
+            usable = (n // win) * win
+            if usable < win * 4:
+                result["error"] = "too_short"
+                return result
+
+            v = voice[:usable].reshape(-1, win)
+            b = bgm[:usable].reshape(-1, win)
+            v_rms = np.sqrt(np.mean(v * v, axis=1) + 1e-12)
+            b_rms = np.sqrt(np.mean(b * b, axis=1) + 1e-12)
+
+            v_db = 20 * np.log10(v_rms)
+            speech_floor = float(np.max(v_db)) - 20.0
+            speech_mask = v_db > speech_floor
+            gap_mask = ~speech_mask
+
+            if not speech_mask.any() or not gap_mask.any():
+                result["error"] = "no_distinguishable_speech"
+                return result
+
+            speech_bgm_db = float(np.mean(20 * np.log10(b_rms[speech_mask] + 1e-12)))
+            gap_bgm_db = float(np.mean(20 * np.log10(b_rms[gap_mask] + 1e-12)))
+            reduction = gap_bgm_db - speech_bgm_db
+
+            result.update({
+                "ducking_db": round(reduction, 2),
+                "bgm_db_during_speech": round(speech_bgm_db, 2),
+                "bgm_db_during_gaps": round(gap_bgm_db, 2),
+                "window_ms": window_ms,
+                "speech_windows": int(speech_mask.sum()),
+                "gap_windows": int(gap_mask.sum()),
+                "threshold_db": self.DUCKING_VERIFIED_MIN_DB,
+                "ducking_verified": bool(reduction >= self.DUCKING_VERIFIED_MIN_DB),
+            })
+        except Exception as exc:
+            result["error"] = f"{type(exc).__name__}: {exc}"
+        return result
+
     def _stitch_voice_segments(
         self,
         voice_segments: List[Dict[str, Any]],
@@ -410,28 +587,59 @@ class AudioSceneGraphEngine:
         """Concatenate voice audio segments with exact silence padding."""
         num_frames = int(total_duration_sec * self.sample_rate)
         master_frames = bytearray(num_frames * self.channels * 2)  # 16-bit stereo
+        bytes_per_frame = self.channels * 2
+        blended: List[str] = []
+        skipped: List[str] = []
 
         for seg in voice_segments:
             vp = seg.get("voice_path")
             start_sec = seg.get("start_sec", 0.0)
             if not vp or not Path(vp).exists():
+                skipped.append(str(vp))
                 continue
 
             try:
-                with wave.open(str(vp), "rb") as wf:
-                    sr = wf.getframerate()
-                    ch = wf.getnchannels()
-                    data = wf.readframes(wf.getnframes())
+                # TTS backends do not reliably return RIFF/WAVE PCM (Edge TTS
+                # returns MP3 bytes behind a .wav filename), so decode through
+                # ffmpeg instead of trusting the extension or using `wave`.
+                # Failing to decode must never silently yield a silent track.
+                proc = subprocess.run(
+                    [
+                        "ffmpeg", "-v", "error", "-i", str(vp),
+                        "-f", "s16le", "-acodec", "pcm_s16le",
+                        "-ar", str(self.sample_rate),
+                        "-ac", str(self.channels),
+                        "-",
+                    ],
+                    capture_output=True,
+                    timeout=60,
+                )
+                data = proc.stdout if proc.returncode == 0 else b""
+                if not data:
+                    skipped.append(f"{vp} (decode_failed: {proc.stderr.decode('utf-8', 'ignore')[:120]})")
+                    continue
 
-                    # If 44.1kHz stereo 16-bit, directly blend into master buffer
-                    if sr == 44100 and ch == 2:
-                        start_byte = int(start_sec * sr) * ch * 2
-                        end_byte = min(len(master_frames), start_byte + len(data))
-                        copy_len = end_byte - start_byte
-                        if copy_len > 0:
-                            master_frames[start_byte : start_byte + copy_len] = data[:copy_len]
-            except Exception:
-                pass
+                start_byte = int(start_sec * self.sample_rate) * bytes_per_frame
+                end_byte = min(len(master_frames), start_byte + len(data))
+                copy_len = end_byte - start_byte
+                if copy_len > 0:
+                    master_frames[start_byte : start_byte + copy_len] = data[:copy_len]
+                    blended.append(str(vp))
+            except Exception as exc:
+                skipped.append(f"{vp} ({type(exc).__name__}: {exc})")
+
+        if not blended and voice_segments:
+            # A silent master would quietly replace the narration with music.
+            raise RuntimeError(
+                "Voice stitching produced no audio from "
+                f"{len(voice_segments)} segment(s); all failed to decode: {skipped[:3]}"
+            )
+        self.last_stitch_report = {
+            "expected": len(voice_segments),
+            "blended": len(blended),
+            "skipped": len(skipped),
+            "skipped_details": skipped[:5],
+        }
 
         with wave.open(str(output_path), "wb") as wf:
             wf.setnchannels(self.channels)

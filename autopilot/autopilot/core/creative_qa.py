@@ -534,7 +534,9 @@ class CreativeQAEngine:
                 deductions.append(f"{s_id} drags without cut ({dur:.1f}s > 6.0s)")
             elif dur > 4.5:
                 score -= 15.0
-                deductions.append(f"{s_id} is slightly long ({dur:.1f}s > 4.5s)")
+                # Render the true value at 2dp: a scene measuring 4.503s used to
+                # print as "4.5s > 4.5s", which looked like a false positive.
+                deductions.append(f"{s_id} is slightly long ({dur:.2f}s > 4.5s)")
 
         score = max(0.0, min(100.0, score))
         status = self._status_from_score(score, target=85.0, warn=70.0, block=50.0)

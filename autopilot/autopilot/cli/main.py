@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import os
 import re
+import uuid
 import platform
 import subprocess
 import sqlite3
@@ -1199,6 +1200,131 @@ def run_render(job_id: str, asset_provider: str = "pexels", profile: str = "shor
     return 0
 
 
+def _derive_rights_and_invariants(report, job_id: str):
+    """Derive rights/invariants evidence for the composite gate from real checks.
+
+    These two inputs used to be hardcoded True, which meant the publish gate
+    claimed verification it never performed. They are now derived from the QA
+    checks that actually ran, corroborated by the persisted perceptual render
+    provenance, and they fail closed when evidence is missing.
+    """
+    import json as _json
+
+    from autopilot.core.artifacts import job_artifact_dir as _job_dir
+    from autopilot.core.contracts import QAStatus as _QAStatus
+
+    checks = {c.check_id: c for c in (getattr(report, "checks", None) or [])}
+    evidence: dict = {}
+
+    rights_check = checks.get("check-rights-gate")
+    rights_verified = rights_check is not None and rights_check.status == _QAStatus.PASS
+    evidence["rights"] = {
+        "check_id": "check-rights-gate",
+        "check_ran": rights_check is not None,
+        "check_status": str(rights_check.status) if rights_check is not None else None,
+        "verified": rights_verified,
+    }
+
+    invariant_ids = (
+        "check-render-plan-consistency",
+        "check-provenance-integrity",
+        "check-scene-coverage",
+    )
+    per_check = {}
+    invariants_verified = True
+    for cid in invariant_ids:
+        found = checks.get(cid)
+        ok = found is not None and found.status == _QAStatus.PASS
+        per_check[cid] = {"check_ran": found is not None, "passed": ok}
+        invariants_verified = invariants_verified and ok
+
+    # Corroborate with the perceptual render provenance written during render.
+    # Absence of the artifact is itself a failure: without it there is no
+    # evidence that the rendered video actually contains the claimed assets.
+    provenance_path = _job_dir(job_id) / "render" / "render_provenance.json"
+    artifact_present = provenance_path.exists()
+    provenance_detail: dict = {"artifact_present": artifact_present, "passed": False}
+    prov_ok = False
+    if artifact_present:
+        try:
+            prov = _json.loads(provenance_path.read_text(encoding="utf-8"))
+        except Exception:
+            prov = {}
+        claimed = prov.get("claimed_scene_count")
+        verified_n = prov.get("verified_scene_count")
+        prov_ok = bool(prov.get("valid")) and claimed is not None and claimed == verified_n
+        provenance_detail.update({
+            "valid": prov.get("valid"),
+            "claimed_scene_count": claimed,
+            "verified_scene_count": verified_n,
+            "passed": prov_ok,
+        })
+    invariants_verified = invariants_verified and prov_ok
+
+    evidence["invariants"] = {"checks": per_check, "render_provenance": provenance_detail,
+                               "verified": invariants_verified}
+    return rights_verified, invariants_verified, evidence
+
+
+def _propagate_gate_verdict_to_receipt(report, publish_decision) -> None:
+    """Mirror the composite publish gate onto the nested quality receipt.
+
+    The publisher trusts `quality/receipt.json` as the authoritative QA
+    artifact, while the composite gate (creative QA + publish readiness) only
+    ever demotes the parent QAReport. Without this propagation a creative hard
+    block leaves a stale, permissive receipt on disk and publishing fails open.
+    """
+    from autopilot.core.contracts import QAFinding, QASeverity, QAStatus
+
+    receipt = getattr(report, "receipt", None)
+    if receipt is None:
+        return
+
+    ready = bool(publish_decision.is_ready_to_publish)
+    receipt.publish_allowed = ready
+    receipt.status = report.status
+
+    blocking_reasons = list(getattr(publish_decision, "blocking_reasons", []) or [])
+    warning_reasons = list(getattr(publish_decision, "warning_reasons", []) or [])
+
+    if not ready and blocking_reasons:
+        detail = "; ".join(blocking_reasons)
+        receipt.blocking_findings = [
+            *receipt.blocking_findings,
+            QAFinding(
+                finding_id=f"gate-{uuid.uuid4().hex[:12]}",
+                check_id="publish_readiness_gate",
+                category="publish_readiness",
+                severity=QASeverity.CRITICAL,
+                status=QAStatus.BLOCK,
+                message=f"Composite publish readiness gate blocked this job: {detail}",
+                evidence={
+                    "technical_qa_passed": bool(getattr(publish_decision, "technical_qa_passed", False)),
+                    "creative_qa_passed": bool(getattr(publish_decision, "creative_qa_passed", False)),
+                    "overall_confidence": getattr(publish_decision, "overall_confidence", None),
+                    "blocking_reasons": blocking_reasons,
+                },
+            ),
+        ]
+
+    if warning_reasons:
+        receipt.warnings = [
+            *receipt.warnings,
+            *[
+                QAFinding(
+                    finding_id=f"gate-warn-{uuid.uuid4().hex[:12]}",
+                    check_id="publish_readiness_gate",
+                    category="publish_readiness",
+                    severity=QASeverity.MEDIUM,
+                    status=QAStatus.WARN,
+                    message=str(reason),
+                    evidence={"warning_reasons": warning_reasons},
+                )
+                for reason in warning_reasons
+            ],
+        ]
+
+
 def run_qa(job_id: str, media_path: str | None = None, verbose: bool = False, output_json: bool = False, strict: bool = False) -> int:
     import json
     from pathlib import Path
@@ -1316,10 +1442,13 @@ def run_qa(job_id: str, media_path: str | None = None, verbose: bool = False, ou
         defect_cls = DefectClassifierEngine()
         defects = defect_cls.classify_defects(creative_report=creative_report, technical_report=report)
 
-        # Rights/invariants from provenance gate already verified in render
-        # (If render passed provenance, we know assets are verified and timeline matches)
-        rights_verified = True
-        invariants_verified = True
+        # Rights/invariants must come from evidence that actually ran. These
+        # were previously hardcoded True, so the composite gate asserted
+        # verification it never performed.
+        rights_verified, invariants_verified, gate_evidence = _derive_rights_and_invariants(report, job_id)
+        evidence_path = qa_dir / "gate_evidence.json"
+        evidence_path.write_text(json.dumps(gate_evidence, indent=2), encoding="utf-8")
+        db.record_artifact(job_id, str(evidence_path), "quality")
 
         # Run Publish Readiness Gate
         gate = PublishReadinessGate()
@@ -1342,6 +1471,7 @@ def run_qa(job_id: str, media_path: str | None = None, verbose: bool = False, ou
         # Update overall status if publish gate blocks
         if not publish_decision.is_ready_to_publish:
             report.status = QAStatus.BLOCK
+        _propagate_gate_verdict_to_receipt(report, publish_decision)
 
     except Exception as exc:
         # Creative QA or publish gate failure is not fatal to technical QA,

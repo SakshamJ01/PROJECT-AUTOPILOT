@@ -7,7 +7,7 @@ from autopilot.core.contracts import AssetLicense, AssetCandidate, ScriptDocumen
 from autopilot.core.rights_gate import evaluate_rights_gate
 from autopilot.core.asset_cache import safe_download_media
 from autopilot.core.asset_normalizer import normalize_image
-from autopilot.core.media_inspection import inspect_media
+from autopilot.core.media_inspection import inspect_media, measure_visual_validity
 from autopilot.core.asset_pipeline import process_scene_assets
 from autopilot.providers.openverse_provider import OpenverseAssetProvider
 from autopilot.db.manager import DBManager
@@ -56,6 +56,55 @@ def test_adversarial_empty_file_rejected(tmp_path):
     inspection = inspect_media(empty_file)
     assert inspection["valid"] is False
     assert any("Zero bytes" in err for err in inspection["errors"])
+
+
+def _make_clip(path, luma_expr, dur=3.0):
+    """Render a short clip whose luma follows ``luma_expr``."""
+    import subprocess
+
+    cmd = [
+        "ffmpeg", "-y", "-v", "error",
+        "-f", "lavfi", "-i", f"color=c=black:s=160x90:d={dur}:r=25",
+        "-vf", f"geq=lum='{luma_expr}'",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", str(path),
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+    assert r.returncode == 0, r.stderr
+    return path
+
+
+def test_adversarial_black_video_rejected(tmp_path):
+    """A structurally valid but fully black download must be rejected.
+
+    Such a file passes every container/codec check, yet renders as a black
+    scene. This is the defect that shipped a ~4s black stretch into a video
+    while render provenance still reported the scene as verified, because
+    black frames match black frames.
+    """
+    black = _make_clip(tmp_path / "black.mp4", "0")
+    inspection = inspect_media(black)
+
+    assert inspection["valid"] is False
+    assert any("black" in err.lower() for err in inspection["errors"])
+    validity = inspection["visual_validity"]
+    assert validity["is_black"] is True
+    assert validity["black_frame_ratio"] >= 0.95
+
+
+def test_adversarial_dark_but_real_video_accepted(tmp_path):
+    """A genuinely dark clip is legitimate footage and must not be rejected."""
+    dark = _make_clip(tmp_path / "dark.mp4", "40")
+    inspection = inspect_media(dark)
+
+    assert inspection["valid"] is True
+    assert inspection["visual_validity"]["is_black"] is False
+
+
+def test_measure_visual_validity_reports_missing_file(tmp_path):
+    result = measure_visual_validity(tmp_path / "nope.mp4")
+    assert result["checked"] is False
+    assert result["is_black"] is False
+    assert result["error"] == "missing"
 
 
 def test_adversarial_path_traversal_refused(tmp_path):

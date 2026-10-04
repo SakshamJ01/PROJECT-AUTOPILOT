@@ -13,9 +13,12 @@ These lock in fixes for QA dimensions that reported confident, wrong results:
 Test fixtures here are synthetic clips generated with ffmpeg. They are test
 inputs only and are never treated as production evidence.
 """
+import json
 import subprocess
+import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 
@@ -29,6 +32,7 @@ from autopilot.core.creative_qa import (
 from autopilot.providers.openai_llm_provider import (
     MAX_SCENE_SPEECH_WORDS,
     TTS_WORDS_PER_SECOND,
+    PACING_MAX_SCENE_SECONDS,
 )
 
 
@@ -154,13 +158,17 @@ def test_long_still_image_scene_is_still_penalized():
 
 
 def test_pacing_constants_match_the_gate():
-    """The word budget must stay consistent with the 4.5s pacing target."""
+    """The word budget must be derived from the 4.5s pacing gate it feeds."""
     floor = float(CONFIG.visual_semantic_min_similarity)  # sanity: config loaded
     assert floor > 0
-    assert MAX_SCENE_SPEECH_WORDS / TTS_WORDS_PER_SECOND <= 5.0
-    # 11 words is the ceiling and must never sit above the 4.5s gate target
-    # plus the documented 0.5s "slightly long" grace band.
-    assert MAX_SCENE_SPEECH_WORDS <= 11
+    # The pre-flight guard exists only to predict what Creative QA will measure.
+    # If the ceiling can project past the gate the guard is worse than useless:
+    # it passes scripts the gate then hard-blocks after a full render.
+    assert MAX_SCENE_SPEECH_WORDS / TTS_WORDS_PER_SECOND <= PACING_MAX_SCENE_SECONDS
+    # One more word must genuinely breach the gate, otherwise the ceiling is loose.
+    assert (MAX_SCENE_SPEECH_WORDS + 1) / TTS_WORDS_PER_SECOND > PACING_MAX_SCENE_SECONDS
+    # The ceiling is derived, not hardcoded, so the gate stays the single source of truth.
+    assert MAX_SCENE_SPEECH_WORDS == int(PACING_MAX_SCENE_SECONDS * TTS_WORDS_PER_SECOND)
 
 
 def test_script_validation_rejects_over_long_narration():
@@ -200,7 +208,7 @@ def test_script_validation_rejects_over_long_narration():
 
 
 def test_script_validation_accepts_budget_sized_narration():
-    """A scene inside the budget must still build successfully."""
+    """A scene exactly at the derived ceiling must still build successfully."""
     from autopilot.providers.openai_llm_provider import _parse_json_to_script_document
 
     parsed = {
@@ -212,7 +220,7 @@ def test_script_validation_accepts_budget_sized_narration():
             {
                 "scene_id": "scene-01",
                 "order": 1,
-                "narration": " ".join(["word"] * 9),
+                "narration": " ".join(["word"] * MAX_SCENE_SPEECH_WORDS),
                 "visual_intent": "a concrete physical subject",
                 "asset_query": "concrete subject",
                 "on_screen_text": "TEXT",
@@ -232,3 +240,107 @@ def test_script_validation_accepts_budget_sized_narration():
         has_research=False,
     )
     assert len(script.scenes) == 1
+
+
+# ------------------------------------------------------------------
+# Pacing violations must be corrected in-flight, not fail the run
+# ------------------------------------------------------------------
+
+
+def test_pacing_violation_is_a_value_error_with_offenders():
+    """Callers catching ValueError must keep working; offenders must be typed."""
+    from autopilot.providers.openai_llm_provider import PacingBudgetError
+
+    err = PacingBudgetError("boom", offenders=[("scene-02", 11)])
+    assert isinstance(err, ValueError)
+    assert err.offenders == [("scene-02", 11)]
+
+
+def test_pacing_correction_directive_names_the_offenders():
+    from autopilot.providers.openai_llm_provider import PacingBudgetError
+
+    directive = PacingBudgetError("boom", offenders=[("scene-02", 11)]).correction_directive()
+    assert "scene-02" in directive
+    assert str(MAX_SCENE_SPEECH_WORDS) in directive
+
+
+def test_pacing_correction_directive_quotes_the_rejected_narration():
+    """Counts alone were not actionable: the model kept re-emitting 9-word scenes.
+
+    The directive must show the actual rejected text so the rewrite is targeted.
+    """
+    from autopilot.providers.openai_llm_provider import PacingBudgetError
+
+    directive = PacingBudgetError(
+        "boom",
+        offenders=[("scene-01", 9)],
+        offender_text={"scene-01": "The wreck rests over two miles beneath the waves"},
+    ).correction_directive()
+    assert "The wreck rests over two miles beneath the waves" in directive
+    assert "scene-01" in directive
+
+
+def test_pacing_correction_retries_then_raises_without_bypass():
+    """An over-long script is retried with a correction, then fails closed.
+
+    The gate must never be satisfied by truncating narration or by lowering the
+    ceiling: either the model rewrites short enough scenes or the run fails.
+    """
+    from autopilot.providers import openai_llm_provider as mod
+
+    over_long = {
+        "title": "T", "description": "D", "hook_text": "H", "cta_text": "C",
+        "scenes": [{
+            "scene_id": "scene-01", "order": 1,
+            "narration": " ".join(["word"] * (MAX_SCENE_SPEECH_WORDS + 3)),
+            "visual_intent": "a concrete physical subject",
+            "asset_query": "concrete subject",
+            "on_screen_text": "TEXT",
+            "scene_type": "broll",
+        }],
+    }
+
+    calls: list[str] = []
+
+    class _FakeHTTPResponse:
+        def __init__(self, payload: bytes) -> None:
+            self._payload = payload
+
+        def read(self) -> bytes:
+            return self._payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_urlopen(req, timeout=None):
+        calls.append(req.data.decode("utf-8"))
+        return _FakeHTTPResponse(
+            json.dumps({"choices": [{"message": {"content": json.dumps(over_long)}}]}).encode("utf-8")
+        )
+
+    provider = mod.OpenAICompatibleLLMProvider(
+        api_key="k",
+        model_name="m",
+        stream=False,
+        # Exercise the OpenAI-compatible transport (what OpenRouter uses). A
+        # localhost:11434 base URL would divert to the Ollama transport instead.
+        base_url="https://openrouter.ai/api/v1",
+    )
+
+    with mock.patch.object(mod.urllib.request, "urlopen", fake_urlopen):
+        with pytest.raises(Exception) as excinfo:
+            provider.generate_script(
+                topic="Titanic", target_duration=30, language="en", research_context="",
+            )
+
+    # Three bounded attempts, not an unbounded loop and not a silent pass.
+    assert len(calls) == 3
+    # The 2nd and 3rd attempts carry the corrective pacing directive.
+    assert "PACING CORRECTION" not in calls[0]
+    assert "PACING CORRECTION" in calls[1]
+    assert "PACING CORRECTION" in calls[2]
+    # It still failed closed.
+    assert "pacing budget" in str(excinfo.value).lower()

@@ -18,13 +18,65 @@ from autopilot.core.contracts import ScriptDocument, ScriptScene
 from autopilot.core.duration import estimate_duration
 
 # Pacing contract, shared by the generation prompt and the script-time guard.
-# TTS_WORDS_PER_SECOND was measured from real Edge TTS output: 73 spoken words
-# rendered as 32.88s of narration (2.22 words/sec). Creative QA blocks any scene
-# whose speech exceeds 4.5s, which caps a scene at 10 words (10 / 2.2 = 4.5s).
-# The guard and the prompt must agree: 12 words would be 5.5s and would always be
-# rejected downstream, so the ceiling is 10 and corrective retries rewrite offenders.
-TTS_WORDS_PER_SECOND = 2.2
-MAX_SCENE_SPEECH_WORDS = 10
+# Creative QA hard-blocks any scene whose measured speech runs past 4.5s
+# (see CreativeQAEngine._evaluate_pacing_cadence). Edge TTS measured 2.22
+# words/sec over a 73-word corpus, but real per-scene delivery including
+# sentence-final pauses settles at ~1.95 words/sec: a 10-word scene rendered at
+# 4.6-5.2s and tripped the pacing gate despite passing a naive word count.
+# The pre-flight guard, the prompt, and the gate must therefore all derive from
+# the same limit, so the ceiling is computed rather than hardcoded.
+PACING_MAX_SCENE_SECONDS = 4.5
+TTS_WORDS_PER_SECOND = 1.95
+MAX_SCENE_SPEECH_WORDS = int(PACING_MAX_SCENE_SECONDS * TTS_WORDS_PER_SECOND)
+# Scene count the prompt asks for. The advertised duration/word totals are
+# derived from these so the prompt cannot drift from the pacing budget.
+MIN_SCENES = 7
+MAX_SCENES = 8
+
+
+class PacingBudgetError(ValueError):
+    """Raised when generated narration exceeds the per-scene speech budget.
+
+    Carries the offending scenes so the caller can issue a targeted corrective
+    regeneration instead of failing the whole production run.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        offenders: Optional[List[Tuple[str, int]]] = None,
+        offender_text: Optional[Dict[str, str]] = None,
+    ) -> None:
+        super().__init__(message)
+        self.offenders: List[Tuple[str, int]] = list(offenders or [])
+        self.offender_text: Dict[str, str] = dict(offender_text or {})
+
+    def correction_directive(self) -> str:
+        detail = ", ".join(f"{sid} ({count} words)" for sid, count in self.offenders)
+        # Showing the rejected text is what makes the correction actionable;
+        # naming counts alone left the model re-emitting the same length.
+        examples = ""
+        if self.offender_text:
+            lines = []
+            for sid, _count in self.offenders:
+                text = self.offender_text.get(sid)
+                if text:
+                    lines.append(f'  {sid}: "{text}"')
+            if lines:
+                examples = (
+                    "\nThe rejected narration was:\n"
+                    + "\n".join(lines)
+                    + "\nRewrite each of those to "
+                    f"{MAX_SCENE_SPEECH_WORDS} words or fewer, counting the words you write."
+                )
+        return (
+            f"\nPACING CORRECTION (mandatory): the previous attempt was REJECTED because these "
+            f"scenes exceeded the {MAX_SCENE_SPEECH_WORDS}-word ceiling: {detail}. "
+            f"Rewrite those narrations to {MAX_SCENE_SPEECH_WORDS} words or fewer each. "
+            f"Drop filler words, split one idea across two scenes, or cut adjectives. "
+            f"Keep the same facts and the same scene count unless you genuinely need more scenes."
+            f"{examples}"
+        )
 
 
 def redact_api_key(text: str) -> str:
@@ -171,7 +223,7 @@ def _build_prompts_and_evidence(
         '    {\n'
         '      "scene_id": "scene-01",\n'
         '      "order": 1,\n'
-        '      "narration": "Punchy hook or intro narration (8-10 words)",\n'
+        '      "narration": "Punchy hook or intro narration",\n'
         '      "visual_intent": "Concrete physical photographic description",\n'
         '      "asset_query": "2-3 word photographic search query",\n'
         '      "on_screen_text": "2-4 WORD UPPERCASE BADGE",\n'
@@ -183,7 +235,7 @@ def _build_prompts_and_evidence(
         '    {\n'
         '      "scene_id": "scene-02",\n'
         '      "order": 2,\n'
-        '      "narration": "First substantive fact or point (8-10 words)",\n'
+        '      "narration": "First substantive fact or point",\n'
         '      "visual_intent": "Concrete physical photographic description",\n'
         '      "asset_query": "2-3 word photographic search query",\n'
         '      "on_screen_text": "2-4 WORD UPPERCASE BADGE",\n'
@@ -195,7 +247,7 @@ def _build_prompts_and_evidence(
         '    {\n'
         '      "scene_id": "scene-03",\n'
         '      "order": 3,\n'
-        '      "narration": "Next substantive fact or context (8-10 words)",\n'
+        '      "narration": "Next substantive fact or context",\n'
         '      "visual_intent": "Concrete physical photographic description",\n'
         '      "asset_query": "2-3 word photographic search query",\n'
         '      "on_screen_text": "2-4 WORD UPPERCASE BADGE",\n'
@@ -207,7 +259,7 @@ def _build_prompts_and_evidence(
         '    {\n'
         '      "scene_id": "scene-04",\n'
         '      "order": 4,\n'
-        '      "narration": "Additional surprising fact or depth (8-10 words)",\n'
+        '      "narration": "Additional surprising fact or depth",\n'
         '      "visual_intent": "Concrete physical photographic description",\n'
         '      "asset_query": "2-3 word photographic search query",\n'
         '      "on_screen_text": "2-4 WORD UPPERCASE BADGE",\n'
@@ -219,7 +271,7 @@ def _build_prompts_and_evidence(
         '    {\n'
         '      "scene_id": "scene-05",\n'
         '      "order": 5,\n'
-        '      "narration": "Key insight or climax building toward payoff (8-10 words)",\n'
+        '      "narration": "Key insight or climax building toward payoff",\n'
         '      "visual_intent": "Concrete physical photographic description",\n'
         '      "asset_query": "2-3 word photographic search query",\n'
         '      "on_screen_text": "2-4 WORD UPPERCASE BADGE",\n'
@@ -231,7 +283,7 @@ def _build_prompts_and_evidence(
         '    {\n'
         '      "scene_id": "scene-06",\n'
         '      "order": 6,\n'
-        '      "narration": "Intentional conclusion or payoff connecting back to hook (8-10 words)",\n'
+        '      "narration": "Intentional conclusion or payoff connecting back to hook",\n'
         '      "visual_intent": "Concrete physical photographic description",\n'
         '      "asset_query": "2-3 word photographic search query",\n'
         '      "on_screen_text": "2-4 WORD UPPERCASE BADGE",\n'
@@ -251,10 +303,14 @@ def _build_prompts_and_evidence(
         f"- Hook Style: {channel_hook_style}\n"
         f"- Visual Motif: {channel_visual_motif}\n"
         "EDITORIAL QUALITY RULES:\n"
-        "1. DURATION: Generate 7 to 8 useful scenes so total video narration targets 32-38 seconds of natural speech (approx 70 to 85 spoken words total across all scenes).\n"
+        f"1. DURATION: Generate {MIN_SCENES} to {MAX_SCENES} useful scenes so total video narration targets "
+        f"{round(MIN_SCENES * MAX_SCENE_SPEECH_WORDS / TTS_WORDS_PER_SECOND)}-"
+        f"{round(MAX_SCENES * MAX_SCENE_SPEECH_WORDS / TTS_WORDS_PER_SECOND)} seconds of natural speech "
+        f"(approx {MIN_SCENES * MAX_SCENE_SPEECH_WORDS} to {MAX_SCENES * MAX_SCENE_SPEECH_WORDS} spoken words "
+        f"total across all scenes).\n"
         "2. STRUCTURE: Script MUST follow the progression: HOOK (Scene 1) -> EXPLANATION / FACTS (Middle Scenes) -> INTENTIONAL PAYOFF / ENDING (Final Scene).\n"
         "3. INTENTIONAL ENDING: The final scene MUST be an intentional conclusion (payoff returning to hook, strongest final fact, seamless loop back, or payoff statement). NEVER end abruptly or use generic filler like 'thanks for watching'.\n"
-        "4. SCENE NARRATION: Punchy, conversational, spoken English. 8 to 10 words per scene. One clear idea per scene. HARD LIMIT: never exceed 10 words in a scene (measured Edge TTS rate is ~2.2 words/sec; 10 words = ~4.5s, the pacing gate maximum). If you write 11+ words, the script WILL BE REJECTED. Count your words.\n"
+        f"4. SCENE NARRATION: Punchy, conversational, spoken English. Exactly {MAX_SCENE_SPEECH_WORDS} words or fewer per scene. One clear idea per scene. HARD LIMIT: never exceed {MAX_SCENE_SPEECH_WORDS} words in a scene (measured Edge TTS delivery is ~{TTS_WORDS_PER_SECOND} words/sec, and Creative QA hard-blocks any scene whose speech exceeds {PACING_MAX_SCENE_SECONDS}s). If you write {MAX_SCENE_SPEECH_WORDS + 1}+ words, the script WILL BE REJECTED. Count your words.\n"
         "5. VISUAL INTENT: Describe concrete, tangible physical subjects suitable for photography.\n"
         "6. ASSET QUERY: 2-3 words naming concrete physical photographic subjects.\n"
         "7. ON_SCREEN_TEXT: 2-4 uppercase words for visual title card.\n"
@@ -271,7 +327,11 @@ def _build_prompts_and_evidence(
 
     user_prompt_lines = [
         f"Write a {int(target_duration)}-second vertical video script about: {topic}",
-        f"Target spoken narration duration is 32-38 seconds (approx 70-85 total spoken words across 7 to 8 useful scenes).",
+        f"Target spoken narration duration is "
+        f"{round(MIN_SCENES * MAX_SCENE_SPEECH_WORDS / TTS_WORDS_PER_SECOND)}-"
+        f"{round(MAX_SCENES * MAX_SCENE_SPEECH_WORDS / TTS_WORDS_PER_SECOND)} seconds "
+        f"(approx {MIN_SCENES * MAX_SCENE_SPEECH_WORDS}-{MAX_SCENES * MAX_SCENE_SPEECH_WORDS} total spoken words "
+        f"across {MIN_SCENES} to {MAX_SCENES} useful scenes).",
         "Scene 1 MUST be a strong hook. The final scene MUST be an intentional conclusion/payoff.",
     ]
     if cardinality:
@@ -281,7 +341,7 @@ def _build_prompts_and_evidence(
             f"- You MUST create a hook scene plus at least {cardinality} separate fact scenes (one distinct scene per item/fact).\n"
             f"- Dedicate exactly one clear scene/fact unit to each item (e.g. scene-01: Hook, scene-02: Fact 1, scene-03: Fact 2, scene-04: Fact 3, followed by optional CTA).\n"
             f"- DO NOT combine multiple items into a single scene.\n"
-            f"- Keep narration punchy (8-10 words per scene, never over {MAX_SCENE_SPEECH_WORDS}) and make each scene independently visualizable."
+            f"- Keep narration punchy ({MAX_SCENE_SPEECH_WORDS} words or fewer per scene) and make each scene independently visualizable."
         )
     if has_research:
         user_prompt_lines.append("\nSUPPLIED RESEARCH EVIDENCE:")
@@ -377,10 +437,11 @@ def _parse_json_to_script_document(
     if total_duration <= 0:
         total_duration = estimate_duration(" ".join(s.narration for s in scenes))
 
-    # Fail fast on pacing violations. The creative QA gate blocks any scene whose
-    # speech runs past 4.5s (measured Edge TTS rate is ~2.2 words/sec, so ~11
-    # words is the ceiling). Catching an over-long scene here costs one LLM call;
-    # catching it after assets, voice, and render costs a full production run.
+    # Fail fast on pacing violations. Creative QA blocks any scene whose measured
+    # speech runs past 4.5s, and word count is only a proxy for that, so the
+    # ceiling is derived from the gate (see MAX_SCENE_SPEECH_WORDS). Catching an
+    # over-long scene here costs one LLM call; catching it after assets, voice,
+    # and render costs a full production run.
     over_long = [
         (s.scene_id, len(s.narration.split()))
         for s in scenes
@@ -388,12 +449,14 @@ def _parse_json_to_script_document(
     ]
     if over_long:
         detail = ", ".join(f"{sid}={count}w" for sid, count in over_long)
-        raise ValueError(
+        raise PacingBudgetError(
             f"LLM script for topic '{topic}' violates the pacing budget: {detail}. "
             f"Each spoken scene must be {MAX_SCENE_SPEECH_WORDS} words or fewer "
             f"({int(MAX_SCENE_SPEECH_WORDS / TTS_WORDS_PER_SECOND * 10) / 10}s of speech at the "
             f"measured {TTS_WORDS_PER_SECOND} words/sec). Rewrite the script with more, "
-            f"shorter scenes instead of lengthening individual ones."
+            f"shorter scenes instead of lengthening individual ones.",
+            offenders=over_long,
+            offender_text={s.scene_id: s.narration for s in scenes if s.scene_id in {o[0] for o in over_long}},
         )
 
     # Validate returned source_references against supplied evidence
@@ -732,8 +795,9 @@ class OpenAICompatibleLLMProvider(LLMProvider):
 
         try:
             last_decode_err = None
+            retry_directives: List[str] = []
             for attempt_idx in range(1, 4):
-                cur_user_prompt = user_prompt
+                cur_user_prompt = user_prompt + "".join(retry_directives)
                 if attempt_idx > 1:
                     cur_user_prompt += "\nCRITICAL: Respond ONLY with valid, RFC 8259 compliant JSON. Ensure all property names and strings are double-quoted, all commas are present between elements, and no trailing commas exist."
 
@@ -835,6 +899,12 @@ class OpenAICompatibleLLMProvider(LLMProvider):
                         valid_source_refs=valid_source_refs,
                         has_research=has_research,
                     )
+                except PacingBudgetError as perr:
+                    if attempt_idx < 3:
+                        retry_directives.append(perr.correction_directive())
+                        continue
+                    safe_msg = redact_api_key(str(perr))
+                    raise RuntimeError(f"{self.provider_name} LLM call failed: {safe_msg}") from perr
                 except json.JSONDecodeError as jerr:
                     last_decode_err = jerr
                     if attempt_idx < 3:
@@ -1080,151 +1150,176 @@ class OllamaLLMProvider(LLMProvider):
             "Content-Type": "application/json",
             "User-Agent": "ProjectAutopilot/0.1.0",
         }
-        req_data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(self.chat_url, data=req_data, headers=headers, method="POST")
 
-        start_t = time.time()
-        last_chunk_t = start_t
-        accumulated_content: List[str] = []
-        thinking_chunks: List[str] = []
-        eval_meta: Dict[str, Any] = {}
+        # Bounded corrective retry: a pacing violation is a recoverable authoring
+        # error, so re-prompt with the offending scenes instead of failing the run
+        # (or, worse, silently truncating narration to satisfy the gate).
+        retry_directives: List[str] = []
+        last_err: Optional[BaseException] = None
+        for attempt_idx in range(1, 4):
+            cur_user_prompt = user_prompt + "".join(retry_directives)
+            if attempt_idx > 1:
+                cur_user_prompt += (
+                    "\nCRITICAL: Respond ONLY with valid, RFC 8259 compliant JSON. Ensure all "
+                    "property names and strings are double-quoted, all commas are present "
+                    "between elements, and no trailing commas exist."
+                )
+            payload["messages"] = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": cur_user_prompt},
+            ]
+            req_data = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(self.chat_url, data=req_data, headers=headers, method="POST")
 
-        try:
-            with urllib.request.urlopen(req, timeout=self.idle_timeout) as resp:
-                if self.stream:
-                    for line_bytes in _iter_response_lines(resp):
-                        now = time.time()
-                        if now - start_t > self.timeout:
-                            raise TimeoutError(
-                                f"{self.provider_name} LLM timeout (total_timeout): "
-                                f"request to '{self.chat_url}' for model '{self.model_name}' timed out after {now - start_t:.1f}s "
-                                f"(streaming=True, think={self.think})."
-                            )
-                        if isinstance(line_bytes, bytes):
-                            line = line_bytes.decode("utf-8").strip()
-                        else:
-                            line = str(line_bytes).strip()
-                        if not line:
-                            continue
-                        if line.startswith("data: "):
-                            data_str = line[6:].strip()
-                            if data_str == "[DONE]":
-                                break
-                            try:
-                                chunk = json.loads(data_str)
-                                choices = chunk.get("choices", [])
-                                if choices:
-                                    delta = choices[0].get("delta", {})
-                                    content_chunk = delta.get("content", "")
-                                    thinking_chunk = delta.get("thinking") or delta.get("reasoning_content") or ""
-                                    if content_chunk:
-                                        accumulated_content.append(content_chunk)
-                                    if thinking_chunk:
-                                        thinking_chunks.append(thinking_chunk)
-                            except json.JSONDecodeError:
-                                pass
-                        elif line.startswith("{"):
-                            try:
-                                chunk = json.loads(line)
-                                if "choices" in chunk and isinstance(chunk["choices"], list) and chunk["choices"]:
-                                    first_choice = chunk["choices"][0]
-                                    if "message" in first_choice and isinstance(first_choice["message"], dict):
-                                        c = first_choice["message"].get("content", "")
-                                        if c:
-                                            accumulated_content.append(c)
-                                            break
-                                    elif "delta" in first_choice and isinstance(first_choice["delta"], dict):
-                                        c = first_choice["delta"].get("content", "")
-                                        th = first_choice["delta"].get("thinking") or first_choice["delta"].get("reasoning_content") or ""
+            start_t = time.time()
+            last_chunk_t = start_t
+            accumulated_content: List[str] = []
+            thinking_chunks: List[str] = []
+            eval_meta: Dict[str, Any] = {}
+
+            try:
+                with urllib.request.urlopen(req, timeout=self.idle_timeout) as resp:
+                    if self.stream:
+                        for line_bytes in _iter_response_lines(resp):
+                            now = time.time()
+                            if now - start_t > self.timeout:
+                                raise TimeoutError(
+                                    f"{self.provider_name} LLM timeout (total_timeout): "
+                                    f"request to '{self.chat_url}' for model '{self.model_name}' timed out after {now - start_t:.1f}s "
+                                    f"(streaming=True, think={self.think})."
+                                )
+                            if isinstance(line_bytes, bytes):
+                                line = line_bytes.decode("utf-8").strip()
+                            else:
+                                line = str(line_bytes).strip()
+                            if not line:
+                                continue
+                            if line.startswith("data: "):
+                                data_str = line[6:].strip()
+                                if data_str == "[DONE]":
+                                    break
+                                try:
+                                    chunk = json.loads(data_str)
+                                    choices = chunk.get("choices", [])
+                                    if choices:
+                                        delta = choices[0].get("delta", {})
+                                        content_chunk = delta.get("content", "")
+                                        thinking_chunk = delta.get("thinking") or delta.get("reasoning_content") or ""
+                                        if content_chunk:
+                                            accumulated_content.append(content_chunk)
+                                        if thinking_chunk:
+                                            thinking_chunks.append(thinking_chunk)
+                                except json.JSONDecodeError:
+                                    pass
+                            elif line.startswith("{"):
+                                try:
+                                    chunk = json.loads(line)
+                                    if "choices" in chunk and isinstance(chunk["choices"], list) and chunk["choices"]:
+                                        first_choice = chunk["choices"][0]
+                                        if "message" in first_choice and isinstance(first_choice["message"], dict):
+                                            c = first_choice["message"].get("content", "")
+                                            if c:
+                                                accumulated_content.append(c)
+                                                break
+                                        elif "delta" in first_choice and isinstance(first_choice["delta"], dict):
+                                            c = first_choice["delta"].get("content", "")
+                                            th = first_choice["delta"].get("thinking") or first_choice["delta"].get("reasoning_content") or ""
+                                            if c:
+                                                accumulated_content.append(c)
+                                            if th:
+                                                thinking_chunks.append(th)
+                                    elif "message" in chunk and isinstance(chunk["message"], dict):
+                                        msg = chunk["message"]
+                                        c = msg.get("content", "")
+                                        th = msg.get("thinking", "")
                                         if c:
                                             accumulated_content.append(c)
                                         if th:
                                             thinking_chunks.append(th)
-                                elif "message" in chunk and isinstance(chunk["message"], dict):
-                                    msg = chunk["message"]
-                                    c = msg.get("content", "")
-                                    th = msg.get("thinking", "")
-                                    if c:
-                                        accumulated_content.append(c)
-                                    if th:
-                                        thinking_chunks.append(th)
-                                if chunk.get("done"):
-                                    eval_meta = {
-                                        "eval_count": chunk.get("eval_count"),
-                                        "eval_duration_ms": (chunk.get("eval_duration") or 0) / 1e6,
-                                        "prompt_eval_count": chunk.get("prompt_eval_count"),
-                                    }
-                            except json.JSONDecodeError:
-                                pass
-                        last_chunk_t = time.time()
-                    content = "".join(accumulated_content).strip()
-                else:
-                    res_body = resp.read().decode("utf-8")
-                    raw_json = json.loads(res_body)
-                    content = raw_json.get("message", {}).get("content", "")
-                    if not content and "choices" in raw_json:
-                        content = raw_json["choices"][0]["message"]["content"]
-                    if raw_json.get("done"):
-                        eval_meta = {
-                            "eval_count": raw_json.get("eval_count"),
-                            "eval_duration_ms": (raw_json.get("eval_duration") or 0) / 1e6,
-                            "prompt_eval_count": raw_json.get("prompt_eval_count"),
-                        }
+                                    if chunk.get("done"):
+                                        eval_meta = {
+                                            "eval_count": chunk.get("eval_count"),
+                                            "eval_duration_ms": (chunk.get("eval_duration") or 0) / 1e6,
+                                            "prompt_eval_count": chunk.get("prompt_eval_count"),
+                                        }
+                                except json.JSONDecodeError:
+                                    pass
+                            last_chunk_t = time.time()
+                        content = "".join(accumulated_content).strip()
+                    else:
+                        res_body = resp.read().decode("utf-8")
+                        raw_json = json.loads(res_body)
+                        content = raw_json.get("message", {}).get("content", "")
+                        if not content and "choices" in raw_json:
+                            content = raw_json["choices"][0]["message"]["content"]
+                        if raw_json.get("done"):
+                            eval_meta = {
+                                "eval_count": raw_json.get("eval_count"),
+                                "eval_duration_ms": (raw_json.get("eval_duration") or 0) / 1e6,
+                                "prompt_eval_count": raw_json.get("prompt_eval_count"),
+                            }
 
-            if not content:
-                th_len = len("".join(thinking_chunks))
-                raise RuntimeError(
-                    f"{self.provider_name} LLM returned empty content for model '{self.model_name}'. "
-                    f"Thinking generated: {th_len} chars. "
-                    f"Ensure think=False or increase num_predict limit."
+                if not content:
+                    th_len = len("".join(thinking_chunks))
+                    raise RuntimeError(
+                        f"{self.provider_name} LLM returned empty content for model '{self.model_name}'. "
+                        f"Thinking generated: {th_len} chars. "
+                        f"Ensure think=False or increase num_predict limit."
+                    )
+
+                parsed = _robust_parse_json(content)
+                return _parse_json_to_script_document(
+                    parsed=parsed,
+                    topic=topic,
+                    content_id=content_id,
+                    language=language,
+                    raw_response=content,
+                    provider_name=self.provider_name,
+                    model_name=self.model_name,
+                    valid_source_refs=valid_source_refs,
+                    has_research=has_research,
+                    extra_metadata=eval_meta,
                 )
 
-            parsed = _robust_parse_json(content)
-            return _parse_json_to_script_document(
-                parsed=parsed,
-                topic=topic,
-                content_id=content_id,
-                language=language,
-                raw_response=content,
-                provider_name=self.provider_name,
-                model_name=self.model_name,
-                valid_source_refs=valid_source_refs,
-                has_research=has_research,
-                extra_metadata=eval_meta,
-            )
+            except PacingBudgetError as perr:
+                if attempt_idx < 3:
+                    retry_directives.append(perr.correction_directive())
+                    continue
+                safe_msg = redact_api_key(str(perr))
+                raise RuntimeError(f"{self.provider_name} LLM call failed: {safe_msg}") from perr
 
-        except urllib.error.HTTPError as err:
-            try:
-                raw_body = err.read().decode("utf-8", errors="ignore")
-            except Exception:
-                raw_body = str(err)
-            safe_msg = redact_api_key(raw_body)
-            if err.code == 404:
-                available = self._discover_available_models()
-                avail_str = f" Available models on endpoint: {available}." if available else ""
-                raise RuntimeError(
-                    f"{self.provider_name} LLM error (HTTP 404): Model '{self.model_name}' not found on endpoint '{self.root_url}'.{avail_str} "
-                    f"Set configuration/environment variable to an available model."
-                ) from err
-            raise RuntimeError(f"{self.provider_name} LLM error (HTTP {err.code}): {safe_msg}") from err
-        except (TimeoutError, socket.timeout) as exc:
-            elapsed = time.time() - start_t
-            category = "idle_timeout" if (time.time() - last_chunk_t >= self.idle_timeout - 1) else "total_timeout"
-            raise TimeoutError(
-                f"{self.provider_name} LLM timeout ({category}): "
-                f"request to '{self.chat_url}' for model '{self.model_name}' timed out after {elapsed:.1f}s "
-                f"(streaming={self.stream}, think={self.think})."
-            ) from exc
-        except Exception as exc:
-            if "timed out" in str(exc).lower():
+            except urllib.error.HTTPError as err:
+                try:
+                    raw_body = err.read().decode("utf-8", errors="ignore")
+                except Exception:
+                    raw_body = str(err)
+                safe_msg = redact_api_key(raw_body)
+                if err.code == 404:
+                    available = self._discover_available_models()
+                    avail_str = f" Available models on endpoint: {available}." if available else ""
+                    raise RuntimeError(
+                        f"{self.provider_name} LLM error (HTTP 404): Model '{self.model_name}' not found on endpoint '{self.root_url}'.{avail_str} "
+                        f"Set configuration/environment variable to an available model."
+                    ) from err
+                raise RuntimeError(f"{self.provider_name} LLM error (HTTP {err.code}): {safe_msg}") from err
+            except (TimeoutError, socket.timeout) as exc:
                 elapsed = time.time() - start_t
+                category = "idle_timeout" if (time.time() - last_chunk_t >= self.idle_timeout - 1) else "total_timeout"
                 raise TimeoutError(
-                    f"{self.provider_name} LLM timeout (socket_timeout): "
+                    f"{self.provider_name} LLM timeout ({category}): "
                     f"request to '{self.chat_url}' for model '{self.model_name}' timed out after {elapsed:.1f}s "
                     f"(streaming={self.stream}, think={self.think})."
                 ) from exc
-            safe_msg = redact_api_key(str(exc))
-            raise RuntimeError(f"{self.provider_name} LLM call failed: {safe_msg}") from exc
+            except Exception as exc:
+                if "timed out" in str(exc).lower():
+                    elapsed = time.time() - start_t
+                    raise TimeoutError(
+                        f"{self.provider_name} LLM timeout (socket_timeout): "
+                        f"request to '{self.chat_url}' for model '{self.model_name}' timed out after {elapsed:.1f}s "
+                        f"(streaming={self.stream}, think={self.think})."
+                    ) from exc
+                safe_msg = redact_api_key(str(exc))
+                raise RuntimeError(f"{self.provider_name} LLM call failed: {safe_msg}") from exc
 
 
 class GeminiLLMProvider(OpenAICompatibleLLMProvider):

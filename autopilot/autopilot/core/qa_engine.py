@@ -1249,6 +1249,13 @@ def export_qa_artifacts(report: QAReport, out_dir: Path) -> dict:
         json.dumps([m.model_dump() for m in report.metrics], indent=2, default=str), encoding="utf-8"
     )
     if report.receipt:
+        # The receipt is the artifact the publisher trusts, so it must never be
+        # more permissive than the report it ships with. Downstream gates (e.g.
+        # the composite creative/publish readiness gate) can demote the report
+        # after the nested receipt was built; re-sync here so a blocked run can
+        # never persist a fail-open `publish_allowed: true` receipt.
+        report.receipt.status = report.status
+        report.receipt.publish_allowed = bool(report.publish_allowed)
         receipt_path.write_text(report.receipt.model_dump_json(indent=2), encoding="utf-8")
 
     return {
