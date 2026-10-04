@@ -97,6 +97,25 @@ class PublishingEngine:
 
         return None
 
+    def _resolve_thumbnail_file(self, job_id: str) -> Optional[Path]:
+        """Locate a generated custom thumbnail for the job, if one exists.
+
+        Optional by design: when absent, publication proceeds and YouTube
+        keeps its own default frame. Only a real, non-empty file on disk is
+        returned so we never hand a bogus path to the platform.
+        """
+        try:
+            art_dir = job_artifact_dir(job_id, base_dir=self.config.get_artifacts_dir())
+            for candidate in (
+                art_dir / "thumbnails" / "thumb.jpg",
+                art_dir / "thumbnails" / "thumb.png",
+            ):
+                if candidate.exists() and candidate.is_file() and candidate.stat().st_size > 0:
+                    return candidate
+        except Exception:
+            return None
+        return None
+
     def _load_publish_readiness(self, job_id: str) -> Optional[Dict[str, Any]]:
         """Load the composite publish-readiness verdict if one was persisted.
 
@@ -540,6 +559,11 @@ class PublishingEngine:
         # 2. Compute media checksum
         media_checksum = compute_file_sha256(target_media)
 
+        # 2b. Resolve the optional custom thumbnail (Phase 4.1). Absent is fine:
+        # the platform then keeps its own default frame.
+        thumbnail_file = self._resolve_thumbnail_file(job_id)
+        thumbnail_path_str = str(thumbnail_file) if thumbnail_file else None
+
         # 3. STRICT QA GATE VERIFICATION
         qa_receipt = self._load_qa_receipt(job_id, db)
         if not qa_receipt:
@@ -858,6 +882,7 @@ class PublishingEngine:
             tags=tags,
             category_id="28",
             media_path=str(target_media.resolve()),
+            thumbnail_path=thumbnail_path_str,
             media_checksum_sha256=media_checksum,
             scheduled_publish_time=scheduled_time,
             made_for_kids=False,

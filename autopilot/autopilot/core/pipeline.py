@@ -873,6 +873,36 @@ class PipelineOrchestrator:
             self.db.update_job_status(job_id, WorkflowState.RENDERED.value)
             logger.info("stage_resumed", details={"stage": "RENDER", "reason": "existing_valid_media", "engine": target_production_engine})
 
+        # 5b. CUSTOM THUMBNAIL (Phase 4.1)
+        # Built from the strongest scene's already-verified asset so it cannot
+        # introduce rights/provenance questions QA did not already clear.
+        # Fail-soft: never blocks the pipeline or publication.
+        try:
+            from autopilot.core.thumbnail import generate_thumbnail
+
+            _hook_text = ""
+            try:
+                _first_scene = (script.scenes[0] if script.scenes else None)
+                _hook_text = (_first_scene.narration if _first_scene else "") or ""
+            except Exception:
+                _hook_text = ""
+            _channel_label = ""
+            try:
+                _brand = getattr(profile, "visual_brand", None) or getattr(profile, "channel_profile", None)
+                _channel_label = str(getattr(_brand, "channel_name", "") or "")
+            except Exception:
+                _channel_label = ""
+            _thumb = generate_thumbnail(
+                render_scenes=render_scenes,
+                job_dir=art_dir,
+                hook=_hook_text,
+                channel_name=_channel_label,
+            )
+            if _thumb:
+                logger.info("custom_thumbnail_generated", details={"path": str(_thumb)})
+        except Exception as exc:
+            logger.warning("custom_thumbnail_skipped", details={"reason": str(exc)})
+
         # --------------------------------------------------------------
         # 6. QA STAGE & QUALITY GATE
         # --------------------------------------------------------------

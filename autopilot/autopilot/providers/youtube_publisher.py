@@ -321,6 +321,18 @@ class YouTubePublisher(PublisherProvider):
                 if final_resp_data and ("id" in final_resp_data or "kind" in final_resp_data):
                     video_id = final_resp_data.get("id", f"yt-{request.job_id}")
                     remote_url = f"https://youtu.be/{video_id}"
+
+                    # Custom thumbnail (Phase 4.1). Applied AFTER the video is
+                    # uploaded because thumbnails.set needs a real videoId.
+                    # Strictly best-effort: a thumbnail failure must never turn
+                    # a successful upload into a failed publication, so it is
+                    # recorded and swallowed here.
+                    thumbnail_result: Dict[str, Any] = {}
+                    if request.thumbnail_path:
+                        thumbnail_result = self._apply_custom_thumbnail(
+                            video_id=str(video_id), thumbnail_path=request.thumbnail_path
+                        )
+
                     receipt = PublicationReceipt(
                         receipt_id=f"rcpt-{request.job_id}",
                         job_id=request.job_id,
@@ -337,7 +349,11 @@ class YouTubePublisher(PublisherProvider):
                         published_at=datetime.now(timezone.utc).isoformat(),
                         metadata_hash=request.idempotency_key,
                         idempotency_key=request.idempotency_key,
-                        extra_metadata={"video_id": video_id, "file_size": file_size},
+                        extra_metadata={
+                            "video_id": video_id,
+                            "file_size": file_size,
+                            **({"custom_thumbnail": thumbnail_result} if thumbnail_result else {}),
+                        },
                     )
                     attempts.append(PublishAttempt(
                         attempt_id=att_id,
@@ -391,6 +407,69 @@ class YouTubePublisher(PublisherProvider):
                 retryable=False,
             ),
         )
+
+    def _apply_custom_thumbnail(self, video_id: str, thumbnail_path: str) -> Dict[str, Any]:
+        """Upload a custom thumbnail via YouTube Data API ``thumbnails.set``.
+
+        Protocol (per the official YouTube Data API v3 reference):
+          POST https://www.googleapis.com/upload/youtube/v3/thumbnails/set?uploadType=media&videoId={id}
+          Body: raw image bytes, Content-Type: image/jpeg (or png)
+
+        Returns a small evidence dict. Never raises: the caller must be able to
+        complete publication regardless of the thumbnail outcome.
+        """
+        evidence: Dict[str, Any] = {"attempted": True, "applied": False}
+        try:
+            thumb = Path(thumbnail_path)
+            if not thumb.exists() or not thumb.is_file() or thumb.stat().st_size == 0:
+                evidence["error"] = f"thumbnail file not found or empty: {thumbnail_path}"
+                return evidence
+
+            token = self._resolve_access_token()
+            if not token:
+                evidence["error"] = "no access token available for thumbnail upload"
+                return evidence
+
+            content_type = "image/png" if thumb.suffix.lower() == ".png" else "image/jpeg"
+            max_bytes = 2 * 1024 * 1024  # YouTube's documented custom-thumbnail cap
+            thumb_bytes = thumb.read_bytes()
+            if len(thumb_bytes) > max_bytes:
+                evidence["error"] = f"thumbnail exceeds YouTube 2MB limit ({len(thumb_bytes)} bytes)"
+                return evidence
+
+            url = (
+                "https://www.googleapis.com/upload/youtube/v3/thumbnails/set"
+                f"?uploadType=media&videoId={urllib.parse.quote(video_id)}"
+            )
+            req = urllib.request.Request(
+                url,
+                data=thumb_bytes,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": content_type,
+                    "Content-Length": str(len(thumb_bytes)),
+                },
+                method="POST",
+            )
+            status, _headers, body = self._execute_http(
+                req, timeout=self.config.publish_timeout_seconds
+            )
+            if status in (200, 201):
+                try:
+                    parsed = json.loads(body.decode("utf-8", errors="ignore") or "{}")
+                except Exception:
+                    parsed = {}
+                evidence["applied"] = True
+                evidence["status_code"] = status
+                evidence["thumbnail_url"] = parsed.get("url")
+                evidence["bytes"] = len(thumb_bytes)
+            else:
+                evidence["status_code"] = status
+                evidence["error"] = redact_secrets(body.decode("utf-8", errors="ignore"))[:500]
+            return evidence
+        except Exception as exc:
+            evidence["error"] = redact_secrets(str(exc))[:500]
+            return evidence
 
     def publish(self, request: PublishRequest) -> PublishResult:
         """Publish canonical request (PublishProviderProtocol compliance)."""

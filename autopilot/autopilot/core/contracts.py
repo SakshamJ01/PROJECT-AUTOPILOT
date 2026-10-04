@@ -876,6 +876,7 @@ class PublishRequest(BaseModel):
     tags: List[str] = Field(default_factory=list)
     category_id: str = "28"  # 28 = Science & Technology
     media_path: str = Field(..., min_length=1)
+    thumbnail_path: Optional[str] = None
     media_checksum_sha256: str = Field(..., min_length=1)
     scheduled_publish_time: Optional[str] = None
     made_for_kids: bool = False
