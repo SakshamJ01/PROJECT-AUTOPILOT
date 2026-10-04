@@ -108,6 +108,23 @@ def classify_qa_defect(findings: list[Any], report: Any = None) -> Tuple[Regener
     )
 
 
+DEFAULT_TRANSITION_PREFERENCE = "fade"
+
+
+def _resolve_scene_transition_hint(explicit_hint, channel_profile=None) -> str:
+    """Pick a scene's transition hint: explicit script value wins, else brand preference.
+
+    Keeping this in one place makes the brand's ``transition_preference`` field
+    reachable instead of dead config, while still honouring an explicit "cut".
+    """
+    explicit = str(explicit_hint or "").strip().lower()
+    if explicit:
+        return explicit
+    preference = getattr(getattr(channel_profile, "visual", None), "transition_preference", "")
+    preference = str(preference or "").strip().lower()
+    return preference or DEFAULT_TRANSITION_PREFERENCE
+
+
 class PipelineOrchestrator:
     """Executes the full pipeline for a job, resuming cleanly from the last valid stage."""
 
@@ -723,6 +740,11 @@ class PipelineOrchestrator:
                     {"word": w.word, "start": w.start_sec, "end": w.end_sec}
                     for w in scene.word_timestamps
                 ]
+            # Honour an explicit script hint; otherwise fall back to the brand's
+            # configured transition_preference so the setting is not dead config.
+            _hint = _resolve_scene_transition_hint(
+                scene.transition_hint, channel_profile_obj
+            )
             render_scenes.append({
                 "scene_id": scene.scene_id,
                 "duration_sec": dur,
@@ -731,7 +753,7 @@ class PipelineOrchestrator:
                 "narration": scene.narration,
                 "on_screen_text": scene.on_screen_text,
                 "emphasis_words": scene.emphasis_words or [],
-                "transition_hint": scene.transition_hint,
+                "transition_hint": _hint,
                 "word_timestamps": scene_words,
                 "caption_plan": {
                     "position": "LOWER",
@@ -899,8 +921,10 @@ class PipelineOrchestrator:
                 _hook_text = ""
             _channel_label = ""
             try:
-                _brand = getattr(profile, "visual_brand", None) or getattr(profile, "channel_profile", None)
-                _channel_label = str(getattr(_brand, "channel_name", "") or "")
+                # `profile` here is the profile NAME (a str), so getattr against
+                # it always yielded None and the channel label was silently
+                # always empty. The brand lives on the ChannelProfile instance.
+                _channel_label = str(getattr(channel_profile_obj, "channel_name", "") or "")
             except Exception:
                 _channel_label = ""
             _thumb = generate_thumbnail(

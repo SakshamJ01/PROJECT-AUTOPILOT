@@ -231,7 +231,7 @@ def _build_prompts_and_evidence(
         '      "emphasis_words": ["KEYWORD"],\n'
         '      "estimated_duration_seconds": 5.0,\n'
         '      "scene_type": "talking_head",\n'
-        '      "transition_hint": "cut"\n'
+        '      "transition_hint": "fade"\n'
         '    },\n'
         '    {\n'
         '      "scene_id": "scene-02",\n'
@@ -243,7 +243,7 @@ def _build_prompts_and_evidence(
         '      "emphasis_words": ["KEYWORD"],\n'
         '      "estimated_duration_seconds": 5.0,\n'
         '      "scene_type": "broll",\n'
-        '      "transition_hint": "cut"\n'
+        '      "transition_hint": "fade"\n'
         '    },\n'
         '    {\n'
         '      "scene_id": "scene-03",\n'
@@ -255,7 +255,7 @@ def _build_prompts_and_evidence(
         '      "emphasis_words": ["KEYWORD"],\n'
         '      "estimated_duration_seconds": 5.0,\n'
         '      "scene_type": "broll",\n'
-        '      "transition_hint": "cut"\n'
+        '      "transition_hint": "fade"\n'
         '    },\n'
         '    {\n'
         '      "scene_id": "scene-04",\n'
@@ -267,7 +267,7 @@ def _build_prompts_and_evidence(
         '      "emphasis_words": ["KEYWORD"],\n'
         '      "estimated_duration_seconds": 5.0,\n'
         '      "scene_type": "broll",\n'
-        '      "transition_hint": "cut"\n'
+        '      "transition_hint": "fade"\n'
         '    },\n'
         '    {\n'
         '      "scene_id": "scene-05",\n'
@@ -279,7 +279,7 @@ def _build_prompts_and_evidence(
         '      "emphasis_words": ["KEYWORD"],\n'
         '      "estimated_duration_seconds": 5.0,\n'
         '      "scene_type": "broll",\n'
-        '      "transition_hint": "cut"\n'
+        '      "transition_hint": "fade"\n'
         '    },\n'
         '    {\n'
         '      "scene_id": "scene-06",\n'
@@ -291,7 +291,7 @@ def _build_prompts_and_evidence(
         '      "emphasis_words": ["KEYWORD"],\n'
         '      "estimated_duration_seconds": 5.0,\n'
         '      "scene_type": "broll",\n'
-        '      "transition_hint": "cut"\n'
+        '      "transition_hint": "fade"\n'
         '    }\n'
         '  ],\n'
         '  "cta_text": "Call to action sentence",\n'
@@ -316,6 +316,13 @@ def _build_prompts_and_evidence(
         "6. ASSET QUERY: 2-3 words naming concrete physical photographic subjects.\n"
         "7. ON_SCREEN_TEXT: 2-4 uppercase words for visual title card.\n"
         "8. EMPHASIS_WORDS: 1-2 keywords from narration to highlight in captions.\n"
+        "RULES FOR TRANSITIONS:\n"
+        "1. 'transition_hint' on a scene controls the cut INTO that scene (scene-01 is the video open and is ignored).\n"
+        "2. Allowed values are exactly \"fade\" and \"cut\". Never emit other values; unknown values are ignored.\n"
+        "3. Default to \"fade\" for a smooth, continuous narrative.\n"
+        "4. Use \"cut\" ONLY for a hard punctuation: a jump in time, a chapter/beat change, or an intentional shock reveal.\n"
+        "5. Never use \"cut\" between two closely related consecutive shots.\n"
+        "6. Vary them: an all-fade video reads as monotonous, so include at least one \"cut\" per multi-scene script when the beats genuinely warrant it.\n"
         "RULES FOR SCENE NARRATION:\n"
         "1. Every spoken scene (scene_type: talking_head, broll, montage) MUST have non-empty spoken 'narration'.\n"
         "2. Do NOT output empty strings for 'narration'.\n"
@@ -430,7 +437,7 @@ def _parse_json_to_script_document(
             emphasis_words=emph_words,
             estimated_duration_seconds=float(s.get("estimated_duration_seconds", 5.0)),
             scene_type=s_type,
-            transition_hint=s.get("transition_hint", "cut"),
+            transition_hint=s.get("transition_hint", "fade"),
         )
         scenes.append(scene_obj)
 
