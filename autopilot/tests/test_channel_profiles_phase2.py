@@ -123,7 +123,8 @@ def test_channel_profile_influences_openai_prompt():
         fake_content = {
             "title": "Quantum GPU Computing",
             "hook_text": "GPUs are undergoing a massive hardware shift.",
-            "scenes": [{"scene_id": "s1", "order": 1, "narration": "Quantum accelerators are here.", "estimated_duration_seconds": 6.0}],
+"scenes": [{"scene_id": "s1", "order": 1, "narration": "Quantum accelerators are here right now.", 
+"estimated_duration_seconds": 6.0}],
         }
         resp_data = {"choices": [{"message": {"content": json.dumps(fake_content)}}]}
         mock_resp = pytest.importorskip("unittest.mock").MagicMock()

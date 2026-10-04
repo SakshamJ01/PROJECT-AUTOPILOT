@@ -100,19 +100,32 @@ def _frame_signatures(video: Path, sample_count: int) -> List[Any]:
     takes a frame *rate*, not a frame count, so the rate is derived from the
     probed duration; passing the desired count directly would only ever read the
     first second of footage.
+
+    The ``fps`` filter is applied ONLY when the input actually has a duration.
+    On a still image ffmpeg's ``fps`` filter emits zero frames (the single
+    decoded frame does not survive the rate conversion), which made every
+    image asset unverifiable: the signature list came back empty and
+    ``verify_asset_presence`` reported the scene as MISSING, failing render
+    provenance for any image-based job. Still images therefore skip ``fps`` and
+    simply decode their one frame.
     """
     if sample_count < 1:
         raise RenderProvenanceError("sample_count must be >= 1")
     duration = _probe_duration(video)
-    # For a still image ffprobe reports no duration; a small rate is fine
-    # because the decoder simply emits the single frame.
-    rate = (sample_count / duration) if duration > 0 else 1.0
+    is_still = duration <= 0
+    if is_still:
+        vf = f"{HASH_CROP},scale={HASH_WIDTH}:{HASH_HEIGHT}:flags=area,format=gray"
+        frames_to_read = 1
+    else:
+        rate = sample_count / duration
+        vf = f"fps={rate:.8f},{HASH_CROP},scale={HASH_WIDTH}:{HASH_HEIGHT}:flags=area,format=gray"
+        frames_to_read = sample_count
     cmd = [
         "ffmpeg", "-v", "error", "-i", str(video),
         # flags=area does proper area averaging; the default bicubic scaler
         # aliases heavily when reducing 1080p to 9x8 and makes the hash unstable.
-        "-vf", f"fps={rate:.8f},{HASH_CROP},scale={HASH_WIDTH}:{HASH_HEIGHT}:flags=area,format=gray",
-        "-frames:v", str(sample_count),
+        "-vf", vf,
+        "-frames:v", str(frames_to_read),
         "-f", "rawvideo", "-pix_fmt", "gray", "-",
     ]
     proc = subprocess.run(cmd, capture_output=True, timeout=300)

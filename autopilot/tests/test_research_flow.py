@@ -133,7 +133,7 @@ def test_openai_provider_receives_evidence_structure_and_grounds():
         "description": "Overview of superconductors",
         "hook_text": "Room temperature superconductors changed everything.",
         "scenes": [
-            {"scene_id": "scene_1", "narration": "Researchers tested LK-99.", "visual_description": "Lab setup"}
+            {"scene_id": "scene_1", "narration": "Researchers tested the material LK-99 directly.", "visual_description": "Lab setup"}
         ],
         "source_references": ["src-sup-001"]
     }"""
@@ -172,7 +172,7 @@ def test_openai_provider_rejects_fabricated_source_references():
         "title": "Fake Source Test",
         "description": "Test description",
         "hook_text": "Hook text",
-        "scenes": [{"scene_id": "scene_1", "narration": "Content", "visual_description": "Visual"}],
+        "scenes": [{"scene_id": "scene_1", "narration": "Grounded content for the valid source only.", "visual_description": "Visual"}],
         "source_references": ["src-valid-001", "src-fake-999"]
     }"""
 

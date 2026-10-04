@@ -1,4 +1,4 @@
-﻿"""P0 render provenance tests â€” offline, deterministic.
+"""P0 render provenance tests — offline, deterministic.
 
 These cover the failure mode where a production engine discards the verified
 assets (and re-fetches its own footage) so that earlier CLIP/rights evidence
@@ -58,6 +58,46 @@ def test_frames_are_sampled_across_whole_clip(tmp_path):
     # Signatures must be distinct because they come from different timestamps.
     unique = {sig.tobytes() for sig in few}
     assert len(unique) == len(few), "samples were not spread across the clip"
+
+
+def test_still_image_asset_is_fingerprintable(tmp_path):
+    """Regression: the fps filter made every still image unverifiable.
+
+    ffmpeg's fps filter emits ZERO frames for a single-image input, so
+    _frame_signatures returned an empty list, verify_asset_presence reported the
+    scene as MISSING, and any image-based job failed render provenance.
+    """
+    img = tmp_path / "still.png"
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
+         "testsrc=" + _SIZE + ":" + _RATE, "-frames:v", "1", str(img)],
+        check=True,
+    )
+
+    sigs = _frame_signatures(img, 12)
+    assert len(sigs) >= 1, "still image produced no signature"
+    assert sigs[0].size == (9 - 1) * 8  # 8x8 horizontal-difference grid
+
+
+def test_still_image_asset_verified_in_render(tmp_path):
+    """End-to-end: an image-based scene must pass provenance, not fail it."""
+    from PIL import Image
+
+    asset = tmp_path / "asset.png"
+    Image.new("RGB", (360, 640), (12, 200, 90)).save(asset)
+
+    render = tmp_path / "render.mp4"
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-loop", "1", "-i", str(asset),
+         "-t", "2", "-r", "25", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(render)],
+        check=True,
+    )
+
+    report = verify_asset_presence(render, [{"scene_id": "s1", "asset_path": str(asset)}])
+    assert report.claimed_scene_count == 1
+    assert report.missing_scene_ids == [], "image asset wrongly reported missing"
+    assert report.verified_scene_count == 1
+    assert report.valid is True
 
 
 def test_planned_assets_present_in_render_are_verified(tmp_path):

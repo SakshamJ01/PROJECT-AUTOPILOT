@@ -849,6 +849,10 @@ class PipelineOrchestrator:
                         f"Engine '{target_production_engine}' did not render the planned "
                         f"assets: missing={provenance.missing_scene_ids}",
                     )
+                    # Set the terminal status here because the raise below
+                    # bypasses the generic `except Exception` handler that
+                    # normally marks the job FAILED_RENDER.
+                    self.db.update_job_status(job_id, WorkflowState.FAILED_RENDER.value)
                     raise PipelineError(
                         f"Render provenance unverified: engine '{target_production_engine}' "
                         f"did not render the planned assets (missing "
@@ -865,6 +869,13 @@ class PipelineOrchestrator:
                 write_sidecar_compatibility(str(final_mp4), job_id, "render")
                 self.db.update_job_status(job_id, WorkflowState.RENDERED.value)
                 logger.info("stage_completed", details={"stage": "RENDER", "engine": target_production_engine, "path": str(final_mp4), "sha256": render_checksum[:16]})
+            except PipelineError:
+                # A deliberate, categorised PipelineError (e.g. the
+                # NON_RETRYABLE provenance failure above) must keep its own
+                # category. Falling through to `except Exception` used to
+                # re-wrap it as RETRYABLE, advertising a job that can never
+                # pass as worth retrying.
+                raise
             except Exception as exc:
                 self.db.update_job_status(job_id, WorkflowState.FAILED_RENDER.value)
                 self.db.record_error(job_id, "RENDER", "render_failed", str(exc))
