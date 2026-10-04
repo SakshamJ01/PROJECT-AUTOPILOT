@@ -263,6 +263,11 @@ class AssetProvenance(BaseModel):
     retrieval_timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     original_hash_sha256: Optional[str] = None
     normalized_hash_sha256: Optional[str] = None
+    # P0: stable provider-side asset identity known at SEARCH time (before any
+    # download). Used for hard per-job deduplication -- see asset_pipeline's
+    # chosen_asset_refs. The sha256 fields are only populated post-download, so
+    # they cannot dedupe candidates from a fresh search result.
+    provider_asset_ref: Optional[str] = None
     model: Optional[str] = None
     job_id: Optional[str] = None
     content_id: Optional[str] = None

@@ -33,7 +33,7 @@ _W_VISUAL = 0.45
 _W_RIGHTS = 0.25
 _W_ASPECT = 0.12
 _W_RESOLUTION = 0.10
-_W_DEDUP = 0.05
+_W_DEDUP = 0.15
 _W_KEYWORD = 0.03
 
 _TAG_STOP = {"the", "a", "an", "of", "and", "for", "in", "on", "at", "to", "is", "are"}

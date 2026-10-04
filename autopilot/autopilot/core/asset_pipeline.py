@@ -243,6 +243,12 @@ def process_scene_assets(
     report = AssetQualityReport(job_id=job_id)
     artifacts: List[AssetArtifact] = []
     seen_checksums: set[str] = set()
+    # P0: stable provider-side asset refs chosen for earlier scenes in THIS job.
+    # A candidate matching one of these is hard-excluded so a single stock clip
+    # can never be selected twice in the same video. The sha256-based dedup in
+    # score_candidates cannot do this because the hash is only known after a
+    # download, whereas provider_asset_ref is known at search time.
+    chosen_asset_refs: set[str] = set()
 
     job_asset_dir = job_artifact_dir(job_id, base_dir=cfg.get_artifacts_dir()) / "assets"
     job_asset_dir.mkdir(parents=True, exist_ok=True)
@@ -257,7 +263,7 @@ def process_scene_assets(
         request_id = f"req-{job_id}-{scene.scene_id}"
 
         # Helper to score candidates and select all allowed candidates
-        def get_cleared_candidates(cands: List[AssetCandidate], q_str: str, active_pname: str) -> List[Tuple[AssetCandidate, str]]:
+        def get_cleared_candidates(cands: List[AssetCandidate], q_str: str, active_pname: str, allow_duplicate: bool = False) -> List[Tuple[AssetCandidate, str]]:
             if active_pname != "local":
                 for c in cands:
                     if c.provenance and c.provenance.original_hash_sha256 in seen_checksums:
@@ -276,6 +282,23 @@ def process_scene_assets(
             )
             cleared = []
             for cand in scored:
+                # P0 hard dedup: a clip already chosen for another scene in THIS
+                # job is never re-selected. provider_asset_ref is the stable
+                # provider-side ID known at search time; source_id is the legacy
+                # key. This is what actually stops the "same clip twice" defect
+                # -- the soft score penalty alone cannot.
+                asset_ref = (cand.provenance.provider_asset_ref if cand.provenance else None) or (
+                    cand.source_id if cand.source_id else None
+                )
+                if asset_ref and asset_ref in chosen_asset_refs and not allow_duplicate:
+                    report.rejections.append({
+                        "candidate_id": cand.candidate_id,
+                        "scene_id": scene.scene_id,
+                        "reason": f"Duplicate of an asset already selected for this job (ref={asset_ref})",
+                        "title": cand.title,
+                    })
+                    continue
+
                 if active_pname not in ("local", "infographics") and cand.score < 0.20:
                     report.rejections.append({
                         "candidate_id": cand.candidate_id,
@@ -355,6 +378,18 @@ def process_scene_assets(
                         pass
 
             cleared_candidates = get_cleared_candidates(candidates, active_query, active_pname)
+            if not cleared_candidates and candidates:
+                # Every candidate was blocked solely by dedup (they all passed
+                # the 0.20 floor and rights gate, or there is only one clip in
+                # existence). A repeated asset is better than a failed scene,
+                # so relax dedup for this scene and record why.
+                relaxed = get_cleared_candidates(candidates, active_query, active_pname, allow_duplicate=True)
+                if relaxed:
+                    report.warnings.append(
+                        f"Scene {scene.scene_id}: all candidates were already used by earlier "
+                        f"scenes; re-using the best one rather than failing the scene."
+                    )
+                    cleared_candidates = relaxed
             if not cleared_candidates:
                 continue
 
@@ -372,6 +407,14 @@ def process_scene_assets(
                 })
 
                 if search_only or dry_run:
+                    # Register the would-be selection so later scenes are still
+                    # deduped in search-only/dry-run mode (the full registration
+                    # below only runs after a real download+normalize).
+                    _search_ref = (selected_candidate.provenance.provider_asset_ref
+                                   if selected_candidate.provenance else None) or (
+                        selected_candidate.source_id if selected_candidate.source_id else None)
+                    if _search_ref:
+                        chosen_asset_refs.add(_search_ref)
                     scene_success = True
                     break
 
@@ -566,6 +609,13 @@ def process_scene_assets(
                     "checksum_sha256": norm_sha256,
                     "provider": active_pname,
                 })
+                # Register the chosen asset so later scenes in this job are
+                # hard-blocked from re-selecting it.
+                _chosen_ref = (selected_candidate.provenance.provider_asset_ref
+                               if selected_candidate.provenance else None) or (
+                    selected_candidate.source_id if selected_candidate.source_id else None)
+                if _chosen_ref:
+                    chosen_asset_refs.add(_chosen_ref)
                 if provider_idx > 0:
                     report.warnings.append(f"Scene {scene.scene_id} used fallback provider '{active_pname}'.")
                 scene_success = True

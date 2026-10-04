@@ -237,6 +237,9 @@ class PexelsAssetProvider(AssetProvider):
                     source_id=vid_id,
                     source_url=download_url,
                     retrieval_timestamp=datetime.now(timezone.utc).isoformat(),
+                    # Stable Pexels asset ID is known at search time, before any
+                    # download. This is what asset_pipeline's hard dedup keys on.
+                    provider_asset_ref=f"pexels:{vid_id}",
                 ),
             )
             candidates.append(cand)
