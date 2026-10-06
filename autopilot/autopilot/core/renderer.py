@@ -250,6 +250,7 @@ def _apply_audio_scene_graph_mix(
     segments: List[str],
     out_video: Path,
     work_dir: Path,
+    topic: str = "",
 ) -> Dict[str, Any]:
     """Build the VOICE + BGM + SFX master via AudioSceneGraph and mux it in.
 
@@ -303,7 +304,7 @@ def _apply_audio_scene_graph_mix(
 
     total_dur = cursor
     engine = AudioSceneGraphEngine()
-    graph = engine.build_scene_graph_from_rows(rows, total_duration_sec=total_dur)
+    graph = engine.build_scene_graph_from_rows(rows, total_duration_sec=total_dur, topic=topic)
 
     master_path = work_dir / "master_mix.wav"
     mix = engine.mix_and_master(graph, master_path)
@@ -369,7 +370,7 @@ class FFmpegRenderer:
         self.runner = FFmpegRunner()
         self.render_dir = CONFIG.get_artifacts_dir() / "jobs"
 
-    def render(self, plan: RenderPlan, out_path: str) -> RenderOutput:
+    def render(self, plan: RenderPlan, out_path: str, topic: str = "") -> RenderOutput:
         out = Path(out_path)
         # Only create the parent when it is an actual subdirectory; a bare
         # filename ("out.mp4") resolves to the current directory, which needs
@@ -624,7 +625,7 @@ class FFmpegRenderer:
         # ------------------------------------------------------------------
         audio_mix_manifest: Dict[str, Any] = {}
         try:
-            audio_mix_manifest = _apply_audio_scene_graph_mix(scenes, segments, out, segment_dir)
+            audio_mix_manifest = _apply_audio_scene_graph_mix(scenes, segments, out, segment_dir, topic=topic)
             if not audio_mix_manifest.get("applied"):
                 audio_mix_errors.append("audio scene graph mix did not apply")
         except Exception as exc:

@@ -118,7 +118,7 @@ def test_audio_duration_drives_render_scene_duration(tmp_path):
         mock_extract.return_value = {"valid": True, "duration_sec": 8.4}
         with patch("autopilot.core.pipeline.FFmpegRenderer.render") as mock_render, \
              patch("autopilot.core.pipeline.QAEngine.evaluate") as mock_qa:
-            def fake_render_impl(plan, out_path):
+            def fake_render_impl(plan, out_path, topic=""):
                 p = Path(out_path)
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_bytes(b"dummy_mp4_bytes")

@@ -10,6 +10,7 @@ Implements:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -165,35 +166,140 @@ def generate_sfx_sample(sfx_type: str, cache_dir: Path) -> Path:
         return synthesize_procedural_wav(target, duration_sec=0.20, generator_func=default_gen)
 
 
-def generate_ambient_bgm_track(output_path: Path, duration_sec: float) -> Path:
-    """Generate a high-quality ambient warm lo-fi pad bed for background music."""
+# ---------------------------------------------------------------------------
+# Per-topic procedural BGM mood (plan 3.1)
+# ---------------------------------------------------------------------------
+
+# Each mood is a deterministic procedural bed: its own chord progression,
+# cycle length and pulse rate. Still procedural (no licensing risk) but the
+# same topic always resolves to the same mood and therefore the same bed.
+BGM_MOODS: Dict[str, Dict[str, Any]] = {
+    # Warm lo-fi pad (the original C-G-Am-F bed) — the default fallback.
+    "contemplative": {
+        "chords": [
+            (130.81, 196.00, 261.63),  # C major
+            (98.00, 146.83, 196.00),   # G major
+            (110.00, 164.81, 220.00),  # A minor
+            (87.31, 130.81, 174.61),   # F major
+        ],
+        "cycle_sec": 8.0,
+        "pulse_hz": 1.5,
+        "gain": 0.35,
+    },
+    # Minor tension: Am-F-Dm-E with a slow heartbeat pulse.
+    "dramatic": {
+        "chords": [
+            (110.00, 164.81, 220.00),  # A minor
+            (87.31, 130.81, 174.61),   # F major
+            (73.42, 110.00, 146.83),   # D minor
+            (82.41, 123.47, 164.81),   # E minor voicing
+        ],
+        "cycle_sec": 10.0,
+        "pulse_hz": 0.75,
+        "gain": 0.34,
+    },
+    # Bright C-F-G-C with a quicker pulse.
+    "uplifting": {
+        "chords": [
+            (130.81, 196.00, 261.63),  # C major
+            (174.61, 220.00, 261.63),  # F major
+            (196.00, 246.94, 293.66),  # G major
+            (130.81, 196.00, 261.63),  # C major
+        ],
+        "cycle_sec": 6.0,
+        "pulse_hz": 2.0,
+        "gain": 0.33,
+    },
+    # Dark, sparse and slow for history / unsolved-mystery topics.
+    "mysterious": {
+        "chords": [
+            (73.42, 110.00, 146.83),   # D minor
+            (58.27, 87.31, 116.54),    # Bb major
+            (65.41, 98.00, 130.81),    # C major
+            (61.74, 92.50, 123.47),    # B minor voicing
+        ],
+        "cycle_sec": 12.0,
+        "pulse_hz": 0.5,
+        "gain": 0.34,
+    },
+}
+
+# Ordered keyword -> mood map; first match wins so resolution is
+# deterministic. Keywords are matched as whole words against the topic.
+_BGM_MOOD_KEYWORDS: List[Tuple[str, str]] = [
+    ("war", "dramatic"), ("wars", "dramatic"), ("battle", "dramatic"),
+    ("battles", "dramatic"), ("crime", "dramatic"),
+    ("murder", "dramatic"), ("killer", "dramatic"), ("disaster", "dramatic"),
+    ("accident", "dramatic"), ("accidents", "dramatic"), ("crash", "dramatic"),
+    ("sinking", "dramatic"),
+    ("sank", "dramatic"), ("terror", "dramatic"), ("deadliest", "dramatic"),
+    ("darkest", "dramatic"), ("failed", "dramatic"), ("failures", "dramatic"),
+    ("yoga", "contemplative"), ("meditation", "contemplative"),
+    ("mindful", "contemplative"), ("relax", "contemplative"),
+    ("sleep", "contemplative"), ("peaceful", "contemplative"),
+    ("nature", "contemplative"), ("forest", "contemplative"),
+    ("quiet", "contemplative"), ("breathe", "contemplative"),
+    ("success", "uplifting"), ("money", "uplifting"), ("business", "uplifting"),
+    ("billionaire", "uplifting"), ("invest", "uplifting"), ("gym", "uplifting"),
+    ("workout", "uplifting"), ("motivation", "uplifting"), ("winner", "uplifting"),
+    ("celebrate", "uplifting"), ("habits", "uplifting"),
+    ("mystery", "mysterious"), ("mysteries", "mysterious"),
+    ("unsolved", "mysterious"),
+    ("conspiracy", "mysterious"), ("secret", "mysterious"),
+    ("secrets", "mysterious"), ("ancient", "mysterious"),
+    ("disappeared", "mysterious"),
+    ("haunted", "mysterious"), ("vanished", "mysterious"),
+]
+
+
+def resolve_bgm_mood(topic: str) -> str:
+    """Resolve a topic to a named BGM mood deterministically.
+
+    Whole-word topic keywords win; otherwise a stable SHA-256 hash of the
+    normalized topic picks the mood, so the same topic always gets the same
+    bed (builtin ``hash()`` is deliberately not used — it is salted per
+    process and would make the bed differ between runs).
+    """
+    text = " ".join(str(topic or "").lower().split())
+    if text:
+        words = set(text.replace("-", " ").split())
+        for keyword, mood in _BGM_MOOD_KEYWORDS:
+            if keyword in words:
+                return mood
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        names = sorted(BGM_MOODS)
+        return names[int(digest, 16) % len(names)]
+    return "contemplative"
+
+
+def generate_ambient_bgm_track(
+    output_path: Path,
+    duration_sec: float,
+    mood: str = "contemplative",
+) -> Path:
+    """Generate a procedural ambient pad bed for the requested mood."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if output_path.exists() and output_path.stat().st_size > 1000:
         return output_path
 
-    # Warm chord progression pad with gentle pulse (C - G - Am - F)
-    def bgm_gen(t: float, dur: float) -> float:
-        cycle = (t % 8.0) / 8.0
-        if cycle < 0.25:
-            # C major (261.63, 329.63, 392.00)
-            f1, f2, f3 = 130.81, 196.00, 261.63
-        elif cycle < 0.50:
-            # G major (196.00, 246.94, 293.66)
-            f1, f2, f3 = 98.00, 146.83, 196.00
-        elif cycle < 0.75:
-            # A minor (220.00, 261.63, 329.63)
-            f1, f2, f3 = 110.00, 164.81, 220.00
-        else:
-            # F major (174.61, 220.00, 261.63)
-            f1, f2, f3 = 87.31, 130.81, 174.61
+    spec = BGM_MOODS.get(mood) or BGM_MOODS["contemplative"]
+    chords = spec["chords"]
+    cycle_sec = float(spec["cycle_sec"])
+    pulse_hz = float(spec["pulse_hz"])
+    gain = float(spec["gain"])
 
-        pulse = 0.85 + 0.15 * math.sin(2.0 * math.pi * 1.5 * t)
+    # Warm chord progression pad with a gentle mood-specific pulse.
+    def bgm_gen(t: float, dur: float) -> float:
+        cycle = (t % cycle_sec) / cycle_sec
+        f1, f2, f3 = chords[min(int(cycle * len(chords)), len(chords) - 1)]
+
+        pulse = 0.85 + 0.15 * math.sin(2.0 * math.pi * pulse_hz * t)
         v1 = math.sin(2.0 * math.pi * f1 * t) * 0.45
         v2 = math.sin(2.0 * math.pi * f2 * t) * 0.35
         v3 = math.sin(2.0 * math.pi * f3 * t) * 0.20
         # Gentle fade in / out at boundaries
         fade = min(1.0, t / 1.0) * min(1.0, (dur - t) / 1.0)
-        return (v1 + v2 + v3) * pulse * fade * 0.35
+        return (v1 + v2 + v3) * pulse * fade * gain
 
     return synthesize_procedural_wav(output_path, duration_sec=max(5.0, duration_sec), generator_func=bgm_gen)
 
@@ -231,6 +337,7 @@ class AudioSceneGraphEngine:
         total_duration_sec: float,
         bgm_file: Optional[str] = None,
         bgm_intensity: float = 0.85,
+        topic: str = "",
     ) -> "AudioSceneGraph":
         """Build the scene graph from plain timeline rows.
 
@@ -261,6 +368,7 @@ class AudioSceneGraphEngine:
             total_duration_sec=total_duration_sec,
             bgm_file=bgm_file,
             bgm_intensity=bgm_intensity,
+            topic=topic,
         )
 
     def build_scene_graph(
@@ -269,8 +377,10 @@ class AudioSceneGraphEngine:
         total_duration_sec: float,
         bgm_file: Optional[str] = None,
         bgm_intensity: float = 0.85,
+        topic: str = "",
     ) -> AudioSceneGraph:
         """Construct the 3-track audio scene graph with sidechain envelope points."""
+        mood = resolve_bgm_mood(topic)
         voice_segments = []
         ducking_points = []
         sfx_cues = []
@@ -328,6 +438,7 @@ class AudioSceneGraphEngine:
             voice_segments=voice_segments,
             bgm_config={
                 "bgm_file": bgm_file,
+                "mood": mood,
                 "baseline_db": self.bgm_baseline_db,
                 "ducked_db": self.bgm_ducked_db,
                 "intensity": bgm_intensity,
@@ -350,11 +461,12 @@ class AudioSceneGraphEngine:
         stitched_voice_path = self.cache_dir / f"voice_stitched_{int(dur*100)}.wav"
         self._stitch_voice_segments(scene_graph.voice_segments, stitched_voice_path, dur)
 
-        # 2. Prepare BGM Stem
+        # 2. Prepare BGM Stem (mood-resolved procedural bed for this topic)
+        mood = str(scene_graph.bgm_config.get("mood") or resolve_bgm_mood(""))
         bgm_input = scene_graph.bgm_config.get("bgm_file")
         if not bgm_input or not Path(bgm_input).exists():
-            bgm_path = self.cache_dir / f"ambient_bgm_{int(dur*100)}.wav"
-            generate_ambient_bgm_track(bgm_path, dur)
+            bgm_path = self.cache_dir / f"ambient_bgm_{mood}_{int(dur*100)}.wav"
+            generate_ambient_bgm_track(bgm_path, dur, mood=mood)
         else:
             bgm_path = Path(bgm_input)
 
@@ -457,6 +569,7 @@ class AudioSceneGraphEngine:
                     sfx_manifest=prepared_sfx,
                     mix_manifest={
                         "total_duration_sec": dur,
+                        "mood": mood,
                         "voice_stems": len(scene_graph.voice_segments),
                         "sfx_cues": len(prepared_sfx),
                         "ducking_points": len(scene_graph.ducking_envelope),

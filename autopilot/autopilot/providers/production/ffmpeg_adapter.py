@@ -70,7 +70,7 @@ class FFmpegProductionAdapter:
                 scenes=scenes,
             )
 
-        render_out = self.renderer.render(plan, request.output_path)
+        render_out = self.renderer.render(plan, request.output_path, topic=request.topic or "")
 
         return ProductionResult(
             job_id=request.job_id,
