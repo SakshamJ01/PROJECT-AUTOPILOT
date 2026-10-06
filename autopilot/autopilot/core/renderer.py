@@ -75,7 +75,7 @@ def _build_xfade_chain(
     for i in range(n_segments):
         # Normalise timebase/fps/SAR so xfade's inputs are strictly comparable.
         parts.append(
-            f"[{i}:v]settb=AVTB,setpts=PTS-STARTPTS,fps={_XFADE_FPS},setsar=1[xv{i}]"
+            f"[{i}:v]settb=AVTB,setpts=PTS-STARTPTS,fps={_XFADE_FPS},settb=AVTB,setsar=1[xv{i}]"
         )
         parts.append(
             f"[{i}:a]asettb=AVTB,aresample=44100,"

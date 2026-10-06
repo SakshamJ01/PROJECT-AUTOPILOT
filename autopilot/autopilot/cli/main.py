@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import os
 import re
+import json
 import uuid
 import platform
 import subprocess
@@ -1092,6 +1093,15 @@ def run_render(job_id: str, asset_provider: str = "pexels", profile: str = "shor
         render_scenes.append(entry)
 
     raw_speech_dur = sum(s.get("duration_sec", 0) for s in render_scenes)
+    # Plan 5.3: same worst-case 20s Short floor as the pipeline render path
+    # (standalone `render` command). Even per-scene pad so the rendered video
+    # length (== sum of scene durations) always clears 21.0s with margin.
+    _MIN_SHORT_DURATION_SEC = 21.0
+    if render_scenes and raw_speech_dur < _MIN_SHORT_DURATION_SEC:
+        _pad = (_MIN_SHORT_DURATION_SEC - raw_speech_dur) / len(render_scenes)
+        for _s in render_scenes:
+            _s["duration_sec"] = float(_s["duration_sec"]) + _pad
+        raw_speech_dur = sum(s.get("duration_sec", 0) for s in render_scenes)
     render_plan = RenderPlan(
         plan_id=f"plan-{job_id}",
         content_id=job_id,

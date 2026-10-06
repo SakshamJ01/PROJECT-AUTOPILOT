@@ -201,3 +201,65 @@ def test_report_round_trips_to_disk(tmp_path):
     out = write_provenance_report(report, tmp_path / "provenance.json")
     assert out.exists()
     assert "scene-01" in out.read_text(encoding="utf-8")
+
+
+def _concat_render(tmp_path: Path, parts: list[Path]) -> Path:
+    render = tmp_path / "render.mp4"
+    inputs: list[str] = []
+    for p in parts:
+        inputs += ["-i", str(p)]
+    n = len(parts)
+    chains = "".join(
+        f"[{i}:v]scale=360:640:force_original_aspect_ratio=increase,crop=360:640,format=yuv420p[v{i}];"
+        for i in range(n)
+    )
+    concat = "".join(f"[v{i}]" for i in range(n))
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", *inputs,
+         "-filter_complex", chains + f"{concat}concat=n={n}:v=1:a=0[v]",
+         "-map", "[v]", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(render)],
+        check=True,
+    )
+    return render
+
+
+def test_plan_driven_scenes_verify_by_consensus(tmp_path):
+    """Scenes with duration_sec are verified inside their own render window.
+
+    A present video asset must produce a cluster of frame-exact matches, not
+    just one lucky pair.
+    """
+    asset_a = _make_clip(tmp_path / "a.mp4", "testsrc")
+    asset_b = _make_clip(tmp_path / "b.mp4", "smptebars")
+    render = _concat_render(tmp_path, [asset_a, asset_b])
+
+    scenes = [
+        {"scene_id": "scene-01", "asset_path": asset_a, "duration_sec": 2.0},
+        {"scene_id": "scene-02", "asset_path": asset_b, "duration_sec": 2.0},
+    ]
+    report = verify_asset_presence(render, scenes, production_engine="ffmpeg")
+
+    assert report.valid is True, summarize(report)
+    assert report.missing_scene_ids == []
+    for scene in report.scenes:
+        assert scene.present is True
+        assert scene.close_pairs is not None
+        assert scene.close_pairs >= 3
+
+
+def test_plan_driven_missing_asset_fails_closed(tmp_path):
+    """A plan-driven render that dropped the claimed asset must NOT verify."""
+    asset = _make_clip(tmp_path / "asset.mp4", "testsrc")
+    unrelated = _make_clip(tmp_path / "unrelated.mp4", "smptebars")
+
+    report = verify_asset_presence(
+        unrelated,
+        [{"scene_id": "scene-01", "asset_path": asset, "duration_sec": 2.0}],
+        production_engine="moneyprinterturbo",
+    )
+
+    assert report.valid is False
+    assert report.missing_scene_ids == ["scene-01"]
+    assert report.scenes[0].present is False
+    assert report.scenes[0].close_pairs is not None
+    assert report.scenes[0].close_pairs < 3

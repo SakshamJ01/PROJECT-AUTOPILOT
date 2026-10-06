@@ -18,7 +18,7 @@ from pydantic import BaseModel
 # The single source of truth for the current production pipeline version.
 # Bumped whenever the production path changes in a compatibility-breaking
 # way (asset semantics, caption engine, audio graph, provenance schema...).
-PIPELINE_VERSION = "v9.0.1-p1"
+PIPELINE_VERSION = "v9.1.0-p2"
 
 
 class ArtifactCompatibility(BaseModel):

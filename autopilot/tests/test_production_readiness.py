@@ -99,7 +99,19 @@ def test_pipeline_orchestrator_honors_wikipedia_provider(tmp_path):
         assert "wikipedia" in rep["summary"]
 
 
-def test_audio_duration_drives_render_scene_duration(tmp_path):
+@pytest.mark.parametrize(
+    "audio_sec,expected_scene_sec",
+    [
+        # Measured audio above the 21s Short floor: scene duration follows the
+        # measured audio (8.4s-style override of the 5.0s estimate), not the
+        # blind estimate.
+        (24.0, 24.0),
+        # Worst-case undersized narration: the plan pads scenes up to the
+        # 21s minimum duration so no Short ships under 20s.
+        (8.4, 21.0),
+    ],
+)
+def test_audio_duration_drives_render_scene_duration(tmp_path, audio_sec, expected_scene_sec):
     """Verify that measured audio duration overrides blind estimated duration in RenderPlan."""
     db_path = tmp_path / "test_dur.db"
     db = DBManager(db_path)
@@ -107,7 +119,7 @@ def test_audio_duration_drives_render_scene_duration(tmp_path):
     cfg = Config(artifacts_dir=tmp_path, db_path=db_path)
     orch = PipelineOrchestrator(config=cfg, db=db)
 
-    # Pre-create mock audio file with duration 8.4s
+    # Pre-create mock audio file with the measured duration under test
     job_id = "job-dur-test"
     voice_dir = tmp_path / "jobs" / job_id / "voice"
     voice_dir.mkdir(parents=True, exist_ok=True)
@@ -115,7 +127,7 @@ def test_audio_duration_drives_render_scene_duration(tmp_path):
     fake_wav.write_bytes(b"RIFFdummywavheaderdata")
 
     with patch("autopilot.core.pipeline.extract_duration") as mock_extract:
-        mock_extract.return_value = {"valid": True, "duration_sec": 8.4}
+        mock_extract.return_value = {"valid": True, "duration_sec": audio_sec}
         with patch("autopilot.core.pipeline.FFmpegRenderer.render") as mock_render, \
              patch("autopilot.core.pipeline.QAEngine.evaluate") as mock_qa:
             def fake_render_impl(plan, out_path, topic=""):
@@ -125,7 +137,7 @@ def test_audio_duration_drives_render_scene_duration(tmp_path):
                 from autopilot.core.contracts import RenderOutput
                 return RenderOutput(
                     output_path=str(p),
-                    duration_sec=8.4,
+                    duration_sec=audio_sec,
                     width=1080, height=1920, codec_video="h264", codec_audio="aac", container="mp4",
                     file_size_bytes=1000, checksum_sha256="abc123sha", profile="short_vertical"
                 )
@@ -165,11 +177,12 @@ def test_audio_duration_drives_render_scene_duration(tmp_path):
                 production_engine="ffmpeg",
             )
 
-            # Check that render_plan has 8.4s instead of 5.0s
+            # Check that render_plan follows the measured audio duration
+            # (instead of the 5.0s estimate), floored at the 21s Short minimum.
             plan_file = tmp_path / "jobs" / job_id / "render" / "render_plan.json"
             assert plan_file.exists()
             plan_data = json.loads(plan_file.read_text(encoding="utf-8"))
-            assert plan_data["scenes"][0]["duration_sec"] == 8.4
+            assert plan_data["scenes"][0]["duration_sec"] == pytest.approx(expected_scene_sec)
 
 
 def test_semantic_relevance_rejection_in_asset_pipeline(tmp_path):

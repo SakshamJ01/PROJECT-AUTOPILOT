@@ -262,3 +262,32 @@ All three return usable evidence, so factual grounding will succeed. (This matte
 4. **TTS prosody (3.2): confirmed the installed edge-tts exposes `rate`/`pitch`/`volume` as constructor params** — no SSML workaround. Also found Kokoro hardcodes `speed=1.0`, so prosody is Edge-only and must degrade gracefully on Kokoro.
 5. **Dedup (1.1): narrowed the root cause.** Confirmed Pexels *does* set `source_id` at search time (`:237`) even though it omits the hash, so the fix keys on a new `provider_asset_ref` rather than trying to backfill hashes. Added a zero-candidate fallback so dedup can never make a job unproducible.
 6. **Topics validated:** all three approved topics return real Wikipedia evidence, so production won't stall at the grounding stage.
+
+---
+
+## Production validation results (2026-10-06) — §5.3
+
+All three approved topics produced end-to-end (Wikipedia research → `gemini-3.1-flash-lite` script → Pexels assets → Edge TTS → render → provenance → strict QA → approval → private YouTube publish). No gate was overridden; every job passed strict QA with zero blocking findings.
+
+| Job | Topic | Channel | Scenes | Duration | Provenance | Creative | Scene Relevance | Strict QA | Published (private) |
+|---|---|---|---|---|---|---|---|---|---|
+| `prod-mars-red-5.3a` | Why is Mars red | science_shorts | 7 | 21.0s | 7/7 (hamming 0) | 94.8 | 88.5 | PASS | `Se4lisH2Yl4` |
+| `prod-ocean-blue-5.3b` | Why is the ocean blue | science_shorts | 7 | 22.8s | 7/7 (hamming 0) | 94.2 | 87.3 | PASS | `mw_xz2Lmaj0` |
+| `prod-antikythera-5.3c` | Antikythera mechanism | history_shorts | 8 | 23.1s | 8/8 (hamming 0–1) | 95.1 | 90.2 | PASS | `SjrX6LMHLUg` |
+
+### Before/after metrics (5 pre-plan published jobs vs the 3 above)
+
+| Metric | Before | After |
+|---|---|---|
+| Unique clips (dedup) | 100% (6/6–7/7) | 100% (7/7–8/8) |
+| Scene words within 5–8 cap | 1 job at 1/6 (avg 9.0) | 22/22 (100%) |
+| Hook present | 5/5 | 3/3 |
+| Transition hints wired into render plan | 0/6–7 | 22/22 (100%) |
+| Custom thumbnail generated | 0/5 | 3/3 (applied, HTTP 200) |
+| Ducking verified (dB) | 3/5 (9.18–9.99) | 3/3 (10.49–11.60) |
+| Scene Relevance score | 70.2–85.0 | 87.3–90.2 |
+| Creative QA overall | 82.7–94.0 | 94.2–95.1 |
+
+### Production fix exercised during validation
+
+**Render provenance false-negative on high-motion clips.** The ocean job failed provenance (scenes 03/06 "missing", hamming 16/19) even though frame inspection proved the claimed assets were present — dHash on fast-moving water aliases across non-aligned frames. Fixed in `render_provenance.py` with a windowed-consensus verifier: for plan-driven scenes it hashes native-rate frames inside each scene's own render window (±0.25s margin) and requires ≥3 pairs at hamming ≤6 (`CONSENSUS_MIN_CLOSE_PAIRS`/`CONSENSUS_MAX_HAMMING`), instead of a single best pair against the whole clip. Verified: all three jobs above passed with hamming 0–1 and 63–4813 close pairs; missing-asset cases still fail closed; legacy path (scenes without `duration_sec`) is byte-identical, keeping the 12 existing provenance tests unchanged.

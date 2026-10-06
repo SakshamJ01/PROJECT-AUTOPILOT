@@ -329,6 +329,17 @@ def _build_prompts_and_evidence(
         "2. STRUCTURE: Script MUST follow the progression: HOOK (Scene 1) -> EXPLANATION / FACTS (Middle Scenes) -> INTENTIONAL PAYOFF / ENDING (Final Scene).\n"
         "3. INTENTIONAL ENDING: The final scene MUST be an intentional conclusion (payoff returning to hook, strongest final fact, seamless loop back, or payoff statement). NEVER end abruptly or use generic filler like 'thanks for watching'.\n"
         f"4. SCENE NARRATION: Punchy, conversational, spoken English. Between {MIN_SCENE_SPEECH_WORDS} and {MAX_SCENE_SPEECH_WORDS} words per scene. Below {MIN_SCENE_SPEECH_WORDS} is too thin to convey a fact. One clear idea per scene. Every middle scene MUST deliver one concrete fact, number, date, or causal claim grounded in the evidence. Do NOT write filler scenes that only restate the topic or the hook. Every scene narration must advance the viewers understanding of the topic; if it could apply to any other subject, rewrite it. Do NOT write generic filler like As you can see, Lets dive in, But wait theres more, or generic topic restatements. HARD LIMIT: never exceed {MAX_SCENE_SPEECH_WORDS} words in a scene (measured Edge TTS delivery is ~{TTS_WORDS_PER_SECOND} words/sec, and Creative QA hard-blocks any scene whose speech exceeds {PACING_MAX_SCENE_SECONDS}s). If you write {MAX_SCENE_SPEECH_WORDS + 1}+ words, the script WILL BE REJECTED. Count your words.\n"
+        "COMPLIANT NARRATION EXAMPLE (imitate this density exactly — a complete 8-scene narrative, each scene 5-7 words):\n"
+        "Topic: 'Why is Venus hiding behind clouds' ->\n"
+        "  scene-01 (hook): \"Venus spins backwards compared to Earth.\" (6 words)\n"
+        "  scene-02: \"A single day outlasts its entire year.\" (7 words)\n"
+        "  scene-03: \"Its surface heat melts lead instantly.\" (6 words)\n"
+        "  scene-04: \"Sulfuric clouds block every telescope view.\" (6 words)\n"
+        "  scene-05: \"The crushing pressure squashes probes swiftly.\" (6 words)\n"
+        "  scene-06: \"Its winds race faster than the ground.\" (7 words)\n"
+        "  scene-07: \"Rocks glow dull red in the gloom.\" (7 words)\n"
+        "  scene-08 (payoff): \"So Venus stays hidden under acid clouds.\" (6 words)\n"
+        "That is 8 scenes totaling about 50 words (~26-29 seconds). For a 35-second video use 7-8 scenes with the same per-scene density (roughly 55-60 total words). Copy the terse, concrete, fact-dense style, NOT the subject matter.\n"
         "5. VISUAL INTENT: Describe concrete, tangible physical subjects suitable for photography.\n"
         "6. ASSET QUERY: 2-3 words naming concrete physical photographic subjects.\n"
         "7. ON_SCREEN_TEXT: 2-4 uppercase words for visual title card.\n"
@@ -1100,6 +1111,26 @@ class OpenAICompatibleLLMProvider(LLMProvider):
                     f"{self.provider_name} LLM authentication error (HTTP {err.code}): {safe_msg}. "
                     f"Verify your API key."
                 ) from err
+            elif err.code in (429, 503):
+                retries_left = getattr(self, "_transient_retry_left", 3)
+                if retries_left > 0:
+                    self._transient_retry_left = retries_left - 1
+                    time.sleep(2 + 3 * (4 - retries_left))
+                    return self.generate_script(
+                        topic=topic,
+                        content_id=content_id,
+                        language=language,
+                        research_report=research_report,
+                        profile=profile,
+                        channel_profile=channel_profile,
+                        corrective_instructions=corrective_instructions,
+                        regeneration_reason=regeneration_reason,
+                        attempt_number=attempt_number,
+                        target_duration=target_duration,
+                        **kwargs,
+                    )
+                self._transient_retry_left = 3
+                raise RuntimeError(f"{self.provider_name} LLM error (HTTP {err.code}): {safe_msg}") from err
             raise RuntimeError(f"{self.provider_name} LLM error (HTTP {err.code}): {safe_msg}") from err
         except (TimeoutError, socket.timeout) as exc:
             elapsed = time.time() - start_t

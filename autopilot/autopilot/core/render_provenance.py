@@ -19,7 +19,7 @@ import json
 import subprocess
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 # A difference hash of an 8x8 grid is 64 bits. Measured on real output: scenes
 # whose source asset is genuinely in the render score 0-3, while unrelated
@@ -33,6 +33,21 @@ HASH_HEIGHT = 8
 # every scene; including them would make every scene look alike (or alike in the
 # wrong way) and would measure overlay text instead of source footage.
 HASH_CROP = "crop=iw:ih*0.47:0:ih*0.21"
+
+# Plan-driven verification (scenes carry duration_sec): the renderer consumes a
+# video asset frame-identically from its start, so a *present* asset produces a
+# CLUSTER of near-exact frame matches inside its scene window, while unrelated
+# footage never lands closer than ~8/64 even by chance (measured: clusters of
+# 64-6450 pairs at <=6 versus 0 pairs at <=6 for cross-job and same-job
+# lookalike footage). Requiring a cluster rather than one lucky pair keeps the
+# gate fail-closed without the false negatives that sparse whole-clip sampling
+# caused on high-motion footage (moving water aliases the dHash between frames
+# that are only a few ticks apart).
+CONSENSUS_MAX_HAMMING = 6
+CONSENSUS_MIN_CLOSE_PAIRS = 3
+# Edge margin absorbs xfade blend regions and frame-boundary rounding so the
+# sampled window stays on the scene's clean interior content.
+WINDOW_MARGIN_SEC = 0.25
 
 
 class RenderProvenanceError(RuntimeError):
@@ -48,6 +63,7 @@ class SceneProvenance:
     threshold: int
     matched_at_sec: Optional[float] = None
     samples_compared: int = 0
+    close_pairs: Optional[int] = None
     error: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -131,6 +147,15 @@ def _frame_signatures(video: Path, sample_count: int) -> List[Any]:
     proc = subprocess.run(cmd, capture_output=True, timeout=300)
     frame_bytes = HASH_WIDTH * HASH_HEIGHT
     raw = proc.stdout or b""
+    if not raw:
+        detail = (proc.stderr or b"").decode("utf-8", "ignore").strip()[:400]
+        raise RenderProvenanceError(f"no frames decoded from {video}: {detail}")
+    return _signatures_from_raw(raw)
+
+
+def _signatures_from_raw(raw: bytes) -> List[Any]:
+    """Convert a rawvideo gray byte stream into 64-bit difference-hash arrays."""
+    frame_bytes = HASH_WIDTH * HASH_HEIGHT
     usable = len(raw) - (len(raw) % frame_bytes)
     signatures: List[Any] = []
     try:
@@ -142,9 +167,59 @@ def _frame_signatures(video: Path, sample_count: int) -> List[Any]:
         grid = block.reshape(HASH_HEIGHT, HASH_WIDTH)
         signatures.append((grid[:, 1:] > grid[:, :-1]).flatten())
     if not signatures:
+        raise RenderProvenanceError("no frames decoded")
+    return signatures
+
+
+def _windowed_signatures(video: Path, start_sec: float, duration_sec: float) -> List[Any]:
+    """Decode EVERY frame in ``[start_sec, start_sec + duration_sec)`` as a hash.
+
+    Plan-driven scenes know exactly where their content sits in the render, so
+    verification samples at the native frame rate instead of sparsely. For a
+    video asset consumed frame-identically from its start this guarantees at
+    least one pair lands on the same source frame (hash distance ~0), which is
+    what separates "present" (clusters of exact matches) from lookalike
+    footage (best distances in the 8-19 range, never a cluster).
+    """
+    duration_sec = float(duration_sec)
+    if duration_sec <= 0:
+        # Still image (or degenerate window): decode the single frame.
+        cmd = [
+            "ffmpeg", "-v", "error", "-ss", f"{max(0.0, start_sec):.4f}",
+            "-i", str(video), "-frames:v", "1",
+            "-vf", f"{HASH_CROP},scale={HASH_WIDTH}:{HASH_HEIGHT}:flags=area,format=gray",
+            "-f", "rawvideo", "-pix_fmt", "gray", "-",
+        ]
+    else:
+        cmd = [
+            "ffmpeg", "-v", "error", "-ss", f"{max(0.0, start_sec):.4f}",
+            "-t", f"{duration_sec:.4f}", "-i", str(video),
+            "-vf", f"{HASH_CROP},scale={HASH_WIDTH}:{HASH_HEIGHT}:flags=area,format=gray",
+            "-f", "rawvideo", "-pix_fmt", "gray", "-",
+        ]
+    proc = subprocess.run(cmd, capture_output=True, timeout=300)
+    raw = proc.stdout or b""
+    if not raw:
         detail = (proc.stderr or b"").decode("utf-8", "ignore").strip()[:400]
         raise RenderProvenanceError(f"no frames decoded from {video}: {detail}")
-    return signatures
+    return _signatures_from_raw(raw)
+
+
+def _scene_windows(scenes: Sequence[Dict[str, Any]]) -> Optional[List[Tuple[float, float]]]:
+    """Cumulative ``(start, duration)`` windows, or None when any scene lacks a duration."""
+    windows: List[Tuple[float, float]] = []
+    cursor = 0.0
+    for scene in scenes:
+        dur = scene.get("duration_sec")
+        try:
+            d = float(dur) if dur is not None else 0.0
+        except (TypeError, ValueError):
+            return None
+        if d <= 0:
+            return None
+        windows.append((cursor, d))
+        cursor += d
+    return windows or None
 
 
 def _hamming(a: Any, b: Any) -> int:
@@ -180,6 +255,14 @@ def verify_asset_presence(
         report.errors.append("rendered file is missing or zero bytes")
         return report
 
+    # HEAD parity: probe the render once. An undecodable render (corrupt or
+    # stub output) is recorded as an unverifiable report and returned early —
+    # exactly as the pre-windowing verifier did — so `applicable` stays False
+    # and callers keep their existing handling for that case. Decodable
+    # renders then get frame-exact per-scene verification below.
+    windows = _scene_windows(scenes)
+    render_sigs: Optional[List[Any]] = None
+    windowed_render_frames = 0
     try:
         render_sigs = _frame_signatures(rendered, render_sample_count)
     except RenderProvenanceError as exc:
@@ -187,7 +270,7 @@ def verify_asset_presence(
         return report
     report.render_frames_hashed = len(render_sigs)
 
-    for scene in scenes:
+    for scene_idx, scene in enumerate(scenes):
         scene_id = str(scene.get("scene_id") or f"scene-{len(report.scenes) + 1}")
         asset = scene.get("asset_path") or scene.get("normalized_path")
         entry = SceneProvenance(
@@ -211,25 +294,75 @@ def verify_asset_presence(
             report.missing_scene_ids.append(scene_id)
             continue
 
+        window = windows[scene_idx] if windows is not None else None
+        margin = 0.0
         try:
-            asset_sigs = _frame_signatures(asset_path, asset_sample_count)
+            if window is not None:
+                win_start, win_dur = window
+                margin = min(WINDOW_MARGIN_SEC, max(0.0, win_dur * 0.15))
+                inner_dur = win_dur - 2.0 * margin
+                if inner_dur <= 0:
+                    raise RenderProvenanceError("scene window too short to verify")
+                # The renderer consumes a video asset from its start, so the
+                # used segment is exactly [0, win_dur] of the asset.
+                asset_sigs = _windowed_signatures(asset_path, 0.0, win_dur)
+                scene_render_sigs = _windowed_signatures(
+                    rendered, win_start + margin, inner_dur
+                )
+                windowed_render_frames += len(scene_render_sigs)
+            else:
+                asset_sigs = _frame_signatures(asset_path, asset_sample_count)
+                scene_render_sigs = render_sigs or []
         except RenderProvenanceError as exc:
             entry.error = str(exc)
             report.missing_scene_ids.append(scene_id)
             continue
 
-        entry.samples_compared = len(asset_sigs) * len(render_sigs)
-        best = min(
-            ((_hamming(a, r), i) for a in asset_sigs for i, r in enumerate(render_sigs)),
-            key=lambda pair: pair[0],
-        )
-        entry.best_distance = int(best[0])
-        entry.matched_at_sec = round(best[1], 3)
-        entry.present = entry.best_distance <= threshold
+        if not asset_sigs or not scene_render_sigs:
+            entry.error = "no frames decoded for comparison"
+            report.missing_scene_ids.append(scene_id)
+            continue
+
+        entry.samples_compared = len(asset_sigs) * len(scene_render_sigs)
+        if window is not None:
+            # Frame-exact consensus: count every near-identical pair. A present
+            # asset yields a cluster; lookalike footage never does.
+            best_distance: Optional[int] = None
+            best_col = 0
+            close_pairs = 0
+            for a in asset_sigs:
+                for col, r in enumerate(scene_render_sigs):
+                    d = _hamming(a, r)
+                    if best_distance is None or d < best_distance:
+                        best_distance = d
+                        best_col = col
+                    if d <= CONSENSUS_MAX_HAMMING:
+                        close_pairs += 1
+            entry.best_distance = int(best_distance if best_distance is not None else 0)
+            entry.close_pairs = close_pairs
+            frame_span = (win_dur - 2.0 * margin) / len(scene_render_sigs)
+            entry.matched_at_sec = round(win_start + margin + best_col * frame_span, 3)
+            if len(asset_sigs) <= 1:
+                # Still image: no frame-exact stream exists (the renderer may
+                # apply Ken Burns motion), so keep the single-pair threshold.
+                entry.present = entry.best_distance <= threshold
+            else:
+                entry.present = close_pairs >= CONSENSUS_MIN_CLOSE_PAIRS
+        else:
+            best = min(
+                ((_hamming(a, r), i) for a in asset_sigs for i, r in enumerate(scene_render_sigs)),
+                key=lambda pair: pair[0],
+            )
+            entry.best_distance = int(best[0])
+            entry.matched_at_sec = round(best[1], 3)
+            entry.present = entry.best_distance <= threshold
         if not entry.present:
             report.missing_scene_ids.append(scene_id)
         else:
             report.verified_scene_count += 1
+
+    if windows is not None:
+        report.render_frames_hashed = windowed_render_frames
 
     # The gate only applies when at least one scene actually claims an asset.
     report.applicable = report.claimed_scene_count > 0
@@ -265,10 +398,22 @@ def summarize(report: RenderProvenanceReport) -> str:
     ]
     for s in report.scenes:
         if s.present:
-            parts.append(f"  {s.scene_id}: found (hamming={s.best_distance}<={s.threshold})")
+            detail = f"hamming={s.best_distance}<={s.threshold}"
+            if s.close_pairs is not None:
+                detail += f", close_pairs={s.close_pairs}>={CONSENSUS_MIN_CLOSE_PAIRS}"
+            parts.append(f"  {s.scene_id}: found ({detail})")
         elif s.error and s.error.startswith("no asset claimed"):
             parts.append(f"  {s.scene_id}: no asset claimed (skipped)")
         else:
-            reason = s.error or f"best hamming={s.best_distance} > {s.threshold}"
+            if s.error:
+                reason = s.error
+            elif s.close_pairs is not None:
+                reason = (
+                    f"best hamming={s.best_distance} but only "
+                    f"{s.close_pairs} close pair(s); need "
+                    f"{CONSENSUS_MIN_CLOSE_PAIRS} to prove the claimed asset"
+                )
+            else:
+                reason = f"best hamming={s.best_distance} > {s.threshold}"
             parts.append(f"  {s.scene_id}: MISSING ({reason})")
     return "\n".join(parts)

@@ -600,8 +600,8 @@ class PipelineOrchestrator:
                     "reason": f"Narration duration {narration_dur:.1f}s is below minimum {min_narration_dur:.1f}s (target {target_dur:.0f}s)",
                     "instruction": (
                         f"The narration is too short ({narration_dur:.1f}s for a {target_dur:.0f}s target). "
-                        "Add more detail, examples, and elaboration to each scene. "
-                        "Aim for narration that naturally fills the target duration."
+                        "Add MORE scenes (aim for 7-8 total) so the narration fills the target duration. "
+                        "Each scene must stay within 5-8 words; never lengthen an individual scene beyond 8 words."
                     ),
                     "target_stage": "SCRIPT",
                     "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -629,8 +629,8 @@ class PipelineOrchestrator:
                     attempt_number=attempt_number + 1,
                     corrective_instructions=(
                         f"The narration is too short ({narration_dur:.1f}s for a {target_dur:.0f}s target). "
-                        "Add more detail, examples, and elaboration to each scene. "
-                        "Aim for narration that naturally fills the target duration."
+                        "Add MORE scenes (aim for 7-8 total) so the narration fills the target duration. "
+                        "Each scene must stay within 5-8 words; never lengthen an individual scene beyond 8 words."
                     ),
                     regeneration_reason=f"Narration duration {narration_dur:.1f}s below minimum {min_narration_dur:.1f}s",
                     policy=policy,
@@ -712,6 +712,12 @@ class PipelineOrchestrator:
                     checksum_sha256=da.get("checksum_sha256"),
                     provenance=AssetProvenance(**prov_raw) if prov_raw else AssetProvenance(),
                     license=AssetLicense(**lic_raw) if lic_raw else AssetLicense(),
+                    asset_type=da.get("asset_type") or "image",
+                    # The CLIP visual-gate score lives inside provenance_json.
+                    # Surface it on the artifact so the render plan, timeline,
+                    # and creative Scene-Relevance gate keep their evidence on
+                    # resumed runs (not just fresh acquisitions).
+                    semantic_score=prov_raw.get("semantic_score"),
                 ))
             self.db.update_job_status(job_id, WorkflowState.ASSETS_READY.value)
             logger.info("stage_resumed", details={"stage": "ASSETS", "reason": "existing_asset_artifacts"})
@@ -775,6 +781,19 @@ class PipelineOrchestrator:
             })
 
         plan_expected_dur = sum(s.get("duration_sec", 0) for s in render_scenes)
+
+        # Plan 5.3 production validation: never ship a Short under 20s even in
+        # the worst case (short/undersized narration). Pad every scene evenly
+        # so the rendered video (== sum of scene durations) always clears the
+        # floor, and raw_speech_duration_sec is floored with it so QA's
+        # truncation and drift checks stay self-consistent. The 1.0s margin
+        # over the 20s floor absorbs frame-rounding loss in the concat step.
+        _MIN_SHORT_DURATION_SEC = 21.0
+        if render_scenes and plan_expected_dur < _MIN_SHORT_DURATION_SEC:
+            _pad = (_MIN_SHORT_DURATION_SEC - plan_expected_dur) / len(render_scenes)
+            for _s in render_scenes:
+                _s["duration_sec"] = float(_s["duration_sec"]) + _pad
+            plan_expected_dur = sum(s.get("duration_sec", 0) for s in render_scenes)
 
         # P0 STALE ARTIFACT PROTECTION: a previously rendered final.mp4 may
         # only be reused if it explicitly proves compatibility with the
