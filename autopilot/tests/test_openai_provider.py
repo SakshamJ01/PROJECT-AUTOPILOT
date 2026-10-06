@@ -113,7 +113,13 @@ def test_openai_llm_provider_field_mapping_correctness():
 
 
 def test_openai_llm_provider_fallback_defaults():
-    """When LLM omits optional fields, sensible defaults are used."""
+    """When LLM omits optional fields, sensible defaults are used.
+
+    ``hook`` used to fall back to scene-1's narration verbatim, which is the
+    defect fixed in plan 2.2 (a hook that just repeats scene 1 adds nothing, and
+    this value is the first line of the published description). It is now
+    synthesized as a distinct, non-empty hook and flagged as synthesized.
+    """
     minimal_content = {
         "scenes": [
             {
@@ -134,7 +140,10 @@ def test_openai_llm_provider_fallback_defaults():
         doc = provider.generate_script(topic="Black Holes", content_id="reg-003")
 
     assert doc.working_title == "Black Holes"
-    assert doc.hook == "A short narration about black holes."
+    # Non-empty and distinct from scene 1.
+    assert doc.hook
+    assert doc.hook.strip().lower() != "a short narration about black holes."
+    assert doc.generation_metadata["hook_synthesized"] is True
     assert doc.cta == "Follow for more updates!"
     assert doc.total_estimated_duration is not None
     assert doc.total_estimated_duration > 0

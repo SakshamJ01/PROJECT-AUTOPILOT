@@ -133,6 +133,23 @@ def _iter_response_lines(resp: Any):
                     yield line
 
 
+DEFAULT_HOOK_STYLE = "intriguing_question"
+
+
+def _channel_hook_style(channel_profile: object) -> str:
+    """Resolve a channel's hook_style, defaulting consistently everywhere."""
+    channel_rules: Dict[str, Any] = {}
+    if channel_profile is not None:
+        if hasattr(channel_profile, "to_editorial_rules"):
+            try:
+                channel_rules = channel_profile.to_editorial_rules() or {}
+            except Exception:
+                channel_rules = {}
+        elif isinstance(channel_profile, dict):
+            channel_rules = channel_profile
+    return str(channel_rules.get("hook_style") or DEFAULT_HOOK_STYLE)
+
+
 def _build_prompts_and_evidence(
     topic: str,
     research_report: object = None,
@@ -208,7 +225,7 @@ def _build_prompts_and_evidence(
 
     channel_tone = channel_rules.get("tone", "clear, direct, evidence-oriented")
     channel_niche = channel_rules.get("niche", "general")
-    channel_hook_style = channel_rules.get("hook_style", "intriguing_question")
+    channel_hook_style = _channel_hook_style(channel_profile)
     channel_visual_motif = channel_rules.get("visual_motif", "clean")
 
     from autopilot.core.quality import detect_listicle_cardinality
@@ -219,7 +236,7 @@ def _build_prompts_and_evidence(
         "{\n"
         '  "title": "Title string",\n'
         '  "description": "Video description",\n'
-        '  "hook_text": "Intriguing hook sentence (first 2-3 seconds)",\n'
+        '  "hook_text": "Distinct hook sentence in the channel hook style, never a copy of scene 1 narration",\n'
         '  "scenes": [\n'
         '    {\n'
         '      "scene_id": "scene-01",\n'
@@ -323,6 +340,12 @@ def _build_prompts_and_evidence(
         "4. Use \"cut\" ONLY for a hard punctuation: a jump in time, a chapter/beat change, or an intentional shock reveal.\n"
         "5. Never use \"cut\" between two closely related consecutive shots.\n"
         "6. Vary them: an all-fade video reads as monotonous, so include at least one \"cut\" per multi-scene script when the beats genuinely warrant it.\n"
+        "RULES FOR THE HOOK:\n"
+        f"1. 'hook_text' is REQUIRED and must follow the channel's Hook Style ({channel_hook_style}).\n"
+        "2. NEVER emit \"hook_text\": null or an empty string. A missing hook is a hard failure.\n"
+        f"3. 'hook_text' MUST be at least {_HOOK_MIN_WORDS} words and at most {_HOOK_MAX_WORDS} words.\n"
+        "4. 'hook_text' MUST NOT repeat scene-01's narration verbatim. The hook teases; scene 1 delivers. A hook that copies scene 1 adds nothing and will be replaced.\n"
+        "5. 'hook_text' is also the first line of the video description, so make it self-contained and readable without video context.\n"
         "RULES FOR SCENE NARRATION:\n"
         "1. Every spoken scene (scene_type: talking_head, broll, montage) MUST have non-empty spoken 'narration'.\n"
         "2. Do NOT output empty strings for 'narration'.\n"
@@ -369,6 +392,122 @@ def _build_prompts_and_evidence(
     return system_prompt, user_prompt, evidence_snippets, valid_source_refs
 
 
+_HOOK_MIN_WORDS = 4
+_HOOK_MAX_WORDS = 22
+_YEAR_RE = re.compile(r"\b(1[0-9]{3}|20[0-9]{2})\b")
+
+# Lead-ins keyed by a channel's hook_style. A colon keeps the construction
+# grammatical for any fact sentence, which matters because the synthesized
+# fact is real narration we did not author.
+_HOOK_LEADINS = {
+    "historical_framing_and_date": "In history",
+    "surprising_discovery": "The surprising part",
+    "breakthrough_fact": "The breakthrough",
+    "intriguing_question": "Here's the thing",
+}
+
+
+def _normalize_hook_text(raw: Any) -> str:
+    """Collapse whitespace and strip surrounding punctuation noise."""
+    text = str(raw or "").strip()
+    text = re.sub(r"\s+", " ", text)
+    return text.strip(" \t\r\n-*\"")
+
+
+def _hook_is_usable(hook: str, scene1_narration: str) -> bool:
+    """A hook must be non-trivial AND add something scene 1 does not already say."""
+    if not hook:
+        return False
+    if len(hook.split()) < _HOOK_MIN_WORDS:
+        return False
+    first = _normalize_hook_text(scene1_narration).lower().strip(" .!?")
+    if first and hook.lower().strip(" .!?") == first:
+        return False
+    return True
+
+
+def _pick_strongest_middle_fact(scenes: Sequence[Any]) -> str:
+    """Return the densest middle-scene narration, skipping the hook and payoff."""
+    narrations: List[str] = []
+    for idx, s in enumerate(scenes):
+        text = _normalize_hook_text(
+            s.get("narration") if isinstance(s, dict) else getattr(s, "narration", "")
+        )
+        if idx == 0:
+            # The hook scene is excluded: repeating it is exactly the defect
+            # this whole check exists to prevent.
+            continue
+        if text:
+            narrations.append(text)
+    if not narrations:
+        # Degenerate single-scene script: fall back to the only narration.
+        for s in scenes:
+            text = _normalize_hook_text(
+                s.get("narration") if isinstance(s, dict) else getattr(s, "narration", "")
+            )
+            if text:
+                return text
+        return ""
+    # Prefer the scene carrying the most concrete content (most words).
+    return max(narrations, key=lambda t: len(t.split()))
+
+
+def _synthesize_hook_text(scenes: Sequence[Any], topic: str, hook_style: str) -> str:
+    """Build a usable hook from the strongest fact instead of silently defaulting."""
+    fact = _pick_strongest_middle_fact(scenes)
+    style = str(hook_style or "").strip().lower()
+    leadin = _HOOK_LEADINS.get(style, f"About {topic}")
+
+    if style == "historical_framing_and_date":
+        # Honour the style's date requirement when the evidence carries one.
+        year_match = _YEAR_RE.search(fact)
+        if year_match:
+            year = year_match.group(1)
+            # Don't stutter the date twice ("Back in 1874: In 1874 the...").
+            if re.match(rf"^(in|back\s+in|by|around|circa)\s+{year}\b", fact, re.IGNORECASE):
+                leadin = "In history"
+            else:
+                leadin = f"Back in {year}"
+
+    if not fact:
+        return f"{leadin}: {topic}"
+
+    words = fact.split()
+    if len(words) > _HOOK_MAX_WORDS:
+        fact = " ".join(words[:_HOOK_MAX_WORDS]).rstrip(",;") + "..."
+
+    synthesized = f"{leadin}: {fact}"
+    # Never emit a "hook" that is just the topic echoed back.
+    if _normalize_hook_text(fact).lower().strip(" .!?") == _normalize_hook_text(topic).lower().strip(" .!?"):
+        synthesized = f"{leadin}: everything about {topic} explained"
+    return synthesized
+
+
+def _resolve_hook_text(
+    parsed: Dict[str, Any],
+    scenes: Sequence[Any],
+    topic: str,
+    hook_style: str,
+) -> Tuple[str, bool]:
+    """Return ``(hook, synthesized)``.
+
+    The model is asked for ``hook_text`` but frequently emits it as null or as a
+    verbatim copy of scene 1. ``dict.get`` cannot detect that case, because the
+    key exists, so the old fallback never fired and the hook silently persisted
+    as None (observed on the Moon job).
+    """
+    candidate = _normalize_hook_text(parsed.get("hook_text"))
+    scene1 = ""
+    if scenes:
+        first = scenes[0]
+        scene1 = _normalize_hook_text(
+            first.get("narration") if isinstance(first, dict) else getattr(first, "narration", "")
+        )
+    if _hook_is_usable(candidate, scene1):
+        return candidate, False
+    return _synthesize_hook_text(scenes, topic, hook_style), True
+
+
 def _parse_json_to_script_document(
     parsed: Dict[str, Any],
     topic: str,
@@ -379,6 +518,7 @@ def _parse_json_to_script_document(
     model_name: str,
     valid_source_refs: set[str],
     has_research: bool,
+    hook_style: str = "intriguing_question",
     extra_metadata: Optional[Dict[str, Any]] = None,
 ) -> ScriptDocument:
     """Validate parsed JSON dictionary and build canonical ScriptDocument."""
@@ -496,6 +636,8 @@ def _parse_json_to_script_document(
     if has_research:
         grounding_status = "grounded" if validated_refs else "evidence_provided_no_references"
 
+    hook_text, hook_synthesized = _resolve_hook_text(parsed, scenes, topic, hook_style)
+
     gen_meta = {
         "description": parsed.get("description", f"A short video about {topic}"),
         "tags": parsed.get("tags", ["shorts", "educational"]),
@@ -505,6 +647,9 @@ def _parse_json_to_script_document(
         "provider": provider_name,
         "model": model_name,
         "raw_model_response": raw_response,
+        # Recorded rather than silently defaulted, so a weak hook is auditable.
+        "hook_synthesized": hook_synthesized,
+        "hook_style": hook_style,
     }
     if extra_metadata:
         gen_meta.update(extra_metadata)
@@ -514,7 +659,7 @@ def _parse_json_to_script_document(
         language=language,
         topic=topic,
         scenes=scenes,
-        hook=parsed.get("hook_text", scenes[0].narration if scenes else topic),
+        hook=hook_text,
         cta=parsed.get("cta_text", "Follow for more updates!"),
         working_title=parsed.get("title", topic),
         total_estimated_duration=total_duration,
@@ -921,6 +1066,7 @@ class OpenAICompatibleLLMProvider(LLMProvider):
                         model_name=self.model_name,
                         valid_source_refs=valid_source_refs,
                         has_research=has_research,
+                        hook_style=_channel_hook_style(channel_profile),
                     )
                 except PacingBudgetError as perr:
                     if attempt_idx < 3:
@@ -1301,6 +1447,7 @@ class OllamaLLMProvider(LLMProvider):
                     model_name=self.model_name,
                     valid_source_refs=valid_source_refs,
                     has_research=has_research,
+                    hook_style=_channel_hook_style(channel_profile),
                     extra_metadata=eval_meta,
                 )
 
