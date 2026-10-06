@@ -217,6 +217,72 @@ def derive_deterministic_fallback_query(scene: ScriptScene, topic: str) -> str:
     return topic_core
 
 
+# Narrow visual terms mapped to broader, better-stocked stock-footage
+# equivalents. Consulted only by derive_broader_query for the second-chance
+# search (plan 1.3) so a weak first pass can retry with wider terms.
+_VISUAL_SYNONYM_BROADENING: Dict[str, str] = {
+    "battlefield": "war soldiers",
+    "cavalry": "soldiers horseback",
+    "trench": "war soldiers",
+    "warship": "ship fleet",
+    "aircraft": "plane",
+    "airplane": "plane",
+    "fortress": "castle",
+    "ruins": "ancient ruins",
+    "portrait": "person face",
+    "manuscript": "old book pages",
+    "artifact": "museum object",
+    "spaceship": "rocket",
+    "spacecraft": "rocket",
+    "volcano": "mountain eruption",
+    "laboratory": "science lab",
+    "cathedral": "church building",
+}
+
+
+def derive_broader_query(scene: ScriptScene, topic: str) -> str:
+    """Broader synonym query for the second-chance scene search (plan 1.3).
+
+    Built from the scene's visual_intent widened through known broad
+    synonyms and merged with the topic core, so the retry searches the same
+    visual subject with wider terms without drifting away from the video's
+    subject. Deterministic: never uses narration words.
+    """
+    stop_words = {
+        "the", "a", "an", "is", "are", "was", "were", "to", "of", "and", "for", "in", "that", "have", "with",
+        "as", "this", "it", "from", "on", "at", "by", "be", "or", "not", "but", "will", "we", "you", "they",
+        "them", "their", "there", "then", "than", "so", "if", "about", "into", "through", "during", "before",
+        "after", "above", "below", "between", "under", "again", "further", "once", "here", "when", "where",
+        "why", "how", "all", "each", "few", "more", "most", "other", "some", "such", "no", "nor", "only",
+        "own", "same", "can", "could", "should", "would", "may", "might", "must", "shall", "do", "does",
+        "did", "done", "doing", "get", "got", "getting", "made", "make", "making", "take", "took", "taking",
+        "come", "came", "coming", "go", "went", "going", "see", "saw", "seeing", "know", "knew", "knowing",
+        "think", "thought", "thinking", "say", "said", "saying", "use", "used", "using", "first", "today",
+        "introduced", "systems", "fact", "facts", "surprising", "about", "let", "lets", "talk",
+        "things", "top", "best", "reasons", "ways", "showing", "split", "screen", "animation", "abstract",
+        "graph", "chart", "diagram", "illustration", "different", "various", "across", "multiple",
+        "1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
+    }
+    intent_words = [
+        w for w in re.findall(r"\b\w+\b", (scene.visual_intent or "").lower())
+        if w not in stop_words and len(w) > 2
+    ]
+    topic_words = [
+        w for w in re.findall(r"\b\w+\b", (topic or "").lower())
+        if w not in stop_words and len(w) > 2
+    ]
+
+    terms: List[str] = []
+    for word in intent_words + topic_words:
+        expanded = _VISUAL_SYNONYM_BROADENING.get(word, word)
+        for part in expanded.split():
+            if part not in terms:
+                terms.append(part)
+    if not terms:
+        return (topic or "").strip()
+    return " ".join(terms[:7])
+
+
 def process_scene_assets(
     script: ScriptDocument,
     job_id: str,
@@ -233,6 +299,9 @@ def process_scene_assets(
         (artifacts_list, quality_report_dict)
     """
     cfg = config or CONFIG
+    # Plan 1.3: a verified CLIP score between the hard floor and this
+    # threshold triggers one second-chance broader query search for the scene.
+    strong_threshold = float(getattr(cfg, "visual_semantic_strong_threshold", 0.28))
     db_mgr = db or DBManager(cfg.db_path)
     db_mgr.init_schema()
     db_mgr.create_job(job_id=job_id, topic=script.topic)
@@ -393,32 +462,42 @@ def process_scene_assets(
             if not cleared_candidates:
                 continue
 
-            # Try downloading and normalizing cleared candidates from this provider
-            for selected_candidate, selection_reason in cleared_candidates:
-                report.selections.append({
-                    "scene_id": scene.scene_id,
-                    "request_id": request_id,
-                    "candidate_id": selected_candidate.candidate_id,
-                    "title": selected_candidate.title,
-                    "license": selected_candidate.license.license_name,
-                    "rights_status": selected_candidate.license.rights_status,
-                    "score": selected_candidate.score,
-                    "reason": selection_reason,
-                })
+            # Try downloading and normalizing cleared candidates from this provider.
+            # Entries are (candidate, selection_reason, preverified) where
+            # preverified carries an already-downloaded, already gate-passed
+            # weak candidate held as the second-chance fallback until the
+            # broader-query candidates have had their chance (plan 1.3).
+            pending_candidates: List[Tuple[AssetCandidate, str, Optional[Dict[str, Any]]]] = [
+                (cand, reason, None) for cand, reason in cleared_candidates
+            ]
+            weak_fallback: Optional[Dict[str, Any]] = None
+            second_chance_attempted = False
+            pending_idx = 0
+            while True:
+                if pending_idx >= len(pending_candidates):
+                    if scene_success or weak_fallback is None:
+                        break
+                    # Nothing from the broader search beat it: accept the weak
+                    # asset that already cleared the hard floor, via one more pass.
+                    pending_candidates.append(
+                        (weak_fallback["candidate"], weak_fallback["selection_reason"], weak_fallback)
+                    )
+                    weak_fallback = None
+                    continue
+                selected_candidate, selection_reason, preverified = pending_candidates[pending_idx]
+                pending_idx += 1
+                if preverified is None:
+                    report.selections.append({
+                        "scene_id": scene.scene_id,
+                        "request_id": request_id,
+                        "candidate_id": selected_candidate.candidate_id,
+                        "title": selected_candidate.title,
+                        "license": selected_candidate.license.license_name,
+                        "rights_status": selected_candidate.license.rights_status,
+                        "score": selected_candidate.score,
+                        "reason": selection_reason,
+                    })
 
-                if search_only or dry_run:
-                    # Register the would-be selection so later scenes are still
-                    # deduped in search-only/dry-run mode (the full registration
-                    # below only runs after a real download+normalize).
-                    _search_ref = (selected_candidate.provenance.provider_asset_ref
-                                   if selected_candidate.provenance else None) or (
-                        selected_candidate.source_id if selected_candidate.source_id else None)
-                    if _search_ref:
-                        chosen_asset_refs.add(_search_ref)
-                    scene_success = True
-                    break
-
-                # 5. Safe Download & Cache
                 is_video = (selected_candidate.asset_type == "video") or (selected_candidate.source_url and str(selected_candidate.source_url).endswith((".mp4", ".mov", ".mkv", ".webm")))
                 file_ext = ".mp4" if is_video else ".png"
                 # Record the media type we actually downloaded, not whatever the
@@ -426,97 +505,164 @@ def process_scene_assets(
                 # a "static image" defect to creative QA and misrepresents the
                 # asset in the render plan.
                 detected_asset_type = "video" if is_video else "image"
-                source_dest = job_asset_dir / f"src_{scene.scene_id}_{selected_candidate.candidate_id}{file_ext}"
-                try:
-                    downloaded_path_str = active_prov.download(selected_candidate, str(source_dest))
-                    downloaded_path = Path(downloaded_path_str)
-                except Exception as exc:
-                    err_msg = f"Download failed for {selected_candidate.candidate_id} from {active_pname}: {exc}"
-                    report.warnings.append(err_msg)
-                    scene_errors.append(err_msg)
-                    # The candidate is dropped WITHOUT ever reaching the
-                    # pixel-level visual-semantic gate, so it stays UNVERIFIED.
-                    # Record that explicitly instead of dropping it silently.
-                    report.rejections.append({
-                        "candidate_id": selected_candidate.candidate_id,
-                        "scene_id": scene.scene_id,
-                        "reason": (
-                            "Unverified candidate dropped: download failed before the visual gate "
-                            f"could verify it ({exc})"
-                        ),
-                        "title": selected_candidate.title,
-                        "provider": str(active_pname),
-                    })
-                    continue
-
-                # 6. Media Inspection
-                inspection = inspect_media(downloaded_path)
-                if not inspection.get("valid"):
-                    err_msg = f"Downloaded media inspection failed for scene {scene.scene_id}: {inspection.get('errors')}"
-                    report.warnings.append(err_msg)
-                    scene_errors.append(err_msg)
-                    # Unusable media never reaches the visual gate either.
-                    report.rejections.append({
-                        "candidate_id": selected_candidate.candidate_id,
-                        "scene_id": scene.scene_id,
-                        "reason": (
-                            "Unverified candidate dropped: media inspection failed before the "
-                            f"visual gate could verify it ({inspection.get('errors')})"
-                        ),
-                        "title": selected_candidate.title,
-                        "provider": str(active_pname),
-                    })
-                    continue
-
-                # 6b. P0 VISUAL-SEMANTIC VERIFICATION ON DOWNLOADED PIXELS.
-                # Real CLIP gate against scene narration + visual_intent + asset_query.
-                # Provider-generated tags are never used as semantic evidence.
-                # HARD FAILURE is preferable to an unrelated asset.
                 visual_evidence: Optional[Dict[str, Any]] = None
-                gated_providers = ("pexels", "pixabay", "openverse")
-                if active_pname in gated_providers and visual_semantic_enabled():
+
+                if preverified is not None:
+                    downloaded_path = Path(preverified["downloaded_path"])
+                    visual_evidence = preverified.get("visual_evidence")
+                else:
+                    if search_only or dry_run:
+                        # Register the would-be selection so later scenes are still
+                        # deduped in search-only/dry-run mode (the full registration
+                        # below only runs after a real download+normalize).
+                        _search_ref = (selected_candidate.provenance.provider_asset_ref
+                                       if selected_candidate.provenance else None) or (
+                            selected_candidate.source_id if selected_candidate.source_id else None)
+                        if _search_ref:
+                            chosen_asset_refs.add(_search_ref)
+                        scene_success = True
+                        break
+
+                    # 5. Safe Download & Cache
+                    source_dest = job_asset_dir / f"src_{scene.scene_id}_{selected_candidate.candidate_id}{file_ext}"
                     try:
-                        visual_evidence = visual_semantic_verify(
-                            downloaded_path,
-                            query=active_query,
-                            visual_intent=scene.visual_intent or "",
-                            narration=scene.narration or "",
-                            min_similarity=visual_semantic_min_similarity(),
-                            max_video_frames=int(getattr(CONFIG, "visual_semantic_max_video_frames", 3)),
-                        )
-                    except VisualSemanticUnavailable as vs_exc:
-                        # The authoritative semantic verifier cannot run. We must
-                        # NOT accept unverified stock as semantically relevant.
-                        err_msg = (
-                            f"Visual-semantic verifier unavailable for scene {scene.scene_id} "
-                            f"({active_pname}): {vs_exc}. Refusing to accept unverified asset."
-                        )
-                        report.errors.append(err_msg)
-                        scene_errors.append(err_msg)
-                        continue
-                    except Exception as vs_exc:
-                        err_msg = f"Visual-semantic verification error for scene {scene.scene_id}: {vs_exc}"
+                        downloaded_path_str = active_prov.download(selected_candidate, str(source_dest))
+                        downloaded_path = Path(downloaded_path_str)
+                    except Exception as exc:
+                        err_msg = f"Download failed for {selected_candidate.candidate_id} from {active_pname}: {exc}"
                         report.warnings.append(err_msg)
                         scene_errors.append(err_msg)
-                        continue
-
-                    if not visual_evidence.get("passed_gate"):
+                        # The candidate is dropped WITHOUT ever reaching the
+                        # pixel-level visual-semantic gate, so it stays UNVERIFIED.
+                        # Record that explicitly instead of dropping it silently.
                         report.rejections.append({
                             "candidate_id": selected_candidate.candidate_id,
                             "scene_id": scene.scene_id,
                             "reason": (
-                                f"VISUAL GATE REJECT: {visual_evidence.get('reason')} "
-                                f"(query='{active_query}')"
+                                "Unverified candidate dropped: download failed before the visual gate "
+                                f"could verify it ({exc})"
                             ),
                             "title": selected_candidate.title,
-                            "provider": active_pname,
+                            "provider": str(active_pname),
                         })
-                        # Do not fall through to "better to show something";
-                        # try the next candidate/provider instead.
                         continue
-                    # Real verification passed: record the authoritative score.
-                    selected_candidate.provenance.semantic_score = visual_evidence.get("visual_semantic_score")
-                    selected_candidate.provenance.visual_semantic = visual_evidence
+
+                    # 6. Media Inspection
+                    inspection = inspect_media(downloaded_path)
+                    if not inspection.get("valid"):
+                        err_msg = f"Downloaded media inspection failed for scene {scene.scene_id}: {inspection.get('errors')}"
+                        report.warnings.append(err_msg)
+                        scene_errors.append(err_msg)
+                        # Unusable media never reaches the visual gate either.
+                        report.rejections.append({
+                            "candidate_id": selected_candidate.candidate_id,
+                            "scene_id": scene.scene_id,
+                            "reason": (
+                                "Unverified candidate dropped: media inspection failed before the "
+                                f"visual gate could verify it ({inspection.get('errors')})"
+                            ),
+                            "title": selected_candidate.title,
+                            "provider": str(active_pname),
+                        })
+                        continue
+
+                    # 6b. P0 VISUAL-SEMANTIC VERIFICATION ON DOWNLOADED PIXELS.
+                    # Real CLIP gate against scene narration + visual_intent + asset_query.
+                    # Provider-generated tags are never used as semantic evidence.
+                    # HARD FAILURE is preferable to an unrelated asset.
+                    gated_providers = ("pexels", "pixabay", "openverse")
+                    if active_pname in gated_providers and visual_semantic_enabled():
+                        try:
+                            visual_evidence = visual_semantic_verify(
+                                downloaded_path,
+                                query=active_query,
+                                visual_intent=scene.visual_intent or "",
+                                narration=scene.narration or "",
+                                min_similarity=visual_semantic_min_similarity(),
+                                max_video_frames=int(getattr(CONFIG, "visual_semantic_max_video_frames", 3)),
+                            )
+                        except VisualSemanticUnavailable as vs_exc:
+                            # The authoritative semantic verifier cannot run. We must
+                            # NOT accept unverified stock as semantically relevant.
+                            err_msg = (
+                                f"Visual-semantic verifier unavailable for scene {scene.scene_id} "
+                                f"({active_pname}): {vs_exc}. Refusing to accept unverified asset."
+                            )
+                            report.errors.append(err_msg)
+                            scene_errors.append(err_msg)
+                            continue
+                        except Exception as vs_exc:
+                            err_msg = f"Visual-semantic verification error for scene {scene.scene_id}: {vs_exc}"
+                            report.warnings.append(err_msg)
+                            scene_errors.append(err_msg)
+                            continue
+
+                        if not visual_evidence.get("passed_gate"):
+                            report.rejections.append({
+                                "candidate_id": selected_candidate.candidate_id,
+                                "scene_id": scene.scene_id,
+                                "reason": (
+                                    f"VISUAL GATE REJECT: {visual_evidence.get('reason')} "
+                                    f"(query='{active_query}')"
+                                ),
+                                "title": selected_candidate.title,
+                                "provider": active_pname,
+                            })
+                            # Do not fall through to "better to show something";
+                            # try the next candidate/provider instead.
+                            continue
+                        # Real verification passed: record the authoritative score.
+                        selected_candidate.provenance.semantic_score = visual_evidence.get("visual_semantic_score")
+                        selected_candidate.provenance.visual_semantic = visual_evidence
+                        # 6c. Second-chance query rewrite (plan 1.3): the asset
+                        # cleared the hard floor but sits below the strong CLIP
+                        # threshold. Hold it as the fallback, retry the scene
+                        # search ONCE with a broader synonym query, and give those
+                        # candidates their chance before accepting the weak asset.
+                        weak_score = float(visual_evidence.get("visual_semantic_score") or 0.0)
+                        if weak_score < strong_threshold and not second_chance_attempted:
+                            second_chance_attempted = True
+                            weak_fallback = {
+                                "candidate": selected_candidate,
+                                "selection_reason": selection_reason,
+                                "downloaded_path": str(downloaded_path),
+                                "visual_evidence": visual_evidence,
+                            }
+                            broader_query = derive_broader_query(scene, script.topic)
+                            if broader_query and broader_query.lower() != active_query.lower():
+                                try:
+                                    retry_candidates = active_prov.search(
+                                        {
+                                            "query": broader_query,
+                                            "aspect_ratio": "9:16",
+                                            "visual_concept": broader_query,
+                                            "headline": scene.asset_query or broader_query[:35],
+                                            "subtext": scene.narration or broader_query,
+                                        },
+                                        max_results=CONFIG.openverse_max_results,
+                                    )
+                                    report.total_candidates_found += len(retry_candidates)
+                                    cleared_retry = (
+                                        get_cleared_candidates(retry_candidates, broader_query, active_pname)
+                                        if retry_candidates
+                                        else []
+                                    )
+                                    if cleared_retry:
+                                        pending_candidates[pending_idx:pending_idx] = [
+                                            (c, r, None) for c, r in cleared_retry
+                                        ]
+                                        report.warnings.append(
+                                            f"Scene {scene.scene_id}: CLIP score {weak_score:.3f} is below the "
+                                            f"strong threshold {strong_threshold:.3f}; second-chance search with "
+                                            f"broader query {broader_query!r} queued {len(cleared_retry)} candidate(s)."
+                                        )
+                                except Exception as retry_exc:
+                                    report.warnings.append(
+                                        f"Scene {scene.scene_id}: second-chance broader search failed: {retry_exc}"
+                                    )
+                            # Do not accept the weak candidate yet: the broader
+                            # candidates get the next chances in this loop.
+                            continue
 
                 source_sha256 = compute_file_sha256(downloaded_path)
                 seen_checksums.add(source_sha256)

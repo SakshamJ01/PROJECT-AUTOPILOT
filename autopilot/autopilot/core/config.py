@@ -72,6 +72,7 @@ class Config(BaseModel):
     # P0 Visual-Semantic Verification (local CLIP gate on downloaded pixels)
     visual_semantic_enabled: bool = True
     visual_semantic_min_similarity: float = 0.21  # cosine; validated on real match (0.256) vs decoy (0.177)
+    visual_semantic_strong_threshold: float = 0.28  # below this, a second-chance broader query search is attempted
     visual_semantic_model: str = "ViT-B-32"
     visual_semantic_pretrained: str = "laion2b_s34b_b79k"
     visual_semantic_max_video_frames: int = 3
@@ -280,6 +281,7 @@ class Config(BaseModel):
             "PIXABAY_TIMEOUT": "pixabay_timeout",
             "VISUAL_SEMANTIC_ENABLED": "visual_semantic_enabled",
             "VISUAL_SEMANTIC_MIN_SIMILARITY": "visual_semantic_min_similarity",
+            "VISUAL_SEMANTIC_STRONG_THRESHOLD": "visual_semantic_strong_threshold",
             "VISUAL_SEMANTIC_MODEL": "visual_semantic_model",
             "VISUAL_SEMANTIC_PRETRAINED": "visual_semantic_pretrained",
             "VISUAL_SEMANTIC_MAX_VIDEO_FRAMES": "visual_semantic_max_video_frames",
@@ -294,7 +296,7 @@ class Config(BaseModel):
                     data[field_name] = val.lower() in ("1", "true", "yes")
                 elif field_name in ("openverse_max_results", "asset_target_width", "asset_target_height", "asset_max_download_bytes", "asset_max_redirects", "qa_caption_max_line_length", "qa_caption_max_lines", "publish_max_retries", "publish_chunk_size_bytes", "queue_default_priority", "queue_max_attempts", "queue_max_concurrency", "queue_max_queued_jobs", "analytics_sync_interval_hours", "analytics_cache_ttl_seconds", "analytics_batch_size", "autonomy_level", "autonomy_max_ideas_per_cycle", "autonomy_max_auto_queue_per_cycle", "autonomy_max_daily_jobs", "autonomy_topic_cooldown_days", "ollama_num_predict", "learning_min_samples", "learning_min_category_observations", "learning_window_days", "learning_full_confidence_samples", "strategy_max_params_per_update", "strategy_min_age_days", "visual_semantic_max_video_frames"):
                     data[field_name] = int(val)
-                elif field_name in ("openverse_timeout", "qa_loudness_target_lufs", "qa_max_silence_duration_sec", "qa_silence_threshold_db", "qa_max_black_duration_sec", "qa_max_freeze_duration_sec", "qa_duration_tolerance_sec", "qa_duration_tolerance_pct", "qa_fps_target", "publish_timeout_seconds", "queue_lease_duration_seconds", "queue_poll_interval_seconds", "queue_retry_backoff_base_seconds", "autonomy_similarity_threshold", "autonomy_min_score_threshold", "ollama_timeout", "ollama_idle_timeout", "learning_recency_weight", "strategy_max_weight_delta", "strategy_weight_floor", "strategy_weight_ceiling", "strategy_influence_scale", "moneyprinter_startup_timeout_seconds", "visual_semantic_min_similarity", "render_transition_duration_sec"):
+                elif field_name in ("openverse_timeout", "qa_loudness_target_lufs", "qa_max_silence_duration_sec", "qa_silence_threshold_db", "qa_max_black_duration_sec", "qa_max_freeze_duration_sec", "qa_duration_tolerance_sec", "qa_duration_tolerance_pct", "qa_fps_target", "publish_timeout_seconds", "queue_lease_duration_seconds", "queue_poll_interval_seconds", "queue_retry_backoff_base_seconds", "autonomy_similarity_threshold", "autonomy_min_score_threshold", "ollama_timeout", "ollama_idle_timeout", "learning_recency_weight", "strategy_max_weight_delta", "strategy_weight_floor", "strategy_weight_ceiling", "strategy_influence_scale", "moneyprinter_startup_timeout_seconds", "visual_semantic_min_similarity", "visual_semantic_strong_threshold", "render_transition_duration_sec"):
                     data[field_name] = float(val)
                 else:
                     data[field_name] = val
