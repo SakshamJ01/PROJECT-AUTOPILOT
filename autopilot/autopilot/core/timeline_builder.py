@@ -67,6 +67,55 @@ def _scene_roles(count: int) -> List[NarrativeRole]:
     return roles
 
 
+# Pacing rhythm (plan 2.3). The ceiling mirrors PACING_MAX_SCENE_SECONDS in
+# the script provider, the hook band is the 2.8-3.2s opening window, and the
+# payoff target holds the final scene slightly longer so the video ends with
+# weight. Measured voice duration always wins over both.
+PACING_MAX_SCENE_SECONDS = 4.5
+_HOOK_MIN_SECONDS = 2.8
+_HOOK_MAX_SECONDS = 3.2
+_PAYOFF_TARGET_SECONDS = 4.0
+
+
+def apply_pacing_shape(
+    voice_durations: List[float],
+    roles: Optional[List[NarrativeRole]] = None,
+) -> List[float]:
+    """Shape measured voice durations into a hook / middle / payoff rhythm.
+
+    Voice duration is a hard floor (speech is never compressed) and
+    ``PACING_MAX_SCENE_SECONDS`` is the ceiling every nudge must respect.
+    HOOK scenes are padded into the 2.8-3.2s opening band, middle scenes keep
+    their speech-natural duration, and the final CTA/payoff scene is held
+    slightly longer (at least the payoff target, and never shorter than the
+    middle scenes) so the rhythm lands instead of ticking metronomically.
+    """
+    if not voice_durations:
+        return []
+    voices = [max(0.0, float(v)) for v in voice_durations]
+    if roles is None:
+        roles = _scene_roles(len(voices))
+    role_list = list(roles)
+    last_idx = len(voices) - 1
+    middle_max = max(voices[1:-1]) if len(voices) > 2 else 0.0
+
+    shaped: List[float] = []
+    for i, voice in enumerate(voices):
+        role = role_list[i] if i < len(role_list) else NarrativeRole.CONTENT
+        if role == NarrativeRole.HOOK:
+            # Nudge the hook into the 2.8-3.2s band; a voice already past the
+            # band (including one longer than it) is never cut by the clamp
+            # below because voice_duration is the hard floor.
+            candidate = min(max(voice, _HOOK_MIN_SECONDS), _HOOK_MAX_SECONDS)
+        elif i == last_idx and role in (NarrativeRole.CTA, NarrativeRole.PAYOFF):
+            candidate = max(_PAYOFF_TARGET_SECONDS, middle_max)
+        else:
+            # Middle scenes: speech-natural duration, no nudge.
+            candidate = voice
+        shaped.append(max(voice, min(candidate, PACING_MAX_SCENE_SECONDS)))
+    return shaped
+
+
 def _word_timestamps(raw: Any) -> List[Any]:
     """Normalize word timestamps from plan or contract shapes.
 
@@ -170,6 +219,15 @@ def build_materialized_timeline(
     script_scenes = list(getattr(script, "scenes", []) or [])
     roles = _scene_roles(len(script_scenes))
 
+    # Pacing rhythm (plan 2.3): shape the target durations BEFORE the cursor
+    # loop so the payoff scene can see the middle scenes. Measured voice
+    # durations are the floor; the pacing ceiling bounds every nudge.
+    voice_durations: List[float] = []
+    for sscene in script_scenes:
+        s_plan = plan_by_id.get(str(sscene.scene_id)) or {}
+        voice_durations.append(float(s_plan.get("duration_sec") or 0.0))
+    shaped_durations = apply_pacing_shape(voice_durations, roles)
+
     scenes: List[MaterializedScene] = []
     cursor = 0.0
     for idx, sscene in enumerate(script_scenes):
@@ -199,6 +257,10 @@ def build_materialized_timeline(
             raise TimelineBuildError(
                 f"scene '{scene_id}' has non-positive measured duration; refusing to guess"
             )
+        # Pacing-shaped target: >= voice duration (voice is the floor), <=
+        # the pacing ceiling for any nudge. The audio plan keeps the TRUE
+        # measured voice duration.
+        scene_duration = shaped_durations[idx]
 
         words = _word_timestamps(plan.get("word_timestamps")) or _word_timestamps(
             getattr(sscene, "word_timestamps", None)
@@ -229,8 +291,8 @@ def build_materialized_timeline(
                 narrative_role=roles[idx],
                 timing=MaterializedTiming(
                     start_time_sec=round(cursor, 3),
-                    end_time_sec=round(cursor + duration, 3),
-                    duration_sec=round(duration, 3),
+                    end_time_sec=round(cursor + scene_duration, 3),
+                    duration_sec=round(scene_duration, 3),
                 ),
                 narration=MaterializedNarration(
                     text=narration_text,
@@ -264,7 +326,7 @@ def build_materialized_timeline(
                 qa_expectations=QAExpectations(),
             )
         )
-        cursor += duration
+        cursor += scene_duration
 
     return MaterializedTimeline(
         timeline_id=f"mtl-{job_id}",
@@ -322,6 +384,8 @@ def load_timeline_from_job_dir(
 
 __all__ = [
     "TimelineBuildError",
+    "PACING_MAX_SCENE_SECONDS",
+    "apply_pacing_shape",
     "build_materialized_timeline",
     "load_timeline_from_job_dir",
     "load_audio_mix_manifest",
