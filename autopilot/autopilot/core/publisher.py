@@ -9,6 +9,7 @@ Provider-neutral publishing orchestrator that enforces:
 """
 from __future__ import annotations
 import json
+import re
 import time
 import hashlib
 from pathlib import Path
@@ -51,6 +52,80 @@ def compute_publish_idempotency_key(
     """Compute deterministic publication identity key."""
     raw = f"{content_id}:{media_checksum}:{platform}:{visibility}:{scheduled_time or ''}:{metadata_hash}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _merge_unique_tags(*tag_groups: Optional[List[str]]) -> List[str]:
+    """Merge tag groups, dropping duplicates case-insensitively, preserving order."""
+    seen = set()
+    out: List[str] = []
+    for group in tag_groups:
+        for raw in group or []:
+            tag = str(raw).strip()
+            if not tag:
+                continue
+            key = tag.lower()
+            if key not in seen:
+                seen.add(key)
+                out.append(tag)
+    return out
+
+
+def _cap_tags_total_length(tags: List[str], limit: int = 500) -> List[str]:
+    """Keep tags while their joined length (including separators) fits YouTube's limit."""
+    kept: List[str] = []
+    total = 0
+    for tag in tags:
+        cost = len(tag) + 1
+        if total + cost > limit:
+            break
+        total += cost
+        kept.append(tag)
+    return kept
+
+
+def _topic_keywords(topic: str) -> List[str]:
+    """Derive simple keyword tags from the topic string."""
+    words = re.findall(r"[A-Za-z0-9][A-Za-z0-9-]{1,40}", (topic or "").replace("_", "-"))
+    return list(dict.fromkeys(word.lower() for word in words))
+
+
+def _compose_rich_description(
+    script_meta: dict,
+    hook_text: str,
+    tags: List[str],
+) -> Optional[str]:
+    """SEO description: hook line + key-facts bullets from middle scenes + hashtags."""
+    scenes = script_meta.get("scenes")
+    if not isinstance(scenes, list) or not scenes:
+        return None
+
+    def _order(scene: dict) -> int:
+        try:
+            return int(scene.get("order") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    ordered = sorted((s for s in scenes if isinstance(s, dict)), key=_order)
+    middle = ordered[1:-1] if len(ordered) >= 3 else (ordered[1:] if len(ordered) == 2 else [])
+    facts: List[str] = []
+    for scene in middle:
+        narration = str(scene.get("narration") or "").strip()
+        if narration and narration not in facts:
+            facts.append(narration)
+
+    if not hook_text and not facts:
+        return None
+
+    parts: List[str] = []
+    if hook_text:
+        parts.append(hook_text)
+    if facts:
+        parts.append("Key facts:")
+        parts.extend("- " + fact for fact in facts)
+    hashtags = [tag for tag in tags if tag.isalnum()]
+    if hashtags:
+        parts.append(" ".join("#" + tag for tag in hashtags[:4]))
+    return "\n\n".join(parts)
 
 
 class PublishingEngine:
@@ -703,6 +778,22 @@ class PublishingEngine:
 
         gen_meta = script_meta.get("generation_metadata") or {}
 
+        # Resolve the job's channel profile (plan 4.2): YouTube category per niche.
+        job_row = db.get_job(job_id) or {}
+        pub_channel_id = (job_row.get("channel_id") or "default").lower()
+        youtube_category_id = None
+        channel_niche_tags: List[str] = []
+        if str(platform).lower() == "youtube":
+            try:
+                from autopilot.core.channel import ChannelManager
+                profile = ChannelManager(db=db).get_or_create_channel(pub_channel_id)
+                cat_id = getattr(profile.niche, "youtube_category_id", None)
+                if cat_id:
+                    youtube_category_id = str(cat_id)
+                channel_niche_tags = [str(c) for c in (profile.niche.allowed_categories or [])]
+            except Exception:
+                youtube_category_id = None
+
         # 4a. Title Resolution
         candidate_title = script_meta.get("working_title") or pub_meta.get("title") or script_meta.get("topic")
         if candidate_title:
@@ -711,27 +802,7 @@ class PublishingEngine:
             else:
                 title = candidate_title
 
-        # 4b. Description Resolution
-        gen_desc = gen_meta.get("description")
-        pub_desc = pub_meta.get("description")
-        hook_text = (script_meta.get("hook") or "").strip()
-        cta_text = (script_meta.get("cta") or "").strip()
-        hook_cta_desc = f"{hook_text}\n\n{cta_text}".strip() if (hook_text and cta_text) else (hook_text or cta_text)
-
-        if gen_desc and gen_desc.strip():
-            description = gen_desc.strip()
-        elif pub_desc and not is_demo_placeholder(pub_desc):
-            description = pub_desc.strip()
-        elif hook_cta_desc:
-            description = hook_cta_desc
-        elif pub_desc and is_mock_provider:
-            description = pub_desc.strip()
-        elif pub_desc and not is_real_production:
-            description = pub_desc.strip()
-        elif script_meta.get("topic"):
-            description = f"Automated video for: {script_meta.get('topic')}"
-
-        # 4c. Tags Resolution
+        # 4c. Tags Resolution (runs before description so hashtags can be derived)
         gen_tags = gen_meta.get("tags")
         pub_tags = pub_meta.get("hashtags") or pub_meta.get("tags")
 
@@ -755,6 +826,39 @@ class PublishingEngine:
                 tags = clean_tags
         else:
             tags = resolved_tags
+
+        # SEO enrichment (plan 4.2): merge LLM tags with topic keywords and channel
+        # niche tags, dedupe, and cap at YouTube's 500-char total tag limit.
+        scenes_present = isinstance(script_meta.get("scenes"), list) and bool(script_meta.get("scenes"))
+        use_rich_metadata = is_real_production and scenes_present
+        if use_rich_metadata:
+            tags = _cap_tags_total_length(
+                _merge_unique_tags(tags, _topic_keywords(script_meta.get("topic") or ""), channel_niche_tags),
+                limit=500,
+            )
+
+        # 4b. Description Resolution
+        gen_desc = gen_meta.get("description")
+        pub_desc = pub_meta.get("description")
+        hook_text = (script_meta.get("hook") or "").strip()
+        cta_text = (script_meta.get("cta") or "").strip()
+        hook_cta_desc = f"{hook_text}\n\n{cta_text}".strip() if (hook_text and cta_text) else (hook_text or cta_text)
+
+        rich_desc = _compose_rich_description(script_meta, hook_text, tags) if use_rich_metadata else None
+        if rich_desc:
+            description = rich_desc
+        elif gen_desc and gen_desc.strip():
+            description = gen_desc.strip()
+        elif pub_desc and not is_demo_placeholder(pub_desc):
+            description = pub_desc.strip()
+        elif hook_cta_desc:
+            description = hook_cta_desc
+        elif pub_desc and is_mock_provider:
+            description = pub_desc.strip()
+        elif pub_desc and not is_real_production:
+            description = pub_desc.strip()
+        elif script_meta.get("topic"):
+            description = f"Automated video for: {script_meta.get('topic')}"
 
         # 5. Resolve Visibility and Dry-Run
         vis_val = (visibility or self.config.publish_default_visibility).lower()
@@ -880,7 +984,7 @@ class PublishingEngine:
             title=title[:100],
             description=description[:5000],
             tags=tags,
-            category_id="28",
+            category_id=youtube_category_id or "28",
             media_path=str(target_media.resolve()),
             thumbnail_path=thumbnail_path_str,
             media_checksum_sha256=media_checksum,

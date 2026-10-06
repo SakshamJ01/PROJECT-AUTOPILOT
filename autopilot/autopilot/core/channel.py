@@ -37,6 +37,7 @@ BUILTIN_CHANNEL_PRESETS: Dict[str, Dict[str, Any]] = {
             "description": "Empirical discoveries, physics anomalies, and scientific breakthroughs",
             "allowed_categories": ["science", "physics", "biology", "astronomy"],
             "content_format_preferences": ["short_vertical"],
+            "youtube_category_id": "28",
         },
         "persona": {
             "persona_name": "science_educator",
@@ -72,6 +73,7 @@ BUILTIN_CHANNEL_PRESETS: Dict[str, Dict[str, Any]] = {
             "description": "Chronological history, forgotten turning points, and archival evidence",
             "allowed_categories": ["history", "ancient_civilizations", "military_history", "biography"],
             "content_format_preferences": ["short_vertical"],
+            "youtube_category_id": "27",
         },
         "persona": {
             "persona_name": "historical_narrator",
@@ -107,6 +109,7 @@ BUILTIN_CHANNEL_PRESETS: Dict[str, Dict[str, Any]] = {
             "description": "Emerging hardware, artificial intelligence, and computing architectures",
             "allowed_categories": ["technology", "ai", "hardware", "computing"],
             "content_format_preferences": ["short_vertical"],
+            "youtube_category_id": "28",
         },
         "persona": {
             "persona_name": "tech_analyst",

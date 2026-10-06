@@ -22,10 +22,11 @@ def setup_job_artifacts(
     qa_pass: bool = True,
     package_data: dict = None,
     script_data: dict = None,
+    channel_id: str = "default",
 ):
     db = DBManager(tmp_path / "test.db")
     db.init_schema()
-    db.create_job(job_id=job_id, topic=f"Topic for {job_id}")
+    db.create_job(job_id=job_id, channel_id=channel_id, topic=f"Topic for {job_id}")
 
     media_dir = tmp_path / "artifacts" / "jobs" / job_id / "render"
     media_dir.mkdir(parents=True, exist_ok=True)
@@ -311,3 +312,159 @@ def test_qa_and_checksum_gates_remain_enforced(tmp_path, monkeypatch):
     assert res_chk.success is False
     assert res_chk.status == PublishStatus.BLOCKED_QA
     assert "checksum" in res_chk.error.message.lower()
+
+
+def _rich_history_package() -> dict:
+    return {
+        "package_version": "v1.0.0",
+        "script": {
+            "working_title": "The Antikythera Mechanism",
+            "topic": "The antikythera mechanism",
+            "hook": "A 2,000-year-old computer was found in an ancient shipwreck.",
+            "cta": "Follow for more history!",
+            "generation_metadata": {
+                "description": "An old description that the SEO composition must replace.",
+                "tags": ["history", "artifacts", "history"],
+            },
+            "scenes": [
+                {"order": 1, "narration": "The hook scene narration opens the video."},
+                {"order": 2, "narration": "It predicted eclipses centuries ahead."},
+                {"order": 3, "narration": "Bronze gears reach precision players."},
+                {"order": 4, "narration": "Subscribe and keep exploring the past."},
+            ],
+        },
+        "publication": {
+            "title": "The Antikythera Mechanism",
+            "description": "Deterministic demo content for topic: The antikythera mechanism",
+            "hashtags": ["autopilot", "demo"],
+        },
+        "provenance": {
+            "provider": "openai_compatible",
+        },
+    }
+
+
+def test_history_shorts_resolves_category_27_with_rich_seo_metadata(tmp_path, monkeypatch):
+    """Plan 4.2: history_shorts maps to YouTube category 27 and the SEO description
+    composes hook + key-facts bullets + hashtags, enriched tags deduped under 500 chars."""
+    job_id = "prod-history-seo-101"
+    monkeypatch.setattr(CONFIG, "artifacts_dir", tmp_path / "artifacts")
+
+    db, media_file, chk = setup_job_artifacts(
+        tmp_path, job_id, package_data=_rich_history_package(), channel_id="history_shorts"
+    )
+    engine = PublishingEngine(CONFIG)
+    from autopilot.providers.youtube_publisher import YouTubePublisher
+    yt_prov = YouTubePublisher(config=CONFIG)
+
+    result = engine.publish_job(
+        job_id=job_id,
+        platform="youtube",
+        dry_run=True,
+        visibility="public",
+        provider=yt_prov,
+        db_manager=db,
+    )
+
+    assert result.success is True
+    metadata = result.dry_run_preview["metadata"]["snippet"]
+
+    assert metadata["categoryId"] == "27"
+    assert "A 2,000-year-old computer" in metadata["description"]
+    assert "Key facts:" in metadata["description"]
+    assert "- It predicted eclipses centuries ahead." in metadata["description"]
+    assert "- Bronze gears reach precision players." in metadata["description"]
+    assert "#history" in metadata["description"]
+    assert "An old description that the SEO composition must replace." not in metadata["description"]
+
+    # Hook scene narration (scene-01) and payoff scene narration (scene-04) are excluded.
+    assert "The hook scene narration opens the video." not in metadata["description"]
+    assert "Subscribe and keep exploring the past." not in metadata["description"]
+
+    tags = metadata["tags"]
+    assert "antikythera" in tags
+    assert "history" in tags
+    assert len({t.lower() for t in tags}) == len(tags)
+    assert sum(len(t) + 1 for t in tags) <= 500
+
+    req_file = tmp_path / "artifacts" / "jobs" / job_id / "publish" / "request.json"
+    req_data = json.loads(req_file.read_text(encoding="utf-8"))
+    assert req_data["category_id"] == "27"
+    assert req_data["tags"] == tags
+
+
+def test_science_shorts_resolves_category_28(tmp_path, monkeypatch):
+    """Plan 4.2: science_shorts maps to YouTube category 28."""
+    job_id = "prod-science-seo-102"
+    monkeypatch.setattr(CONFIG, "artifacts_dir", tmp_path / "artifacts")
+
+    pkg = _rich_history_package()
+    pkg["script"]["topic"] = "Why is Mars red"
+    pkg["script"]["working_title"] = "Why is Mars red"
+    db, media_file, chk = setup_job_artifacts(
+        tmp_path, job_id, package_data=pkg, channel_id="science_shorts"
+    )
+    engine = PublishingEngine(CONFIG)
+    from autopilot.providers.youtube_publisher import YouTubePublisher
+    yt_prov = YouTubePublisher(config=CONFIG)
+
+    result = engine.publish_job(
+        job_id=job_id,
+        platform="youtube",
+        dry_run=True,
+        visibility="private",
+        provider=yt_prov,
+        db_manager=db,
+    )
+
+    assert result.success is True
+    metadata = result.dry_run_preview["metadata"]["snippet"]
+    assert metadata["categoryId"] == "28"
+    assert "Key facts:" in metadata["description"]
+
+
+def test_seo_tags_deduped_and_capped_at_500_chars(tmp_path, monkeypatch):
+    """Plan 4.2: tag enrichment dedupes case-insensitively and respects YouTube's 500-char limit."""
+    job_id = "prod-tag-cap-103"
+    monkeypatch.setattr(CONFIG, "artifacts_dir", tmp_path / "artifacts")
+
+    long_tag_payload = [
+        {"order": 1, "narration": "Scene one narration text here."},
+        {"order": 2, "narration": "Scene two narration text here."},
+        {"order": 3, "narration": "Scene three narration text here."},
+    ]
+    pkg = {
+        "package_version": "v1.0.0",
+        "script": {
+            "working_title": "Tag Cap Test",
+            "topic": "tag cap test",
+            "hook": "A hook that opens the video.",
+            "generation_metadata": {
+                "tags": ["science", "Science", "space", "spac" + "e" * 200, "repeat", "repeat"],
+            },
+            "scenes": long_tag_payload,
+        },
+        "publication": {"title": "Tag Cap Test"},
+        "provenance": {"provider": "openai_compatible"},
+    }
+
+    db, media_file, chk = setup_job_artifacts(tmp_path, job_id, package_data=pkg, channel_id="science_shorts")
+    engine = PublishingEngine(CONFIG)
+    from autopilot.providers.youtube_publisher import YouTubePublisher
+    yt_prov = YouTubePublisher(config=CONFIG)
+
+    result = engine.publish_job(
+        job_id=job_id,
+        platform="youtube",
+        dry_run=True,
+        visibility="private",
+        provider=yt_prov,
+        db_manager=db,
+    )
+
+    assert result.success is True
+    tags = result.dry_run_preview["metadata"]["snippet"]["tags"]
+    assert len({t.lower() for t in tags}) == len(tags)
+    assert sum(len(t) + 1 for t in tags) <= 500
+    assert tags.count("science") == 1
+    assert "tag" in tags or "test" in tags

@@ -1603,6 +1603,7 @@ class NicheConfig(BaseModel):
     research_preferences: Dict[str, Any] = Field(default_factory=dict)
     ideation_weighting: Dict[str, float] = Field(default_factory=dict)
     content_format_preferences: List[str] = Field(default_factory=lambda: ["short_vertical"])
+    youtube_category_id: Optional[str] = None
 
 
 class PersonaConfig(BaseModel):
