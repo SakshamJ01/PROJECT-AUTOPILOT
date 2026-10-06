@@ -37,6 +37,7 @@ class ProsodyProfile(str, Enum):
     DOCUMENTARY = "documentary"
     MYSTERIOUS = "mysterious"
     CONVERSATIONAL = "conversational"
+    PAYOFF = "payoff"
 
 
 class ProsodySettings(BaseModel):
@@ -47,7 +48,7 @@ class ProsodySettings(BaseModel):
     comma_pause_ms: int = 200
 
     @classmethod
-    def from_profile(cls, profile: Union[str, ProsodyProfile]) -> ProsodySettings:
+    def from_profile(cls, profile: Union[str, ProsodyProfile]) -> "ProsodySettings":
         p_str = profile.value if isinstance(profile, ProsodyProfile) else str(profile).lower()
         if p_str == "energetic":
             return cls(
@@ -70,6 +71,13 @@ class ProsodySettings(BaseModel):
                 pitch="-2Hz",
                 comma_pause_ms=350,
             )
+        elif p_str == "payoff":
+            return cls(
+                profile=ProsodyProfile.PAYOFF,
+                rate="-5%",
+                pitch="-1Hz",
+                comma_pause_ms=300,
+            )
         else:
             return cls(
                 profile=ProsodyProfile.CONVERSATIONAL,
@@ -77,6 +85,23 @@ class ProsodySettings(BaseModel):
                 pitch="+0Hz",
                 comma_pause_ms=200,
             )
+
+
+def prosody_for_narrative_role(role: Any) -> ProsodyProfile:
+    """Map a narrative role to the synthesis prosody for that scene.
+
+    Hook scenes open faster (energetic, ``rate=+8%``), the payoff/CTA scene
+    lands slower (``rate=-5%``), and middle scenes stay neutral. Accepts
+    ``NarrativeRole`` members or their names in any casing so the timeline,
+    pipeline and tests can all feed it directly.
+    """
+    name = getattr(role, "name", None) or role
+    name = str(name).upper().rsplit(".", 1)[-1].strip()
+    if name == "HOOK":
+        return ProsodyProfile.ENERGETIC
+    if name in ("CTA", "PAYOFF"):
+        return ProsodyProfile.PAYOFF
+    return ProsodyProfile.CONVERSATIONAL
 
 
 class ChannelVoiceBinding(BaseModel):
@@ -241,7 +266,14 @@ class NeuralVoiceStudio:
         current_time_offset = 0.0
         for scene in timeline.scenes:
             voice_id = binding.default_voice_id
-            prosody = binding.default_prosody
+            # Role-based prosody (plan 3.2): hook +8% and payoff -5% override
+            # the channel default; neutral scenes keep the binding's profile.
+            role_prosody = prosody_for_narrative_role(scene.narrative_role)
+            prosody = (
+                binding.default_prosody
+                if role_prosody is ProsodyProfile.CONVERSATIONAL
+                else role_prosody
+            )
 
             res = self.process_scene_narration(
                 scene_id=scene.scene_id,

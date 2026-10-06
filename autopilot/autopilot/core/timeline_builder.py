@@ -55,7 +55,7 @@ def _coerce_enum(enum_cls: Any, raw: Any, default: Any) -> Any:
     return default
 
 
-def _scene_roles(count: int) -> List[NarrativeRole]:
+def scene_roles(count: int) -> List[NarrativeRole]:
     """Assign narrative roles: hook first, CTA last, content in between."""
     if count <= 0:
         return []
@@ -94,7 +94,7 @@ def apply_pacing_shape(
         return []
     voices = [max(0.0, float(v)) for v in voice_durations]
     if roles is None:
-        roles = _scene_roles(len(voices))
+        roles = scene_roles(len(voices))
     role_list = list(roles)
     last_idx = len(voices) - 1
     middle_max = max(voices[1:-1]) if len(voices) > 2 else 0.0
@@ -217,7 +217,7 @@ def build_materialized_timeline(
 
     plan_by_id = {str(s.get("scene_id")): s for s in plan_scenes if s.get("scene_id")}
     script_scenes = list(getattr(script, "scenes", []) or [])
-    roles = _scene_roles(len(script_scenes))
+    roles = scene_roles(len(script_scenes))
 
     # Pacing rhythm (plan 2.3): shape the target durations BEFORE the cursor
     # loop so the payoff scene can see the middle scenes. Measured voice
@@ -389,4 +389,5 @@ __all__ = [
     "build_materialized_timeline",
     "load_timeline_from_job_dir",
     "load_audio_mix_manifest",
+    "scene_roles",
 ]

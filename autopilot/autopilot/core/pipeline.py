@@ -478,11 +478,19 @@ class PipelineOrchestrator:
 
                 if tts is not None and tts_provider not in ("none", "off", "disabled"):
 
-                    for scene in script.scenes:
+                    from autopilot.core.voice_studio import prosody_for_narrative_role
+                    from autopilot.core.timeline_builder import scene_roles
+
+                    # Role-based prosody (plan 3.2): hook +8%, payoff -5%,
+                    # middle neutral. Applied at synthesis so the word-timestamp
+                    # alignment pass measures the rate-shifted audio.
+                    roles = scene_roles(len(script.scenes))
+                    for idx, scene in enumerate(script.scenes):
                         if scene.narration:
                             scene_res = voice_studio.process_scene_narration(
                                 scene_id=f"scene_{scene.scene_id}",
                                 raw_text=scene.narration,
+                                prosody=prosody_for_narrative_role(roles[idx]),
                                 provider_name=tts_provider,
                                 out_dir=voice_dir,
                             )
