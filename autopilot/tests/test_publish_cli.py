@@ -6,6 +6,7 @@ from pathlib import Path
 from autopilot.cli.main import run_publish, run_health
 from autopilot.core.config import CONFIG
 from autopilot.db.manager import DBManager
+from helpers import write_ready_gate_evidence
 
 
 def test_cli_publish_dry_run_success(tmp_path, monkeypatch, capsys):
@@ -33,6 +34,7 @@ def test_cli_publish_dry_run_success(tmp_path, monkeypatch, capsys):
         "media_checksum_sha256": chk,
     }
     (qa_dir / "receipt.json").write_text(json.dumps(qa_receipt), encoding="utf-8")
+    write_ready_gate_evidence(tmp_path / "artifacts", job_id, chk)
 
     code = run_publish(job_id=job_id, platform="youtube", dry_run=True, output_json=False)
     assert code == 0
@@ -66,6 +68,7 @@ def test_cli_publish_json_output(tmp_path, monkeypatch, capsys):
         "media_checksum_sha256": chk,
     }
     (qa_dir / "receipt.json").write_text(json.dumps(qa_receipt), encoding="utf-8")
+    write_ready_gate_evidence(tmp_path / "artifacts", job_id, chk)
 
     code = run_publish(job_id=job_id, platform="youtube", dry_run=True, output_json=True)
     assert code == 0

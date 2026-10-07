@@ -44,6 +44,7 @@ from autopilot.core.quality import (
 from autopilot.core.pipeline import PipelineOrchestrator, classify_qa_defect, PipelineError
 from autopilot.core.config import Config
 from autopilot.db.manager import DBManager
+from helpers import install_ready_gate
 
 
 # ====================================================================
@@ -76,8 +77,9 @@ def test_1_run_invokes_pipeline_orchestrator():
             assert call_kwargs["policy"] == "mock"
 
 
-def test_2_all_expected_stages_are_reachable(tmp_path):
+def test_2_all_expected_stages_are_reachable(tmp_path, monkeypatch):
     """2. Verify PipelineOrchestrator runs through all expected stages: RESEARCH, SCRIPT, VOICE, ASSETS, RENDER, QA."""
+    install_ready_gate(monkeypatch)
     stages_reached = []
 
     def on_progress(stage):
@@ -427,8 +429,9 @@ def test_13_list_structure_defect_maps_to_targeted_regeneration():
     assert "one clear scene/fact unit" in instruction
 
 
-def test_14_regeneration_preserves_research(tmp_path):
+def test_14_regeneration_preserves_research(tmp_path, monkeypatch):
     """14. Verify that targeted script regeneration preserves research and does not re-fetch research."""
+    install_ready_gate(monkeypatch)
     db_path = tmp_path / "test_regen_research.db"
     db = DBManager(db_path)
     db.init_schema()

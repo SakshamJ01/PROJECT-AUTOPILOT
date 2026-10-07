@@ -8,6 +8,7 @@ from autopilot.core.contracts import PublishStatus
 from autopilot.core.publisher import PublishingEngine
 from autopilot.providers.mock_publisher import MockPublisher
 from autopilot.db.manager import DBManager
+from helpers import write_ready_gate_evidence
 
 
 def setup_passing_job(tmp_path, job_id: str, content: bytes = b"MEDIA_DATA"):
@@ -33,6 +34,7 @@ def setup_passing_job(tmp_path, job_id: str, content: bytes = b"MEDIA_DATA"):
         "media_checksum_sha256": chk,
     }
     (qa_dir / "receipt.json").write_text(json.dumps(qa_receipt), encoding="utf-8")
+    write_ready_gate_evidence(tmp_path / "artifacts", job_id, chk)
     return db, media_file, chk
 
 

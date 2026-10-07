@@ -7,10 +7,12 @@ from unittest.mock import patch, MagicMock
 from autopilot.core.config import CONFIG
 from autopilot.core.contracts import RenderPlan, ProductionResult
 from autopilot.core.pipeline import PipelineOrchestrator, PipelineError
+from helpers import install_ready_gate
 
 
 def test_resume_invalidates_when_production_engine_changes(tmp_path, monkeypatch):
     """Proves that a render generated with 'ffmpeg' is invalidated if 'moneyprinterturbo' is requested."""
+    install_ready_gate(monkeypatch)
     monkeypatch.setattr(CONFIG, "artifacts_dir", tmp_path / "artifacts")
     monkeypatch.setattr(CONFIG, "db_path", tmp_path / "test.db")
     monkeypatch.setattr(CONFIG, "moneyprinter_endpoint", "http://127.0.0.1:59999")

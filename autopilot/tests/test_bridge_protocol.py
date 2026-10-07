@@ -18,6 +18,8 @@ from pathlib import Path
 
 import pytest
 
+from helpers import install_ready_gate
+
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SENSITIVE_VALUE_KEYWORDS = (
     "access_token",
@@ -543,8 +545,9 @@ def retry_bridge(tmp_path, monkeypatch):
     yield handlers, db, captured, done, behaviour
 
 
-def test_production_retry_after_cancel_proceeds_to_production(retry_bridge):
+def test_production_retry_after_cancel_proceeds_to_production(retry_bridge, monkeypatch):
     """Cancel then retry actually re-runs the job instead of leaving it queued."""
+    install_ready_gate(monkeypatch)
     handlers, db, captured, done, _ = retry_bridge
     _seed_terminal_item(db, "cancelled")
 

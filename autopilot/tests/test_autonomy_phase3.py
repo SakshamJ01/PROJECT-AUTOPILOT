@@ -26,6 +26,7 @@ from autopilot.core.autonomy import AutonomyEngine, PolicyGate
 from autopilot.core.channel import ChannelManager
 from autopilot.providers.mock_trend import MockTrendProvider
 from autopilot.core.topic_scoring import TopicScorer
+from helpers import install_ready_gate
 
 
 @pytest.fixture
@@ -101,8 +102,9 @@ def test_topic_deduplication_recency_window():
     assert risk_novel < 0.2
 
 
-def test_assisted_mode_approval_boundary(mock_db, tmp_path):
+def test_assisted_mode_approval_boundary(mock_db, tmp_path, monkeypatch):
     """In assisted mode, publishing MUST halt at approval boundary and persist pending approval."""
+    install_ready_gate(monkeypatch)
     cfg = Config(artifacts_dir=str(tmp_path), db_path=str(mock_db.db_path))
     engine = AutonomyEngine(config=cfg, db=mock_db)
 

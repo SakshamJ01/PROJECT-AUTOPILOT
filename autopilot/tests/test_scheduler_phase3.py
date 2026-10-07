@@ -39,6 +39,7 @@ from autopilot.core.scheduler import (
     validate_timezone,
 )
 from autopilot.db.manager import DBManager
+from helpers import install_ready_gate
 
 NOW = datetime(2026, 9, 16, 10, 0, 0, tzinfo=timezone.utc)  # Wednesday
 
@@ -602,7 +603,8 @@ def test_schedule_delete(tmp_path, db):
 # ---------------------------------------------------------------------------
 # TEST 22: Publishing boundary — scheduled Level 4 runs never publish.
 # ---------------------------------------------------------------------------
-def test_schedule_publish_boundary(tmp_path, db):
+def test_schedule_publish_boundary(tmp_path, db, monkeypatch):
+    install_ready_gate(monkeypatch)
     enqueue_auto(db, "q-pub", "job-pub", "The Discovery of Penicillin")
     cfg = Config(artifacts_dir=str(tmp_path), db_path=str(db.db_path), default_production_engine="ffmpeg")
     real_engine = AutonomyEngine(config=cfg, db=db)

@@ -27,6 +27,7 @@ from autopilot.core.state_machine import WorkflowState
 from autopilot.core.publisher import PublishingEngine
 from autopilot.providers.youtube_publisher import YouTubePublisher
 from autopilot.db.manager import DBManager
+from helpers import write_ready_gate_evidence
 
 
 def create_sample_job_environment(
@@ -69,6 +70,7 @@ def create_sample_job_environment(
             "media_checksum_sha256": qa_chk,
         }
         (qa_dir / "receipt.json").write_text(json.dumps(qa_receipt), encoding="utf-8")
+        write_ready_gate_evidence(tmp_path / "artifacts", job_id, real_checksum)
 
         qa_report = QAReport(
             report_id=f"qa-rep-{job_id}",

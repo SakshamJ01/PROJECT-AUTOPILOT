@@ -4,11 +4,13 @@ import sqlite3
 from unittest.mock import MagicMock, patch
 
 from autopilot.db.manager import DBManager
+from autopilot.core.config import Config
 from autopilot.core.pipeline import PipelineOrchestrator
 from autopilot.cli.main import run_produce
 from autopilot.providers.openai_llm_provider import OpenAICompatibleLLMProvider
 from autopilot.providers.mock_script import MockScriptProvider
 from autopilot.core.contracts import ScriptDocument
+from helpers import install_ready_gate
 
 
 def json_response_bytes(content_str: str) -> bytes:
@@ -33,9 +35,10 @@ def tmp_db(tmp_path):
     return db
 
 
-def test_pipeline_persists_research_evidence(tmp_path, tmp_db):
+def test_pipeline_persists_research_evidence(tmp_path, tmp_db, monkeypatch):
     """Pipeline research stage persists research_evidence rows."""
-    pipeline = PipelineOrchestrator(db=tmp_db)
+    install_ready_gate(monkeypatch)
+    pipeline = PipelineOrchestrator(db=tmp_db, config=Config(artifacts_dir=str(tmp_path)))
     job_id = "test-job-ev-001"
     topic = "Quantum Teleportation Progress"
 

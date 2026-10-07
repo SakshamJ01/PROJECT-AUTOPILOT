@@ -37,6 +37,7 @@ from autopilot.core.asset_cache import compute_file_sha256
 from autopilot.core.renderer import FFmpegRenderer
 from autopilot.core.media_inspection import inspect_media
 from autopilot.core.qa_engine import QAEngine, export_qa_artifacts
+from autopilot.core.publish_readiness import publish_readiness_allows, run_composite_gate
 from autopilot.core.publisher import PublishingEngine
 from autopilot.providers.production.factory import get_production_engine
 from autopilot.providers.transcription.faster_whisper_engine import FasterWhisperEngine
@@ -980,10 +981,19 @@ class PipelineOrchestrator:
                 if report_file.exists():
                     saved_report = QAReport.model_validate_json(report_file.read_text(encoding="utf-8"))
                     if saved_report.receipt and saved_report.receipt.media_checksum_sha256 == render_checksum:
-                        qa_report = saved_report
-                        if qa_report.publish_allowed and qa_report.status != QAStatus.BLOCK:
-                            self.db.update_job_status(job_id, WorkflowState.APPROVED.value)
-                        logger.info("stage_resumed", details={"stage": "QA", "status": qa_report.status.value})
+                        # The composite gate evidence must also be present and
+                        # bound to this exact render before a resume may approve.
+                        # Otherwise fall through and regenerate all QA evidence.
+                        readiness_ok, _readiness_reason = publish_readiness_allows(
+        job_id, render_checksum, self.config.get_artifacts_dir()
+    )
+                        if readiness_ok:
+                            qa_report = saved_report
+                            if qa_report.publish_allowed and qa_report.status != QAStatus.BLOCK:
+                                self.db.update_job_status(job_id, WorkflowState.APPROVED.value)
+                            logger.info("stage_resumed", details={"stage": "QA", "status": qa_report.status.value})
+                        else:
+                            logger.info("stage_resumed", details={"stage": "QA", "reason": "readiness_missing_or_stale", "detail": _readiness_reason})
             except Exception:
                 qa_report = None
 
@@ -997,6 +1007,7 @@ class PipelineOrchestrator:
                     package=package,
                     asset_artifacts=asset_artifacts,
                     profile=profile,
+                    strict=self.config.qa_strict_mode,
                     job_id=job_id,
                     db_manager=self.db,
                 )
@@ -1085,6 +1096,24 @@ class PipelineOrchestrator:
                             category="BLOCKED",
                             stage="QA",
                         )
+
+                # Composite gate: creative QA + publish readiness must pass
+                # before the job may be approved. Shared with `autopilot qa`
+                # so both paths produce identical, checksum-bound evidence.
+                gate_decision = run_composite_gate(
+                    job_id, final_mp4, qa_report, self.db,
+                    artifacts_dir=self.config.get_artifacts_dir(),
+                )
+                qa_report.publish_allowed = gate_decision.is_ready_to_publish
+                if not gate_decision.is_ready_to_publish:
+                    gate_reason = "; ".join(gate_decision.blocking_reasons) or "composite gate blocked"
+                    self.db.update_job_status(job_id, WorkflowState.FAILED_QA.value)
+                    self.db.record_error(job_id, "QA", "composite_gate_blocked", gate_reason)
+                    raise PipelineError(
+                        f"Composite publish gate blocked: {gate_reason}",
+                        category="NON_RETRYABLE",
+                        stage="QA",
+                    )
 
                 self.db.update_job_status(job_id, WorkflowState.APPROVED.value)
                 logger.info("stage_completed", details={"stage": "QA", "status": qa_report.status.value, "allowed": qa_report.publish_allowed})

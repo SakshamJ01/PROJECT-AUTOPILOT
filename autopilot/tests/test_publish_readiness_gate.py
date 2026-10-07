@@ -27,6 +27,7 @@ from autopilot.core.artifacts import job_artifact_dir
 from autopilot.core.config import Config
 from autopilot.core.publisher import PublishingEngine, compute_file_sha256
 from autopilot.db.manager import DBManager
+from helpers import write_ready_gate_evidence
 
 
 @pytest.fixture()
@@ -78,6 +79,8 @@ def _seed_qa_receipt(env, job_id="job-1", status="PASS", publish_allowed=True, c
         "content_id": job_id,
     }
     (quality_dir / "receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
+    # The composite publish gate requires checksum-bound gate evidence too.
+    write_ready_gate_evidence(env["artifacts_dir"], job_id, checksum or "fake-sha256")
 
 
 def _seed_approval(env, job_id="job-1", status="approved", checksum=None, platform="youtube", channel_id="default"):

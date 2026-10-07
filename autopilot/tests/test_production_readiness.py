@@ -21,6 +21,7 @@ from autopilot.core.asset_pipeline import (
 )
 from autopilot.core.renderer import FFmpegRenderer
 from autopilot.cli.main import run_render
+from helpers import install_ready_gate
 
 
 def test_research_provider_isolation_in_db(tmp_path):
@@ -69,8 +70,9 @@ def test_research_provider_isolation_in_db(tmp_path):
     assert wiki_rep2["report_id"] == "rep-wiki-1"
 
 
-def test_pipeline_orchestrator_honors_wikipedia_provider(tmp_path):
+def test_pipeline_orchestrator_honors_wikipedia_provider(tmp_path, monkeypatch):
     """Verify PipelineOrchestrator instantiates WikipediaProvider when requested."""
+    install_ready_gate(monkeypatch)
     db_path = tmp_path / "test_pipe.db"
     db = DBManager(db_path)
     db.init_schema()
@@ -111,8 +113,9 @@ def test_pipeline_orchestrator_honors_wikipedia_provider(tmp_path):
         (8.4, 21.0),
     ],
 )
-def test_audio_duration_drives_render_scene_duration(tmp_path, audio_sec, expected_scene_sec):
+def test_audio_duration_drives_render_scene_duration(tmp_path, monkeypatch, audio_sec, expected_scene_sec):
     """Verify that measured audio duration overrides blind estimated duration in RenderPlan."""
+    install_ready_gate(monkeypatch)
     db_path = tmp_path / "test_dur.db"
     db = DBManager(db_path)
     db.init_schema()

@@ -77,6 +77,27 @@ def make_ready_job(
     }
     (qa_dir / "receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
 
+    # Composite gate evidence, bound to the same render checksum the receipt
+    # carries. Publishing requires both artifacts to agree.
+    gate_dir = tmp_path / "artifacts" / "jobs" / job_id / "qa"
+    gate_dir.mkdir(parents=True, exist_ok=True)
+    readiness = {
+        "is_ready_to_publish": True,
+        "status": "READY",
+        "overall_confidence": 0.95,
+        "technical_qa_passed": True,
+        "creative_qa_passed": True,
+        "blocking_reasons": [],
+        "warning_reasons": [],
+        "human_review_required": False,
+        "human_review_approved": False,
+        "rights_verified": True,
+        "invariants_verified": True,
+        "can_override_with_human_approval": True,
+        "media_checksum_sha256": checksum,
+    }
+    (gate_dir / "publish_readiness.json").write_text(json.dumps(readiness), encoding="utf-8")
+
     db.create_job(job_id=job_id, channel_id=channel_id, topic=f"Topic {job_id}")
     db.update_job_status(job_id, WorkflowState.APPROVED.value)
     return checksum
@@ -87,6 +108,24 @@ def approve(db: DBManager, job_id: str, checksum: str, platform: str = "youtube"
         db.create_publish_approval(job_id=job_id, channel_id="chan1", notes="test approval")
     db.decide_publish_approval(job_id, approved=True, decided_by="tester", notes="go",
                                artifact_checksum=checksum, platform=platform)
+
+
+def refresh_qa_checksums(tmp_path: Path, job_id: str, new_checksum: str) -> None:
+    """Simulate a full re-QA after the media changed.
+
+    Re-running `autopilot qa` regenerates BOTH the technical receipt and the
+    composite gate evidence, so both must be rebound to the new render.
+    """
+    qa_file = tmp_path / "artifacts" / "jobs" / job_id / "quality" / "receipt.json"
+    qa_receipt = json.loads(qa_file.read_text(encoding="utf-8"))
+    qa_receipt["media_checksum_sha256"] = new_checksum
+    qa_file.write_text(json.dumps(qa_receipt), encoding="utf-8")
+
+    gate_file = tmp_path / "artifacts" / "jobs" / job_id / "qa" / "publish_readiness.json"
+    if gate_file.exists():
+        readiness = json.loads(gate_file.read_text(encoding="utf-8"))
+        readiness["media_checksum_sha256"] = new_checksum
+        gate_file.write_text(json.dumps(readiness), encoding="utf-8")
 
 
 @pytest.fixture
@@ -197,15 +236,13 @@ def test_approval_checksum_mismatch_invalidates(env):
     checksum = make_ready_job(env["db"], env["tmp_path"], job_id)
     approve(env["db"], job_id, checksum)
 
-    # Operator modifies the artifact AFTER approving. Refresh the QA receipt so
-    # the QA gate stays green; only the APPROVAL binding is now stale.
+    # Operator modifies the artifact AFTER approving. Refresh the QA evidence
+    # (receipt + gate) so the QA gates stay green; only the APPROVAL binding
+    # is now stale.
     media_file = env["tmp_path"] / "artifacts" / "jobs" / job_id / "render" / "final.mp4"
     media_file.write_bytes(b"TAMPERED_POST_APPROVAL_PAYLOAD")
     new_checksum = compute_file_sha256(media_file)
-    qa_file = env["tmp_path"] / "artifacts" / "jobs" / job_id / "quality" / "receipt.json"
-    qa_receipt = json.loads(qa_file.read_text(encoding="utf-8"))
-    qa_receipt["media_checksum_sha256"] = new_checksum
-    qa_file.write_text(json.dumps(qa_receipt), encoding="utf-8")
+    refresh_qa_checksums(env["tmp_path"], job_id, new_checksum)
 
     result = run_with_approval(env, job_id)
     assert result.success is False
@@ -230,10 +267,7 @@ def test_reapproval_after_artifact_change_publishes(env):
     media_file = env["tmp_path"] / "artifacts" / "jobs" / job_id / "render" / "final.mp4"
     media_file.write_bytes(b"REVISED_AFTER_APPROVAL_PAYLOAD")
     new_checksum = compute_file_sha256(media_file)
-    qa_file = env["tmp_path"] / "artifacts" / "jobs" / job_id / "quality" / "receipt.json"
-    qa_receipt = json.loads(qa_file.read_text(encoding="utf-8"))
-    qa_receipt["media_checksum_sha256"] = new_checksum
-    qa_file.write_text(json.dumps(qa_receipt), encoding="utf-8")
+    refresh_qa_checksums(env["tmp_path"], job_id, new_checksum)
 
     blocked = run_with_approval(env, job_id)
     assert blocked.status == PublishStatus.BLOCKED_APPROVAL
@@ -566,6 +600,7 @@ def test_legacy_cli_publish_requires_approval(env, monkeypatch, capsys):
 
 def test_pipeline_auto_publish_requires_approval(env, monkeypatch):
     from autopilot.core.pipeline import PipelineOrchestrator, PipelineError
+    from autopilot.core.publish_readiness import PublishReadinessDecision, PublishReadinessStatus
     from autopilot.providers.contracts import REGISTRY
 
     orig_get = REGISTRY.get
@@ -573,6 +608,27 @@ def test_pipeline_auto_publish_requires_approval(env, monkeypatch):
         REGISTRY, "get",
         lambda name, **kw: MockPublisher() if str(name).lower() in ("youtube", "postiz") else orig_get(name, **kw),
     )
+
+    # The composite gate is a separate concern (it correctly blocks low-quality
+    # mock renders). Stub it so this test focuses on the approval gate. The
+    # stub persists the same evidence the real gate would write, because the
+    # publisher requires checksum-bound gate evidence to exist.
+    def _fake_gate(job_id, media_path, technical_report, db, artifacts_dir=None):
+        from autopilot.core.artifacts import job_artifact_dir
+
+        decision = PublishReadinessDecision(
+            is_ready_to_publish=True,
+            status=PublishReadinessStatus.READY,
+        )
+        decision.media_checksum_sha256 = compute_file_sha256(media_path)
+        qa_dir = job_artifact_dir(job_id, artifacts_dir) / "qa"
+        qa_dir.mkdir(parents=True, exist_ok=True)
+        (qa_dir / "publish_readiness.json").write_text(
+            decision.model_dump_json(indent=2), encoding="utf-8"
+        )
+        return decision
+
+    monkeypatch.setattr("autopilot.core.pipeline.run_composite_gate", _fake_gate)
 
     job_id = "t21-pipeline"
     orch = PipelineOrchestrator(CONFIG)

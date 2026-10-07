@@ -13,6 +13,7 @@ from autopilot.core.state_machine import WorkflowState
 from autopilot.core.publisher import PublishingEngine
 from autopilot.db.manager import DBManager
 from autopilot.providers.mock_publisher import MockPublisher
+from helpers import write_ready_gate_evidence
 
 
 def setup_job_artifacts(
@@ -47,6 +48,8 @@ def setup_job_artifacts(
             "media_checksum_sha256": chk,
         }
         (qa_dir / "receipt.json").write_text(json.dumps(qa_receipt), encoding="utf-8")
+        if qa_pass:
+            write_ready_gate_evidence(tmp_path / "artifacts", job_id, chk)
 
     script_dir = tmp_path / "artifacts" / "jobs" / job_id / "script"
     script_dir.mkdir(parents=True, exist_ok=True)

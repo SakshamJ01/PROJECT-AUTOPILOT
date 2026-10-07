@@ -12,10 +12,19 @@ from autopilot.core.config import Config
 from autopilot.core.batch import BatchProcessor
 from autopilot.core.worker import LocalWorker
 from autopilot.core.pipeline import PipelineOrchestrator
+from helpers import install_ready_gate
 
 
-def test_three_job_deterministic_batch_production(tmp_path):
-    """End-to-end batch execution of 3 synthetic jobs through the complete pipeline."""
+def test_three_job_deterministic_batch_production(tmp_path, monkeypatch):
+    """End-to-end batch execution of 3 synthetic jobs through the complete pipeline.
+
+    The composite publish gate is stubbed to READY: this test exercises the
+    batch worker machinery (queue -> pipeline -> APPROVED), not gate logic,
+    which is covered by the dedicated gate tests. The fake persists real
+    checksum-bound gate evidence exactly like the real gate.
+    """
+    install_ready_gate(monkeypatch)
+
     db_path = tmp_path / "batch_e2e.db"
     db = DBManager(db_path)
     db.init_schema()

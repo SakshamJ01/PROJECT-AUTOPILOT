@@ -38,6 +38,7 @@ from autopilot.core.contracts import (
 from autopilot.core.scheduler import ScheduleEngine
 from autopilot.db.manager import DBManager
 from autopilot.providers.mock_trend import MockTrendProvider
+from helpers import install_ready_gate
 
 NOW = datetime(2026, 9, 17, 10, 0, 0, tzinfo=timezone.utc)  # Thursday
 PAST = "2026-09-16T08:00:00+00:00"
@@ -248,7 +249,8 @@ def test_legacy_rows_derive_mode_on_read(tmp_path, db):
 # TEST 1: Level 3 -> Level 4 happy path ending at READY_TO_PUBLISH.
 # ---------------------------------------------------------------------------
 
-def test_operation_loop_happy_path(tmp_path, db):
+def test_operation_loop_happy_path(tmp_path, db, monkeypatch):
+    install_ready_gate(monkeypatch)
     eng = real_engine(tmp_path, db, signals=[good_signal()])
     engine = make_scheduler(tmp_path, db, engine=eng)
     create_loop_schedule(engine)
@@ -328,7 +330,8 @@ def test_operation_loop_l3_policy_rejection(tmp_path, db):
 # TEST 4: Level 3 queue capacity guardrail is preserved by the loop.
 # ---------------------------------------------------------------------------
 
-def test_operation_loop_l3_queue_capacity(tmp_path, db):
+def test_operation_loop_l3_queue_capacity(tmp_path, db, monkeypatch):
+    install_ready_gate(monkeypatch)
     # An active queued item saturates max_concurrent_jobs=1 -> PolicyGate blocks.
     enqueue_auto(db, "q-cap", "job-cap", "Capacity Sentinel Topic")
     policy = AutonomyPolicy(max_concurrent_jobs=1, max_jobs_per_day=10)
@@ -347,7 +350,8 @@ def test_operation_loop_l3_queue_capacity(tmp_path, db):
 # TEST 5: Level 4 consumes pre-queued backlog within a combined run.
 # ---------------------------------------------------------------------------
 
-def test_operation_loop_l4_consumes_backlog(tmp_path, db):
+def test_operation_loop_l4_consumes_backlog(tmp_path, db, monkeypatch):
+    install_ready_gate(monkeypatch)
     enqueue_auto(db, "q-backlog", "job-backlog", "The Discovery of Penicillin")
     eng = real_engine(tmp_path, db, signals=[])  # Level 3 adds nothing new
     engine = make_scheduler(tmp_path, db, engine=eng)
@@ -399,7 +403,8 @@ def test_operation_loop_l4_qa_failure(tmp_path, db):
 # TEST 7: Repeated invocation is idempotent (no duplicate queue/production).
 # ---------------------------------------------------------------------------
 
-def test_operation_loop_idempotency(tmp_path, db):
+def test_operation_loop_idempotency(tmp_path, db, monkeypatch):
+    install_ready_gate(monkeypatch)
     eng = real_engine(tmp_path, db, signals=[good_signal()])
     engine = make_scheduler(tmp_path, db, engine=eng)
     create_loop_schedule(engine)
@@ -596,7 +601,8 @@ def test_operation_loop_l3_failure_isolates_l4(tmp_path, db):
 # TEST 15: Final READY_TO_PUBLISH state (terminal success state).
 # ---------------------------------------------------------------------------
 
-def test_operation_loop_terminal_ready_to_publish(tmp_path, db):
+def test_operation_loop_terminal_ready_to_publish(tmp_path, db, monkeypatch):
+    install_ready_gate(monkeypatch)
     eng = real_engine(tmp_path, db, signals=[good_signal()])
     engine = make_scheduler(tmp_path, db, engine=eng)
     create_loop_schedule(engine)

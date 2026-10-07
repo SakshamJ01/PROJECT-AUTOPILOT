@@ -21,6 +21,8 @@ from pathlib import Path
 
 import pytest
 
+from helpers import write_ready_gate_evidence
+
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 _SENSITIVE_VALUE_KEYWORDS = (
@@ -196,6 +198,7 @@ def _make_ready_job(handlers, tmp_path, job_id="job-ready-1", topic="Quantum Com
         ),
         encoding="utf-8",
     )
+    write_ready_gate_evidence(artifacts, job_id, checksum)
     return checksum
 
 

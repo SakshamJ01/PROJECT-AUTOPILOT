@@ -16,6 +16,7 @@ from autopilot.cli.main import build_parser
 from autopilot.core.channel import ChannelManager
 from autopilot.core.contracts import ChannelProfile, ProductionPolicyTier
 from autopilot.core.pipeline import PipelineOrchestrator
+from helpers import install_ready_gate
 
 
 def test_cli_parser_phase2_commands():
@@ -41,8 +42,9 @@ def test_cli_parser_phase2_commands():
     assert args_prod.policy == "local_only"
 
 
-def test_stale_profile_invalidation(tmp_path):
+def test_stale_profile_invalidation(tmp_path, monkeypatch):
     """Verify that changing a channel's profile (e.g. tone or target duration) invalidates cached script."""
+    install_ready_gate(monkeypatch)
     from autopilot.core.config import Config
     from autopilot.db.manager import DBManager
 

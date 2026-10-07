@@ -17,6 +17,7 @@ from autopilot.core.worker import LocalWorker
 from autopilot.core.pipeline import PipelineOrchestrator, PipelineError
 from autopilot.core.autonomy import AutonomyEngine
 from autopilot.core.channel import ChannelManager
+from helpers import install_ready_gate
 from autopilot.core.contracts import (
     AutonomyPolicy,
     ChannelProfile,
@@ -71,7 +72,8 @@ def _success_result(job_id="job-1", qa_status="PASS"):
 # ---------------------------------------------------------------------------
 # TEST 1: Basic real-worker guarded production flow ends at READY_TO_PUBLISH.
 # ---------------------------------------------------------------------------
-def test_level4_basic_real_worker_flow(tmp_path, db):
+def test_level4_basic_real_worker_flow(tmp_path, db, monkeypatch):
+    install_ready_gate(monkeypatch)
     _enqueue_auto(db, "q-l4-1", "job-l4-1", "The Discovery of Penicillin")
     engine = _mk_engine(tmp_path, db)
 

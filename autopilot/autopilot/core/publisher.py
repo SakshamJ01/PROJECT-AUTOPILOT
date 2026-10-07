@@ -453,21 +453,6 @@ class PublishingEngine:
         qa_status = str(qa_receipt.get("status") or "").upper()
         qa_publish_allowed = bool(qa_receipt.get("publish_allowed", False))
 
-        # Composite gate veto (authoritative, permission-reducing only).
-        readiness = self._load_publish_readiness(job_id)
-        if readiness is not None and not readiness.get("is_ready_to_publish", False):
-            blocking = "; ".join(readiness.get("blocking_reasons", []) or ["unspecified"])
-            return {
-                "publishable": False,
-                "reason": f"Publishing blocked by the composite publish-readiness gate. Blocking reasons: {blocking}.",
-                "job": job,
-                "media_path": str(media),
-                "media_checksum": media_checksum,
-                "qa_receipt": qa_receipt,
-                "approval": None,
-                "published": False,
-            }
-
         if qa_status in (QAStatus.BLOCK.value.upper(), "FAIL") or not qa_publish_allowed:
             return {
                 "publishable": False,
@@ -487,6 +472,61 @@ class PublishingEngine:
                 "reason": (
                     f"Media SHA-256 on disk ({media_checksum[:12]}...) does not match "
                     f"QA receipt checksum ({qa_checksum[:12]}...). Video may have been modified post-QA."
+                ),
+                "job": job,
+                "media_path": str(media),
+                "media_checksum": media_checksum,
+                "qa_receipt": qa_receipt,
+                "approval": None,
+                "published": False,
+            }
+
+        # Composite gate (authoritative, permission-reducing only). The gate
+        # evidence must exist, be ready, and be bound to the exact render
+        # being published — a missing or stale verdict fails closed.
+        readiness = self._load_publish_readiness(job_id)
+        if readiness is None:
+            return {
+                "publishable": False,
+                "reason": "Publishing blocked by the composite publish-readiness gate: no gate evidence found. Run `autopilot qa --job <job_id>` first.",
+                "job": job,
+                "media_path": str(media),
+                "media_checksum": media_checksum,
+                "qa_receipt": qa_receipt,
+                "approval": None,
+                "published": False,
+            }
+        if not readiness.get("is_ready_to_publish", False):
+            blocking = "; ".join(readiness.get("blocking_reasons", []) or ["unspecified"])
+            return {
+                "publishable": False,
+                "reason": f"Publishing blocked by the composite publish-readiness gate. Blocking reasons: {blocking}.",
+                "job": job,
+                "media_path": str(media),
+                "media_checksum": media_checksum,
+                "qa_receipt": qa_receipt,
+                "approval": None,
+                "published": False,
+            }
+        ready_checksum = readiness.get("media_checksum_sha256")
+        if not ready_checksum:
+            return {
+                "publishable": False,
+                "reason": "Publishing blocked by the composite publish-readiness gate: evidence is not checksum-bound. Re-run `autopilot qa --job <job_id>`.",
+                "job": job,
+                "media_path": str(media),
+                "media_checksum": media_checksum,
+                "qa_receipt": qa_receipt,
+                "approval": None,
+                "published": False,
+            }
+        if ready_checksum != media_checksum:
+            return {
+                "publishable": False,
+                "reason": (
+                    f"Publishing blocked by the composite publish-readiness gate: evidence is stale "
+                    f"(gate checksum {ready_checksum[:12]}... != media {media_checksum[:12]}...). "
+                    "Re-run `autopilot qa`."
                 ),
                 "job": job,
                 "media_path": str(media),
@@ -658,34 +698,6 @@ class PublishingEngine:
         qa_status = qa_receipt.get("status")
         qa_publish_allowed = qa_receipt.get("publish_allowed", False)
 
-        # The composite publish-readiness gate is authoritative and can only
-        # reduce permission. Consult it so a permissive technical receipt can
-        # never fail open past a creative-QA hard block.
-        readiness = self._load_publish_readiness(job_id)
-        if readiness is not None and not readiness.get("is_ready_to_publish", False):
-            blocking = "; ".join(readiness.get("blocking_reasons", []) or ["unspecified"])
-            err = PublishError(
-                error_code="PUBLISH_READINESS_BLOCKED",
-                message=(
-                    "Publishing blocked by the composite publish-readiness gate. "
-                    f"Blocking reasons: {blocking}."
-                ),
-                retryable=False,
-                details=readiness,
-            )
-            db.update_job_status(job_id, WorkflowState.FAILED_PUBLISH.value)
-            db.log_event(
-                job_id,
-                WorkflowState.APPROVED.value,
-                WorkflowState.FAILED_PUBLISH.value,
-                reason="Publish readiness gate blocked publishing",
-            )
-            return PublishResult(
-                success=False,
-                status=PublishStatus.BLOCKED_QA,
-                error=err,
-            )
-
         if qa_status == QAStatus.BLOCK.value or not qa_publish_allowed:
             err = PublishError(
                 error_code="QA_GATE_BLOCKED",
@@ -720,6 +732,101 @@ class PublishingEngine:
             )
             db.update_job_status(job_id, WorkflowState.FAILED_PUBLISH.value)
             db.log_event(job_id, WorkflowState.APPROVED.value, WorkflowState.FAILED_PUBLISH.value, reason="Media checksum mismatch")
+            return PublishResult(
+                success=False,
+                status=PublishStatus.BLOCKED_QA,
+                error=err,
+            )
+
+        # The composite publish-readiness gate is authoritative and can only
+        # reduce permission. The evidence must exist, be ready, and be bound
+        # to the exact render being published — missing or stale evidence
+        # fails closed so a permissive technical receipt can never fail open
+        # past a creative-QA hard block.
+        readiness = self._load_publish_readiness(job_id)
+        if readiness is None:
+            err = PublishError(
+                error_code="PUBLISH_READINESS_MISSING",
+                message=(
+                    "Publishing blocked by the composite publish-readiness gate: "
+                    "no gate evidence found. Run `autopilot qa --job <job_id>` first."
+                ),
+                retryable=False,
+            )
+            db.update_job_status(job_id, WorkflowState.FAILED_PUBLISH.value)
+            db.log_event(
+                job_id,
+                WorkflowState.APPROVED.value,
+                WorkflowState.FAILED_PUBLISH.value,
+                reason="Publish readiness gate evidence missing",
+            )
+            return PublishResult(
+                success=False,
+                status=PublishStatus.BLOCKED_QA,
+                error=err,
+            )
+        if not readiness.get("is_ready_to_publish", False):
+            blocking = "; ".join(readiness.get("blocking_reasons", []) or ["unspecified"])
+            err = PublishError(
+                error_code="PUBLISH_READINESS_BLOCKED",
+                message=(
+                    "Publishing blocked by the composite publish-readiness gate. "
+                    f"Blocking reasons: {blocking}."
+                ),
+                retryable=False,
+                details=readiness,
+            )
+            db.update_job_status(job_id, WorkflowState.FAILED_PUBLISH.value)
+            db.log_event(
+                job_id,
+                WorkflowState.APPROVED.value,
+                WorkflowState.FAILED_PUBLISH.value,
+                reason="Publish readiness gate blocked publishing",
+            )
+            return PublishResult(
+                success=False,
+                status=PublishStatus.BLOCKED_QA,
+                error=err,
+            )
+        ready_checksum = readiness.get("media_checksum_sha256")
+        if not ready_checksum:
+            err = PublishError(
+                error_code="PUBLISH_READINESS_STALE",
+                message=(
+                    "Publishing blocked by the composite publish-readiness gate: "
+                    "evidence is not checksum-bound. Re-run `autopilot qa --job <job_id>`."
+                ),
+                retryable=False,
+            )
+            db.update_job_status(job_id, WorkflowState.FAILED_PUBLISH.value)
+            db.log_event(
+                job_id,
+                WorkflowState.APPROVED.value,
+                WorkflowState.FAILED_PUBLISH.value,
+                reason="Publish readiness gate evidence not checksum-bound",
+            )
+            return PublishResult(
+                success=False,
+                status=PublishStatus.BLOCKED_QA,
+                error=err,
+            )
+        if ready_checksum != media_checksum:
+            err = PublishError(
+                error_code="PUBLISH_READINESS_STALE",
+                message=(
+                    "Publishing blocked by the composite publish-readiness gate: evidence is stale "
+                    f"(gate checksum {ready_checksum[:12]}... != media {media_checksum[:12]}...). "
+                    "Re-run `autopilot qa`."
+                ),
+                retryable=False,
+            )
+            db.update_job_status(job_id, WorkflowState.FAILED_PUBLISH.value)
+            db.log_event(
+                job_id,
+                WorkflowState.APPROVED.value,
+                WorkflowState.FAILED_PUBLISH.value,
+                reason="Publish readiness gate evidence checksum mismatch",
+            )
             return PublishResult(
                 success=False,
                 status=PublishStatus.BLOCKED_QA,
