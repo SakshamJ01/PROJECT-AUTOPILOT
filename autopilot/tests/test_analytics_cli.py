@@ -19,6 +19,7 @@ def test_env(tmp_path, monkeypatch):
     db_file = tmp_path / "test.db"
     monkeypatch.setattr(CONFIG, "db_path", db_file)
     monkeypatch.setattr(CONFIG, "artifacts_dir", tmp_path / "artifacts")
+    monkeypatch.setattr(CONFIG, "analytics_default_provider", "mock")
     db = DBManager(db_file)
     db.init_schema()
 

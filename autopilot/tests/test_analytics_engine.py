@@ -67,6 +67,7 @@ def test_sync_job_mock_provider(tmp_path):
     db.init_schema()
 
     cfg = Config(artifacts_dir=tmp_path, db_path=db_path)
+    cfg.analytics_default_provider = "mock"
     engine = AnalyticsEngine(config=cfg, db=db)
 
     job_id = "job-sync-001"
@@ -102,6 +103,7 @@ def test_sync_all_batch_and_report(tmp_path):
     db.init_schema()
 
     cfg = Config(artifacts_dir=tmp_path, db_path=db_path)
+    cfg.analytics_default_provider = "mock"
     engine = AnalyticsEngine(config=cfg, db=db)
 
     # Create 3 published jobs (publish_records drive sync_all targeting)
@@ -135,3 +137,69 @@ def test_sync_all_batch_and_report(tmp_path):
     for entry in report:
         assert entry["views"] > 0
         assert entry["snapshots_recorded"] == 1
+
+
+def test_sync_all_empty_db_consistent_shape(tmp_path):
+    """An empty DB must return the same result shape as a populated one."""
+    db_path = tmp_path / "empty.db"
+    db = DBManager(db_path)
+    db.init_schema()
+
+    cfg = Config(artifacts_dir=tmp_path, db_path=db_path)
+    cfg.analytics_default_provider = "mock"
+    engine = AnalyticsEngine(config=cfg, db=db)
+
+    res = engine.sync_all(limit=10, dry_run=False)
+    assert res["total_targeted"] == 0
+    assert res["synced_count"] == 0
+    assert res["dry_run"] is False
+    assert res["results"] == []
+    assert "note" in res
+
+
+def test_maybe_sync_job_skips_fresh_and_syncs_stale(tmp_path):
+    """Interval-gated sync: skip fresh snapshots, sync stale/missing ones."""
+    db_path = tmp_path / "interval.db"
+    db = DBManager(db_path)
+    db.init_schema()
+
+    cfg = Config(artifacts_dir=tmp_path, db_path=db_path)
+    cfg.analytics_default_provider = "mock"
+    engine = AnalyticsEngine(config=cfg, db=db)
+
+    job_id = "job-interval-001"
+    db.create_job(job_id, topic="Interval Sync")
+
+    # No snapshot yet -> sync.
+    first = engine.maybe_sync_job(job_id)
+    assert first["status"] == "success"
+    assert len(db.list_analytics_snapshots_for_job(job_id)) == 1
+
+    # Fresh snapshot within the default interval -> skip without a new write.
+    second = engine.maybe_sync_job(job_id)
+    assert second["status"] == "skipped"
+    assert second["reason"] == "synced_within_interval"
+    assert second["last_observed_at"] is not None
+    assert len(db.list_analytics_snapshots_for_job(job_id)) == 1
+
+    # Zero interval forces a real sync regardless of freshness; a distinct
+    # window yields a distinct snapshot_id (snapshots dedupe by id).
+    third = engine.maybe_sync_job(job_id, interval_hours=0, window="24h")
+    assert third["status"] == "success"
+    assert len(db.list_analytics_snapshots_for_job(job_id)) == 2
+
+    # Dry-run passes through even when fresh.
+    fresh_dry = engine.maybe_sync_job(job_id, dry_run=True)
+    assert fresh_dry["status"] == "simulated"
+
+
+def test_sync_due_missing_snapshot_and_default_interval(tmp_path):
+    """No snapshot -> due; config interval is positive by default."""
+    db_path = tmp_path / "due.db"
+    db = DBManager(db_path)
+    db.init_schema()
+    cfg = Config(artifacts_dir=tmp_path, db_path=db_path)
+    engine = AnalyticsEngine(config=cfg, db=db)
+    assert engine.sync_due("job-never-synced") is True
+    assert cfg.analytics_sync_interval_hours >= 1
+    assert engine.sync_due("job-never-synced", interval_hours=None) is True

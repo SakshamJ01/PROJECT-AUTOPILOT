@@ -1679,7 +1679,7 @@ def run_youtube_auth(
     output_json: bool = False,
 ) -> int:
     import json
-    from autopilot.providers.youtube_oauth import run_youtube_oauth_flow
+    from autopilot.providers.youtube_oauth import run_youtube_oauth_flow, DEFAULT_SCOPES
     from autopilot.providers.youtube_publisher import redact_secrets
 
     try:
@@ -1693,14 +1693,16 @@ def run_youtube_auth(
             print(json.dumps({
                 "success": True,
                 "token_path": str(saved_path),
-                "scope": "https://www.googleapis.com/auth/youtube.upload",
+                "scope": DEFAULT_SCOPES[0],
+                "scopes": DEFAULT_SCOPES,
             }))
         else:
             print("\n==================================================")
             print("        YOUTUBE OAUTH AUTHENTICATION READY        ")
             print("==================================================")
             print(f"Token Saved:  {saved_path}")
-            print("Scope:        https://www.googleapis.com/auth/youtube.upload")
+            for scope in DEFAULT_SCOPES:
+                print(f"Scope:        {scope}")
             print("Status:       SUCCESS")
             print("Publishing is now ready for private/unlisted uploads.\n")
         return 0
@@ -3344,7 +3346,7 @@ def build_parser():
     sub_analytics_sync = sub_analytics.add_parser("sync", help="Synchronize analytics metrics for published content")
     sub_analytics_sync.add_argument("--job", default=None, help="Specific Job ID to synchronize")
     sub_analytics_sync.add_argument("--platform", default=None, choices=["youtube", "mock"], help="Target platform (default: youtube)")
-    sub_analytics_sync.add_argument("--provider", default=None, choices=["mock", "youtube"], help="Analytics provider override (default: mock)")
+    sub_analytics_sync.add_argument("--provider", default=None, choices=["mock", "youtube"], help="Analytics provider override (default: youtube)")
     sub_analytics_sync.add_argument("--window", default="lifetime", choices=["1h", "24h", "7d", "28d", "lifetime"], help="Performance observation window")
     sub_analytics_sync.add_argument("--all", action="store_true", help="Sync all published jobs up to limit")
     sub_analytics_sync.add_argument("--limit", type=int, default=25, help="Maximum number of jobs to sync in batch")

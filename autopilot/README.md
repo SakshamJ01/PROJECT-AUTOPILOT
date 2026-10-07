@@ -517,7 +517,7 @@ The Analytics Engine ingests, normalizes, scores, and stores performance data fr
 ### Analytics CLI Commands
 
 ```powershell
-# Synchronize analytics for a specific published job (uses default mock provider offline)
+# Synchronize analytics for a specific published job (default: live YouTube Data API when credentials are configured; pinned offline via --provider mock)
 python -m autopilot analytics sync --job <job_id>
 
 # Dry-run preview without network calls or DB writes

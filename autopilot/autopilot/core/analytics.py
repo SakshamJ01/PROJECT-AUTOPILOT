@@ -285,6 +285,61 @@ class AnalyticsEngine:
             "status": "success",
         }
 
+    def last_sync_time(self, job_id: str) -> Optional[str]:
+        """Returns the observed_at of the most recent snapshot for a job, if any."""
+        with self.db._connect() as conn:
+            row = conn.execute(
+                "SELECT observed_at FROM analytics_snapshots WHERE job_id = ? ORDER BY observed_at DESC LIMIT 1",
+                (job_id,),
+            ).fetchone()
+        return row["observed_at"] if row else None
+
+    def sync_due(self, job_id: str, interval_hours: Optional[float] = None) -> bool:
+        """True when a job needs a fresh analytics sync.
+
+        A job is due when it has no snapshot yet, its last snapshot is outside the
+        configured interval, or its last recorded time cannot be parsed (treated
+        as stale so we fail open toward refreshing rather than silently going dark).
+        """
+        interval = interval_hours if interval_hours is not None else self.config.analytics_sync_interval_hours
+        last = self.last_sync_time(job_id)
+        if not last:
+            return True
+        if interval is None:
+            return True
+        try:
+            last_dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
+            if last_dt.tzinfo is None:
+                last_dt = last_dt.replace(tzinfo=timezone.utc)
+            elapsed = datetime.now(timezone.utc) - last_dt
+            return elapsed.total_seconds() >= interval * 3600
+        except Exception:
+            return True
+
+    def maybe_sync_job(
+        self,
+        job_id: str,
+        platform: Optional[str] = None,
+        interval_hours: Optional[float] = None,
+        dry_run: bool = False,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """Syncs a job unless it was synced within the configured interval.
+
+        Non-dry-run syncs are skipped while the latest snapshot is still fresh;
+        the skip is reported explicitly so callers can distinguish it from a
+        real sync or an error.
+        """
+        if not dry_run and not self.sync_due(job_id, interval_hours):
+            return {
+                "job_id": job_id,
+                "status": "skipped",
+                "reason": "synced_within_interval",
+                "last_observed_at": self.last_sync_time(job_id),
+                "interval_hours": interval_hours if interval_hours is not None else self.config.analytics_sync_interval_hours,
+            }
+        return self.sync_job(job_id, platform=platform, dry_run=dry_run, **kwargs)
+
     def sync_all(
         self,
         platform: Optional[str] = None,
@@ -314,9 +369,10 @@ class AnalyticsEngine:
         # attempting it wastes API calls and produces noise.
         if not target_jobs:
             return {
-                "synced": 0,
-                "errors": 0,
-                "jobs": [],
+                "total_targeted": 0,
+                "synced_count": 0,
+                "dry_run": dry_run,
+                "results": [],
                 "note": "No published jobs found; nothing to sync.",
             }
 

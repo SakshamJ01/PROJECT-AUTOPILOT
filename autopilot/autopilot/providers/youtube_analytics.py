@@ -27,7 +27,6 @@ from autopilot.providers.contracts import (
     CapabilityMetadata,
     CostUsageMetadata,
     ProviderErrorType,
-    REGISTRY,
 )
 from autopilot.providers.youtube_publisher import redact_secrets
 

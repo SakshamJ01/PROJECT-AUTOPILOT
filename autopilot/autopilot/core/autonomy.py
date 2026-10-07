@@ -1025,7 +1025,7 @@ class AutonomyEngine:
         try:
             from autopilot.core.analytics import AnalyticsEngine
             ae = AnalyticsEngine(self.config, self.db)
-            analytics_info = ae.sync_job(job_id=job_id, platform=publish_platform, dry_run=dry_run)
+            analytics_info = ae.maybe_sync_job(job_id=job_id, platform=publish_platform, dry_run=dry_run)
         except Exception as exc:
             analytics_info = {"status": "error", "error": str(exc)}
 

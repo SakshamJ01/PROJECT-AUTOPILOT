@@ -27,6 +27,7 @@ scratch/
 *.m4a
 *.ass
 *.srt
+render_audio_mix.json
 
 # ===== Starter blueprint is preserved separately, not part of the repo =====
 PROJECT_AUTOPILOT_STARTER_BLUEPRINT/

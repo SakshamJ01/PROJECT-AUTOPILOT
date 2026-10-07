@@ -125,7 +125,7 @@ class Config(BaseModel):
     queue_max_queued_jobs: int = 1000
 
     # Milestone 8 / M8 Analytics & Performance Intelligence configurations
-    analytics_default_provider: str = "mock"
+    analytics_default_provider: str = "youtube"
     analytics_sync_interval_hours: int = 24
     analytics_cache_ttl_seconds: int = 3600
     analytics_batch_size: int = 25
