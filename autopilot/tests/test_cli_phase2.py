@@ -20,7 +20,7 @@ from autopilot.core.pipeline import PipelineOrchestrator
 
 def test_cli_parser_phase2_commands():
     """Verify run, batch --topics, --channel, and --policy argument parsing."""
-    parser = build_parser()
+    parser, _sub_parsers = build_parser()
 
     # 1. Test 'run' subcommand
     args = parser.parse_args(["run", "--topic", "James Webb Space Telescope", "--channel", "science_shorts", "--policy", "quality_first"])

@@ -16,8 +16,11 @@ import subprocess
 import hashlib
 import json
 from pathlib import Path
-from typing import Optional, List, Any, Dict
+from typing import Optional, List, Any, Dict, TYPE_CHECKING
 from autopilot.core.contracts import RenderPlan, RenderOutput, RenderQualityResult, RenderScene
+
+if TYPE_CHECKING:
+    from autopilot.core.kinetic_typography import KineticTypographyEngine
 from autopilot.core.config import CONFIG
 from autopilot.core.ffmpeg_runner import FFmpegRunner
 

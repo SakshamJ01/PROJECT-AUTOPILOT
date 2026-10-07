@@ -38,8 +38,16 @@ markers = [
     "use_real_provider_credentials: opt in to real provider credentials from .env",
 ]
 
+[tool.ruff.lint]
+# Error-class rules only: syntax errors, statement bugs, and undefined names.
+# This is the class of bug that shipped as a live NameError in the CLI
+# (`autopilot batch` crashed on `sub_parser_batch`). Full style lint (F401
+# unused-imports etc.) is deferred to a separate cleanup.
+select = ["E9", "F63", "F7", "F82", "F821"]
+
 [dependency-groups]
 dev = [
     "pytest>=7.0",
     "mypy>=2.3.1",
+    "ruff>=0.14",
 ]

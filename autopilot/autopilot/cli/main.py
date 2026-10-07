@@ -12,6 +12,7 @@ import subprocess
 import sqlite3
 import hashlib
 from pathlib import Path
+from typing import Optional
 
 # Load .env file if present
 try:
@@ -365,6 +366,17 @@ def run_health() -> int:
     return 0 if report["status"] == "healthy" else 1
 
 
+def _research_request_id_for_topic(db, topic: str) -> str:
+    """Return the latest completed research request id for a topic, or 'none'."""
+    try:
+        rep = db.get_latest_research_report_for_topic(topic)
+        if rep:
+            return str(rep.get("request_id") or "none")
+    except Exception:
+        pass
+    return "none"
+
+
 def run_produce(
     topic: str,
     profile: str = "short_vertical",
@@ -537,7 +549,7 @@ def run_produce(
             provider=provider.provider_name,
             model=f"mock-template-v1-profile-{profile}" if provider.provider_name == "mock_script" else provider.provider_name,
             generation_timestamp=script.generation_metadata.get("generated_at", ""),
-            input_reference_ids=[f"topic-{topic}", f"research-{request_id if 'request_id' in locals() else 'none'}"],
+            input_reference_ids=[f"topic-{topic}", f"research-{_research_request_id_for_topic(db, topic)}"],
             deterministic_idempotency_key=f"ph3-{topic}-{profile}-{job_id}",
         ),
     )
@@ -3666,7 +3678,15 @@ def build_parser():
     sub_channel_compare.add_argument("--platform", default=None, choices=["youtube", "mock"], help="Filter by platform")
     sub_channel_compare.add_argument("--json", action="store_true", help="Output machine-readable JSON")
 
-    return parser
+    sub_parsers = {
+        "batch": sub_parser_batch,
+        "queue": sub_parser_queue,
+        "analytics": sub_parser_analytics,
+        "autonomy": sub_parser_autonomy,
+        "schedule": sub_parser_schedule,
+        "channel": sub_parser_channel,
+    }
+    return parser, sub_parsers
 
 
 def main() -> int:
@@ -3678,7 +3698,7 @@ def main() -> int:
         argv = [argv[0], argv[1]] + ["--publish-action", argv[2]] + argv[3:]
         sys.argv = argv
 
-    parser = build_parser()
+    parser, sub_parsers = build_parser()
     args = parser.parse_args()
 
     if args.command == "health" or args.command is None:
@@ -3853,7 +3873,7 @@ def main() -> int:
         elif args.batch_action == "submit":
             return run_batch_submit(file_path=args.file, dry_run=args.dry_run, force=args.force, output_json=args.json)
         else:
-            sub_parser_batch.print_help()
+            sub_parsers["batch"].print_help()
             return 1
     elif args.command == "queue":
         if args.queue_action == "list":
@@ -3875,7 +3895,7 @@ def main() -> int:
         elif args.queue_action == "inspect":
             return run_queue_inspect(job_id=args.job, output_json=args.json)
         else:
-            sub_parser_queue.print_help()
+            sub_parsers["queue"].print_help()
             return 1
     elif args.command == "analytics":
         if args.analytics_action == "sync":
@@ -3913,7 +3933,7 @@ def main() -> int:
                 output_json=getattr(args, "json", False),
             )
         else:
-            sub_parser_analytics.print_help()
+            sub_parsers["analytics"].print_help()
             return 1
     elif args.command == "autonomy":
         if args.autonomy_action == "run" or args.autonomy_action is None:
@@ -3957,7 +3977,7 @@ def main() -> int:
                 output_json=args.json,
             )
         else:
-            sub_parser_autonomy.print_help()
+            sub_parsers["autonomy"].print_help()
             return 1
     elif args.command == "channel":
         if args.channel_action == "list":
@@ -3977,7 +3997,7 @@ def main() -> int:
         elif args.channel_action == "compare":
             return run_channel_compare(platform=args.platform, output_json=args.json)
         else:
-            sub_parser_channel.print_help()
+            sub_parsers["channel"].print_help()
             return 1
     elif args.command == "schedule":
         if args.schedule_action == "list":
@@ -4024,7 +4044,7 @@ def main() -> int:
                 output_json=args.json,
             )
         else:
-            sub_parser_schedule.print_help()
+            sub_parsers["schedule"].print_help()
             return 1
     else:
         parser.print_help()

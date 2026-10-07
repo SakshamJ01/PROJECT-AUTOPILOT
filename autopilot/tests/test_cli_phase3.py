@@ -6,7 +6,7 @@ from autopilot.cli.main import main, build_parser
 
 def test_cli_parser_phase3_commands():
     """Verify build_parser supports all Phase 3 syntax variations."""
-    parser = build_parser()
+    parser, _sub_parsers = build_parser()
 
     # 1. Positional publish: autopilot publish job-123
     args1 = parser.parse_args(["publish", "job-123"])

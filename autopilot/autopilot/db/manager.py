@@ -7,7 +7,7 @@ import json
 import uuid
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Optional, Any
 
 DB_SCHEMA_VERSION = 11
 

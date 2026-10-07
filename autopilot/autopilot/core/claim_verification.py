@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 from enum import Enum
-from typing import Optional, List, Dict, Any, Union
+from typing import Optional, List, Dict, Any, Union, Tuple
 from pydantic import BaseModel, Field
 
 

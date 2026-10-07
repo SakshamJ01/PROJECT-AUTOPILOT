@@ -4,7 +4,7 @@ Implementations are NOT required yet; only contracts.
 """
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable, Optional
+from typing import Protocol, runtime_checkable, Optional, Any
 from pydantic import BaseModel, Field
 from enum import Enum
 

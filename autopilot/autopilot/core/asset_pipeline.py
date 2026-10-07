@@ -9,9 +9,9 @@ import hashlib
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
-from autopilot.core.config import CONFIG
+from autopilot.core.config import CONFIG, Config
 from autopilot.core.contracts import (
     ScriptDocument, ScriptScene, AssetRequest, AssetCandidate,
     AssetSelection, AssetArtifact, AssetLicense, AssetProvenance,

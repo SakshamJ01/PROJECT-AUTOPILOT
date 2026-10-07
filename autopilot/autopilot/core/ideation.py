@@ -5,7 +5,7 @@ Applies deterministic diversity controls and topic deduplication.
 from __future__ import annotations
 import re
 import hashlib
-from typing import List, Tuple, Optional, Set
+from typing import List, Tuple, Optional, Set, Any
 from datetime import datetime, timezone
 
 from autopilot.core.contracts import TrendSignal, TopicCandidate, StrategyVersion, ChannelProfile

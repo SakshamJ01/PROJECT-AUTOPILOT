@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Sync dependencies
+        working-directory: autopilot
+        run: uv sync --frozen
+
+      - name: Lint (error-class rules)
+        working-directory: autopilot
+        run: uv run ruff check .
+
+      - name: Test suite
+        working-directory: autopilot
+        run: uv run pytest -q

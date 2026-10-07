@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import math
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 
 from autopilot.core.contracts import (
     TranscriptionRequest,

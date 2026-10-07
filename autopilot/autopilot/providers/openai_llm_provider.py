@@ -11,7 +11,7 @@ import socket
 import time
 import urllib.request
 import urllib.error
-from typing import Any, Dict, Optional, List, Tuple
+from typing import Any, Dict, Optional, List, Tuple, Sequence
 
 from autopilot.providers.contracts import LLMProvider, ProviderHealth, CapabilityMetadata, CostUsageMetadata, ProviderErrorType
 from autopilot.core.contracts import ScriptDocument, ScriptScene

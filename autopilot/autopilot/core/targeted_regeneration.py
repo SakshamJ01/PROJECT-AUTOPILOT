@@ -32,7 +32,7 @@ from autopilot.core.timeline_compiler import TimelineCompiler
 from autopilot.core.contracts import RenderPlan
 
 
-class RegenerationResult(BaseModel if False else object):
+class RegenerationResult(object):
     pass
 
 

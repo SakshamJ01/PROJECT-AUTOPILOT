@@ -9,7 +9,7 @@ import urllib.parse
 import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from autopilot.core.config import CONFIG
 from autopilot.providers.asset_contracts import AssetProvider
