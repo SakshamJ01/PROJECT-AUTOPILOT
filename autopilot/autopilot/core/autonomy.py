@@ -30,7 +30,7 @@ from autopilot.core.contracts import (
 )
 from autopilot.db.manager import DBManager
 from autopilot.providers.contracts import TrendProvider, REGISTRY
-from autopilot.providers.mock_trend import MockTrendProvider
+from autopilot.providers.trend_factory import get_trend_provider as _get_trend_provider
 from autopilot.core.ideation import IdeationEngine, DiversityFilter
 from autopilot.core.topic_scoring import TopicScorer
 from autopilot.core.feedback import FeedbackAnalyzer, StrategyManager
@@ -182,7 +182,12 @@ class AutonomyEngine:
         self.config = config or CONFIG
         self.db = db or DBManager(self.config.db_path)
         self.db.init_schema()
-        self.trend_provider = trend_provider or MockTrendProvider()
+        if trend_provider is not None:
+            self.trend_provider = trend_provider
+        else:
+            self.trend_provider = _get_trend_provider(
+                getattr(self.config, "autonomy_trend_provider", "mock")
+            )
         self.discovery = self.trend_provider
         self.policy = policy or AutonomyPolicy(
             max_ideas_per_cycle=self.config.autonomy_max_ideas_per_cycle,

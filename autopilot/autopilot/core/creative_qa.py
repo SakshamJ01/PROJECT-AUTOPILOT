@@ -129,6 +129,9 @@ class CreativeQAReport(BaseModel):
     frame_samples: List[FrameSample] = Field(default_factory=list)
     scene_evaluations: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     defects_detected: List[Dict[str, Any]] = Field(default_factory=list)
+    # Optional multimodal (Gemini) overlay — present only when a video was
+    # analyzed with a configured Gemini key (Round-2 upgrade #6).
+    multimodal: Optional[Dict[str, Any]] = None
 
     def get_metrics_dict(self) -> Dict[str, CreativeQAScoreItem]:
         return {
@@ -192,7 +195,7 @@ class CreativeQAEngine:
         narrative_item = self._evaluate_narrative_coherence(timeline)
 
         # 8. Audio Balance & Sidechain Ducking
-        audio_balance_item = self._evaluate_audio_balance(timeline)
+        audio_balance_item = self._evaluate_audio_balance(timeline, video_path=video_path)
 
         # 9. Visual Continuity & Diversity
         visual_cont_item = self._evaluate_visual_continuity(timeline)
@@ -204,6 +207,26 @@ class CreativeQAEngine:
         black_item = self._evaluate_black_frames(video_path, total_dur)
         freeze_item = self._evaluate_freeze_sections(video_path, total_dur)
         listicle_item = self._evaluate_listicle_structure(timeline)
+
+        # Optional multimodal (Gemini) overlay (Round-2 upgrade #6). Fail-open:
+        # skipped when no video / no Gemini key; never affects the weighted score.
+        mm_result = None
+        mm_dict: Optional[Dict[str, Any]] = None
+        if video_path and Path(video_path).exists():
+            try:
+                from autopilot.core.multimodal_qa import analyze_video
+
+                mm_result = analyze_video(Path(video_path))
+                if mm_result.available:
+                    mm_dict = {
+                        "backend": mm_result.backend,
+                        "relevance_score": mm_result.relevance_score,
+                        "dynamism_score": mm_result.dynamism_score,
+                        "hook_effectiveness": mm_result.hook_effectiveness,
+                        "notes": mm_result.notes,
+                    }
+            except Exception:
+                mm_result = None
 
         # Aggregate Overall Score (Weighted)
         weights = {
@@ -264,6 +287,20 @@ class CreativeQAEngine:
             if item.status == CreativeQAStatus.HUMAN_REVIEW:
                 human_review_reasons.append(f"{item.name}: {item.evidence}")
 
+        # Multimodal (Gemini) verdicts can trigger human review (fail-open; does
+        # not change the weighted score, only the review flag).
+        if mm_result is not None and mm_result.available:
+            mm_low = []
+            if mm_result.relevance_score is not None and mm_result.relevance_score < 50:
+                mm_low.append(f"low relevance ({mm_result.relevance_score})")
+            if mm_result.dynamism_score is not None and mm_result.dynamism_score < 40:
+                mm_low.append(f"low dynamism ({mm_result.dynamism_score})")
+            if mm_low:
+                if overall_status != CreativeQAStatus.BLOCK:
+                    overall_status = CreativeQAStatus.HUMAN_REVIEW
+                human_review_required = True
+                human_review_reasons.append("Multimodal QA: " + "; ".join(mm_low))
+
         # Assemble defect list
         defects = []
         for item in all_items:
@@ -302,6 +339,7 @@ class CreativeQAEngine:
             listicle_structure=listicle_item,
             frame_samples=sampled_frames,
             defects_detected=defects,
+            multimodal=mm_dict,
         )
 
     # -----------------------------------------------------------------------
@@ -672,7 +710,11 @@ class CreativeQAEngine:
             evidence=evidence,
         )
 
-    def _evaluate_audio_balance(self, timeline: MaterializedTimeline) -> CreativeQAScoreItem:
+    def _evaluate_audio_balance(
+        self,
+        timeline: MaterializedTimeline,
+        video_path: Optional[str | Path] = None,
+    ) -> CreativeQAScoreItem:
         """Evaluate voice clarity over BGM, sidechain ducking, and SFX timing."""
         score = 100.0
         deductions = []
@@ -702,6 +744,41 @@ class CreativeQAEngine:
                 "Voice tracks present for every scene; no audio mix manifest was "
                 "recorded, so BGM/ducking is unverified."
             )
+
+        # Optional measured check (Round-2 upgrade #2): when Demucs is available
+        # and a rendered video exists, actually separate stems and confirm the
+        # voice is audible over the BGM. Fail-open: any problem keeps the
+        # manifest-based verdict above.
+        if video_path and Path(video_path).exists():
+            try:
+                from autopilot.core.audio_intelligence import (
+                    DEFAULT_MIN_VOCAL_TO_BACKGROUND_DB,
+                    analyze_vocal_clarity,
+                )
+
+                clarity = analyze_vocal_clarity(
+                    Path(video_path),
+                    min_vocal_to_background_db=DEFAULT_MIN_VOCAL_TO_BACKGROUND_DB,
+                )
+                if clarity.available:
+                    margin = clarity.vocal_to_background_db
+                    if clarity.clear:
+                        evidence = (
+                            f"{evidence} Vocal clarity measured: voice is "
+                            f"{margin} dB above background (demucs stems)."
+                        )
+                    else:
+                        score -= 25.0
+                        deductions.append(
+                            f"Vocals only {margin} dB above background mix "
+                            f"(threshold {DEFAULT_MIN_VOCAL_TO_BACKGROUND_DB} dB)"
+                        )
+                        evidence = (
+                            f"{evidence} Vocal clarity measured: voice is only "
+                            f"{margin} dB above background — BGM may mask speech."
+                        )
+            except Exception:
+                pass
 
         status = self._status_from_score(score, target=85.0, warn=70.0, block=55.0)
         if deductions:

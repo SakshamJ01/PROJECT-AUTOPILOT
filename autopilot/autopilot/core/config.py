@@ -44,6 +44,13 @@ class Config(BaseModel):
     # when unset or empty, the procedural mood pad remains the fallback.
     bgm_library_dir: Optional[Path] = None
 
+    # Generative (Gemini) thumbnail backend (Round-2 upgrade #7). When enabled
+    # and a Gemini key is configured, the thumbnail stage first tries a
+    # model-generated 1280x720 image; on any failure it falls back to the
+    # deterministic PIL composite so publication is never blocked.
+    thumbnail_generative: bool = False
+    thumbnail_generative_model: str = "gemini-2.0-flash-preview-image-generation"
+
     # LLM & Local Ollama configurations
     ollama_endpoint: str = "http://localhost:11434"
     ollama_model: Optional[str] = None
@@ -245,6 +252,7 @@ class Config(BaseModel):
             "AUTOPILOT_STRATEGY_INFLUENCE_SCALE": "strategy_influence_scale",
             "AUTOPILOT_PRODUCTION_ENGINE": "default_production_engine",
             "BGM_LIBRARY_DIR": "bgm_library_dir",
+        "AUTOPILOT_THUMBNAIL_GENERATIVE": "thumbnail_generative",
             "MONEYPRINTER_ENDPOINT": "moneyprinter_endpoint",
             "MONEYPRINTER_CLI_PATH": "moneyprinter_cli_path",
             "MONEYPRINTER_HOME": "moneyprinter_home",

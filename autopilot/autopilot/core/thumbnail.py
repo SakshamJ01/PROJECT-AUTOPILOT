@@ -269,6 +269,72 @@ def select_thumbnail_source(
     return best
 
 
+def _generative_thumbnail_backend_available() -> bool:
+    """True when the optional Gemini image backend can be used."""
+    try:
+        from google import genai  # noqa: F401
+        from autopilot.core.config import CONFIG
+        import os
+
+        return bool(
+            getattr(CONFIG, "thumbnail_generative", False)
+            and (
+                getattr(CONFIG, "gemini_api_key", None)
+                or os.environ.get("GEMINI_API_KEY")
+            )
+        )
+    except Exception:
+        return False
+
+
+def _generate_generative_thumbnail(
+    hook: str,
+    channel_name: str,
+    out_path: Path,
+    model: Optional[str] = None,
+) -> Optional[Path]:
+    """Generate a thumbnail with Gemini image model (lazy, fail-soft)."""
+    try:
+        import os
+        import io
+        from google import genai
+        from google.genai import types as genai_types
+        from autopilot.core.config import CONFIG
+
+        api_key = getattr(CONFIG, "gemini_api_key", None) or os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            return None
+        model_name = model or getattr(
+            CONFIG, "thumbnail_generative_model", "gemini-2.0-flash-preview-image-generation"
+        )
+        client = genai.Client(api_key=api_key)
+
+        prompt = (
+            "Vertical 9:16 YouTube Shorts thumbnail, bold and high-contrast. "
+            f"{(hook or channel_name or 'attention-grabbing subject').strip()}. "
+            "Cinematic, vibrant, no text overlay, no watermarks."
+        )
+        resp = client.models.generate_images(
+            model=model_name,
+            prompt=prompt,
+            config=genai_types.GenerateImagesConfig(
+                aspect_ratio="9:16", number_of_images=1
+            ),
+        )
+        images = getattr(resp, "generated_images", None) or []
+        if not images:
+            return None
+        image_bytes = images[0].image.image_bytes
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        # Normalize to JPEG to match the publisher contract.
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        img = img.resize((THUMB_WIDTH, THUMB_HEIGHT))
+        img.save(out_path, format="JPEG", quality=92, subsampling=0)
+        return out_path
+    except Exception:
+        return None
+
+
 def generate_thumbnail(
     render_scenes: List[Dict[str, Any]],
     job_dir: Path,
@@ -280,7 +346,19 @@ def generate_thumbnail(
 
     Fail-soft by contract: a thumbnail is a nice-to-have and must never block
     publication, so every failure mode degrades to "publish without one".
+
+    When the generative Gemini backend is enabled (Round-2 upgrade #7) it is
+    tried first; on any failure the deterministic PIL composite below is used.
     """
+    out_dir = Path(job_dir) / "thumbnails"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / filename
+
+    if _generative_thumbnail_backend_available():
+        generated = _generate_generative_thumbnail(hook, channel_name, out_path)
+        if generated is not None:
+            return generated
+
     try:
         chosen = select_thumbnail_source(render_scenes)
         if not chosen:
@@ -299,9 +377,6 @@ def generate_thumbnail(
         _draw_badge(draw, channel_name)
         _draw_hook(draw, hook or "")
 
-        out_dir = Path(job_dir) / "thumbnails"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / filename
         canvas.convert("RGB").save(out_path, format="JPEG", quality=92, subsampling=0)
         return out_path
     except Exception:

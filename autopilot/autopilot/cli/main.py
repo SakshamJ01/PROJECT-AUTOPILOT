@@ -3206,11 +3206,82 @@ def run_channel_compare(platform: str | None = None, output_json: bool = False) 
     return 0
 
 
+def run_bgm(args) -> int:
+    """BGM library management (Round-2 upgrade #1)."""
+    import json as _json
+
+    from autopilot.core.config import CONFIG
+    from autopilot.core.bgm_generator import (
+        available_bgm_backends,
+        fill_bgm_library,
+        library_stats,
+    )
+
+    action = getattr(args, "bgm_action", None)
+    lib_dir = getattr(args, "dir", None) or CONFIG.bgm_library_dir
+
+    if action == "list":
+        payload = {
+            "backends": available_bgm_backends(),
+            "library_dir": str(lib_dir) if lib_dir else None,
+            "stats": library_stats(lib_dir) if lib_dir else {},
+        }
+        if getattr(args, "json", False):
+            print(_json.dumps(payload, indent=2))
+        else:
+            print(f"Backends: {', '.join(payload['backends'])}")
+            print(f"Library:  {payload['library_dir'] or '(unset)'}")
+            for name, count in payload["stats"].items():
+                print(f"  {name}: {count}")
+        return 0
+
+    if action == "fill":
+        if not lib_dir:
+            print(
+                "[autopilot] ERROR: no library dir; set --dir or BGM_LIBRARY_DIR",
+                file=sys.stderr,
+            )
+            return 1
+        moods = None
+        if getattr(args, "moods", None):
+            moods = [m.strip() for m in args.moods.split(",") if m.strip()]
+        written = fill_bgm_library(
+            lib_dir,
+            moods=moods,
+            per_mood=getattr(args, "per_mood", 1),
+            duration_sec=getattr(args, "duration", 30.0),
+            backend=getattr(args, "backend", "auto"),
+        )
+        if getattr(args, "json", False):
+            print(_json.dumps({"library_dir": str(lib_dir), "written": [str(p) for p in written]}, indent=2))
+        else:
+            print(f"Generated {len(written)} bed(s) into {lib_dir}")
+            for p in written:
+                print(f"  {p.name}")
+        return 0
+
+    print("[autopilot] usage: autopilot bgm {fill|list}", file=sys.stderr)
+    return 1
+
+
 def build_parser():
     import argparse
     parser = argparse.ArgumentParser(prog="autopilot")
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("health", help="Local system health check")
+    # BGM library management (Round-2 upgrade #1)
+    sub_parser_bgm = sub.add_parser("bgm", help="BGM library management (generate mood-tagged beds)")
+    sub_bgm = sub_parser_bgm.add_subparsers(dest="bgm_action")
+    sub_bgm_fill = sub_bgm.add_parser("fill", help="Generate mood-tagged BGM beds into the library dir")
+    sub_bgm_fill.add_argument("--dir", default=None, help="Library dir (default: CONFIG.bgm_library_dir)")
+    sub_bgm_fill.add_argument("--moods", default=None, help="Comma-separated moods (default: all)")
+    sub_bgm_fill.add_argument("--per-mood", type=int, default=1, help="Beds per mood")
+    sub_bgm_fill.add_argument("--duration", type=float, default=30.0, help="Seconds per bed")
+    sub_bgm_fill.add_argument("--backend", default="auto", choices=["auto", "procedural", "musicgen", "stable_audio"], help="Generation backend")
+    sub_bgm_fill.add_argument("--json", action="store_true", help="Output machine-readable JSON")
+    sub_bgm_list = sub_bgm.add_parser("list", help="List available backends and library stats")
+    sub_bgm_list.add_argument("--dir", default=None, help="Library dir (default: CONFIG.bgm_library_dir)")
+    sub_bgm_list.add_argument("--json", action="store_true", help="Output machine-readable JSON")
     # Produce command
     sub_parser = sub.add_parser("produce", help="Generate structured content package (Phase 1/3)")
     sub_parser.add_argument("--topic", required=True, help="Topic for content generation")
@@ -3537,6 +3608,8 @@ def main() -> int:
 
     if args.command == "health" or args.command is None:
         return run_health()
+    elif args.command == "bgm":
+        return run_bgm(args)
     elif args.command in ("produce", "run"):
         policy = getattr(args, "policy", "local_only")
         raw_llm = args.llm_provider
