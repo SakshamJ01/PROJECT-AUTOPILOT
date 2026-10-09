@@ -305,6 +305,66 @@ def generate_ambient_bgm_track(
 
 
 # ---------------------------------------------------------------------------
+# Royalty-free BGM library resolution (bed source for the mix)
+# ---------------------------------------------------------------------------
+# When CONFIG.bgm_library_dir points at a directory of music files, the mix
+# prefers a real mood-matched track over the procedural pad. Resolution is
+# fully deterministic: same topic always selects the same file.
+BGM_LIBRARY_EXTENSIONS: Tuple[str, ...] = (
+    ".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac", ".opus",
+)
+
+# Filename keyword aliases per mood. A keyword appearing (lowercased) in a
+# track's filename counts as a mood match for deterministic selection.
+_BGM_MOOD_FILENAME_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "dramatic": ("dramatic", "tense", "suspense", "dark_energy", "war"),
+    "contemplative": ("contemplative", "calm", "soft", "lo-fi", "lofi", "chill", "meditat", "ambient", "peaceful"),
+    "uplifting": ("uplifting", "bright", "hopeful", "happy", "motivat", "energetic"),
+    "mysterious": ("mysterious", "mystery", "eerie", "spooky", "haunted", "unsolved"),
+}
+
+
+def resolve_bgm_source(
+    topic: str = "",
+    library_dir: Optional[str | Path] = None,
+) -> Tuple[Optional[Path], str]:
+    """Resolve the BGM bed source for a topic.
+
+    Returns ``(track_path, source)`` where ``source`` is ``"library"`` when a
+    real music file was selected and ``"procedural"`` when the callers should
+    fall back to the synthesized mood pad. Selection is deterministic:
+    mood-keyword matches on the filename win, otherwise a stable SHA-256 hash
+    of the topic indexes into the sorted file list.
+    """
+    raw_dir = library_dir if library_dir is not None else getattr(CONFIG, "bgm_library_dir", None)
+    if raw_dir is None:
+        return None, "procedural"
+    library = Path(str(raw_dir))
+    if not library.is_dir():
+        return None, "procedural"
+
+    files = sorted(
+        p for p in library.iterdir()
+        if p.is_file() and p.suffix.lower() in BGM_LIBRARY_EXTENSIONS
+    )
+    if not files:
+        return None, "procedural"
+
+    mood = resolve_bgm_mood(topic)
+    aliases = _BGM_MOOD_FILENAME_ALIASES.get(mood, ())
+    if aliases:
+        candidates = [
+            p for p in files
+            if any(alias in p.name.lower() for alias in aliases)
+        ]
+        if candidates:
+            return candidates[0], "library"
+
+    digest = hashlib.sha256(" ".join(str(topic or "").lower().split()).encode("utf-8")).hexdigest()
+    return files[int(digest, 16) % len(files)], "library"
+
+
+# ---------------------------------------------------------------------------
 # Audio Scene Graph & Multi-Track Mixing Engine
 # ---------------------------------------------------------------------------
 

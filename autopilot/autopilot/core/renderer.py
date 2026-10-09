@@ -43,6 +43,52 @@ def _resolve_xfade_hint(hint: Any) -> Optional[str]:
         return "fadeblack"
     if hint_str in ("dissolve", "slideup", "slideright", "slidedown", "slideleft", "wipe", "glitch"):
         return "fade"
+
+
+def _resolve_scene_sfx(scene: Dict[str, Any], idx: int, total: int) -> List[Dict[str, Any]]:
+    """Beat-synced SFX from the render plan, else the deterministic fallback.
+
+    The beat-sync stage stamps role-based cues onto render scenes; when they
+    are present they win, so the mixed audio honours the narrative beat. The
+    fallback keeps the classic positional scheme (hook whoosh on the first
+    scene, payoff bass drop on the last, a subtle cue in the middle).
+    """
+    provided = scene.get("sfx_events")
+    if isinstance(provided, list) and provided:
+        valid: List[Dict[str, Any]] = []
+        for ev in provided:
+            if not isinstance(ev, dict) or not ev.get("cue"):
+                continue
+            try:
+                valid.append({
+                    "cue": str(ev["cue"]),
+                    "time_sec": max(0.0, float(ev.get("time_sec", 0.0) or 0.0)),
+                    "volume_db": float(ev.get("volume_db", -6.0) or -6.0),
+                })
+            except Exception:
+                continue
+        if valid:
+            return valid
+
+    words = scene.get("word_timestamps") or []
+    first_word_t = 0.0
+    if words:
+        try:
+            first_word_t = float(words[0].get("start", words[0].get("start_sec", 0.0)))
+        except Exception:
+            first_word_t = 0.0
+    is_first = idx == 0
+    is_last = idx == total - 1
+    if is_first:
+        cue = "whoosh_fast"
+    elif is_last:
+        cue = "bass_drop"
+    else:
+        cue = "digital_pop"
+    volume_db = -6.0 if (is_first or is_last) else -9.0
+    return [{"cue": cue, "time_sec": max(0.0, first_word_t), "volume_db": volume_db}]
+
+
 def _build_xfade_chain(
     n_segments: int,
     scene_durs: List[float],
@@ -263,7 +309,7 @@ def _apply_audio_scene_graph_mix(
     mix replaced the segment audio. The manifest is written to
     ``<job>/audio/audio_mix_manifest.json`` so QA can verify real ducking.
     """
-    from autopilot.core.audio_scene_graph import AudioSceneGraphEngine
+    from autopilot.core.audio_scene_graph import AudioSceneGraphEngine, resolve_bgm_source
 
     if not segments:
         return {}
@@ -274,25 +320,9 @@ def _apply_audio_scene_graph_mix(
     for idx, s in enumerate(scenes):
         dur = float(s.get("duration_sec", 5.0) or 5.0)
         voice = s.get("audio_path")
-        sfx_events = []
-        # Deterministic SFX: hook on the FIRST scene, transition on scene
-        # boundaries, payoff on the LAST scene. Placement uses the narrative
-        # word timestamps (start of the first phrase) when available.
-        is_first = idx == 0
-        is_last = idx == len(scenes) - 1
-        words = s.get("word_timestamps") or []
-        first_word_t = 0.0
-        if words:
-            try:
-                first_word_t = float(words[0].get("start", words[0].get("start_sec", 0.0)))
-            except Exception:
-                first_word_t = 0.0
-        if is_first:
-            sfx_events.append({"cue": "whoosh_fast", "time_sec": max(0.0, first_word_t), "volume_db": -6.0})
-        elif is_last:
-            sfx_events.append({"cue": "bass_drop", "time_sec": max(0.0, first_word_t), "volume_db": -6.0})
-        else:
-            sfx_events.append({"cue": "digital_pop", "time_sec": max(0.0, first_word_t), "volume_db": -9.0})
+        # Beat-synced role cues stamped by the pipeline win; otherwise the
+        # deterministic positional fallback (hook/transition/payoff) applies.
+        sfx_events = _resolve_scene_sfx(s, idx, len(scenes))
 
         rows.append({
             "scene_id": str(s.get("scene_id", f"scene_{idx}")),
@@ -307,7 +337,15 @@ def _apply_audio_scene_graph_mix(
 
     total_dur = cursor
     engine = AudioSceneGraphEngine()
-    graph = engine.build_scene_graph_from_rows(rows, total_duration_sec=total_dur, topic=topic)
+    # BGM bed: prefer a deterministic mood-matched track from the configured
+    # royalty-free library, otherwise fall back to the procedural mood pad.
+    bgm_file, bgm_source = resolve_bgm_source(topic)
+    graph = engine.build_scene_graph_from_rows(
+        rows,
+        total_duration_sec=total_dur,
+        topic=topic,
+        bgm_file=(str(bgm_file) if bgm_file else None),
+    )
 
     master_path = work_dir / "master_mix.wav"
     mix = engine.mix_and_master(graph, master_path)
@@ -317,6 +355,8 @@ def _apply_audio_scene_graph_mix(
     manifest: Dict[str, Any] = {
         "applied": True,
         "master_duration_sec": round(total_dur, 3),
+        "bgm_source": bgm_source,
+        "bgm_file": str(bgm_file) if bgm_file else None,
         "mix_manifest": mix.mix_manifest,
         "stitch_report": getattr(engine, "last_stitch_report", {}),
         "sfx_manifest": [

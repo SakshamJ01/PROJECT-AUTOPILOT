@@ -38,6 +38,11 @@ class Config(BaseModel):
     moneyprinter_autostart: bool = True
     moneyprinter_startup_timeout_seconds: float = 60.0
     whisper_model_size: str = "base"
+    # Royalty-free BGM library (Phase 4 / plan 3.1): optional directory of
+    # music files (mp3/wav/m4a/aac/ogg/flac/opus). When populated, the audio
+    # graph resolves a deterministic mood-matched bed from it for each topic;
+    # when unset or empty, the procedural mood pad remains the fallback.
+    bgm_library_dir: Optional[Path] = None
 
     # LLM & Local Ollama configurations
     ollama_endpoint: str = "http://localhost:11434"
@@ -239,6 +244,7 @@ class Config(BaseModel):
             "AUTOPILOT_STRATEGY_MIN_AGE_DAYS": "strategy_min_age_days",
             "AUTOPILOT_STRATEGY_INFLUENCE_SCALE": "strategy_influence_scale",
             "AUTOPILOT_PRODUCTION_ENGINE": "default_production_engine",
+            "BGM_LIBRARY_DIR": "bgm_library_dir",
             "MONEYPRINTER_ENDPOINT": "moneyprinter_endpoint",
             "MONEYPRINTER_CLI_PATH": "moneyprinter_cli_path",
             "MONEYPRINTER_HOME": "moneyprinter_home",
@@ -301,7 +307,7 @@ class Config(BaseModel):
                 else:
                     data[field_name] = val
         # Convert Path strings if needed
-        for k in ("artifacts_dir", "db_path", "project_root", "asset_cache_dir", "youtube_client_secrets_path", "youtube_token_path"):
+        for k in ("artifacts_dir", "db_path", "project_root", "asset_cache_dir", "youtube_client_secrets_path", "youtube_token_path", "bgm_library_dir"):
             if isinstance(data.get(k), str):
                 data[k] = Path(data[k])
         super().__init__(**data)
