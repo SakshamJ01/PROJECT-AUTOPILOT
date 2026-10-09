@@ -293,7 +293,11 @@ def _generate_generative_thumbnail(
     out_path: Path,
     model: Optional[str] = None,
 ) -> Optional[Path]:
-    """Generate a thumbnail with Gemini image model (lazy, fail-soft)."""
+    """Generate a thumbnail with a Gemini image model (lazy, fail-soft).
+
+    Uses ``generate_content`` with image response modalities (the supported
+    Developer-API path; ``generate_images`` is Enterprise-only/deprecated).
+    """
     try:
         import os
         import io
@@ -305,7 +309,7 @@ def _generate_generative_thumbnail(
         if not api_key:
             return None
         model_name = model or getattr(
-            CONFIG, "thumbnail_generative_model", "gemini-2.0-flash-preview-image-generation"
+            CONFIG, "thumbnail_generative_model", "gemini-2.5-flash-image"
         )
         client = genai.Client(api_key=api_key)
 
@@ -314,17 +318,24 @@ def _generate_generative_thumbnail(
             f"{(hook or channel_name or 'attention-grabbing subject').strip()}. "
             "Cinematic, vibrant, no text overlay, no watermarks."
         )
-        resp = client.models.generate_images(
+        response = client.models.generate_content(
             model=model_name,
-            prompt=prompt,
-            config=genai_types.GenerateImagesConfig(
-                aspect_ratio="9:16", number_of_images=1
+            contents=prompt,
+            config=genai_types.GenerateContentConfig(
+                response_modalities=["TEXT", "IMAGE"]
             ),
         )
-        images = getattr(resp, "generated_images", None) or []
-        if not images:
+        image_bytes = None
+        for candidate in (response.candidates or []):
+            for part in (candidate.content.parts or []):
+                inline = getattr(part, "inline_data", None)
+                if inline is not None and getattr(inline, "data", None):
+                    image_bytes = inline.data
+                    break
+            if image_bytes:
+                break
+        if not image_bytes:
             return None
-        image_bytes = images[0].image.image_bytes
         out_path.parent.mkdir(parents=True, exist_ok=True)
         # Normalize to JPEG to match the publisher contract.
         img = Image.open(io.BytesIO(image_bytes)).convert("RGB")

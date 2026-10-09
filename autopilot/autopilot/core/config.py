@@ -49,7 +49,7 @@ class Config(BaseModel):
     # model-generated 1280x720 image; on any failure it falls back to the
     # deterministic PIL composite so publication is never blocked.
     thumbnail_generative: bool = False
-    thumbnail_generative_model: str = "gemini-2.0-flash-preview-image-generation"
+    thumbnail_generative_model: str = "gemini-2.5-flash-image"
 
     # LLM & Local Ollama configurations
     ollama_endpoint: str = "http://localhost:11434"
@@ -306,7 +306,7 @@ class Config(BaseModel):
         for env_key, field_name in env_map.items():
             val = os.environ.get(env_key)
             if val is not None:
-                if field_name in ("openverse_enabled", "rights_policy_allow_partial", "synthetic_smoke_enabled", "qa_strict_mode", "publish_dry_run_default", "autonomy_auto_publish", "ollama_think", "moneyprinter_autostart", "visual_semantic_enabled", "asset_video_preferred"):
+                if field_name in ("openverse_enabled", "rights_policy_allow_partial", "synthetic_smoke_enabled", "qa_strict_mode", "publish_dry_run_default", "autonomy_auto_publish", "ollama_think", "moneyprinter_autostart", "visual_semantic_enabled", "asset_video_preferred", "thumbnail_generative"):
                     data[field_name] = val.lower() in ("1", "true", "yes")
                 elif field_name in ("openverse_max_results", "asset_target_width", "asset_target_height", "asset_max_download_bytes", "asset_max_redirects", "qa_caption_max_line_length", "qa_caption_max_lines", "publish_max_retries", "publish_chunk_size_bytes", "queue_default_priority", "queue_max_attempts", "queue_max_concurrency", "queue_max_queued_jobs", "analytics_sync_interval_hours", "analytics_cache_ttl_seconds", "analytics_batch_size", "autonomy_level", "autonomy_max_ideas_per_cycle", "autonomy_max_auto_queue_per_cycle", "autonomy_max_daily_jobs", "autonomy_topic_cooldown_days", "ollama_num_predict", "learning_min_samples", "learning_min_category_observations", "learning_window_days", "learning_full_confidence_samples", "strategy_max_params_per_update", "strategy_min_age_days", "visual_semantic_max_video_frames"):
                     data[field_name] = int(val)

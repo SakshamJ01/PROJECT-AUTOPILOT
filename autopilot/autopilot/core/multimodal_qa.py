@@ -31,7 +31,17 @@ def gemini_available() -> bool:
 
 
 def _resolve_api_key(api_key: Optional[str]) -> Optional[str]:
-    return api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if api_key:
+        return api_key
+    try:
+        from autopilot.core.config import CONFIG
+
+        cfg_key = getattr(CONFIG, "gemini_api_key", None)
+        if cfg_key:
+            return str(cfg_key)
+    except Exception:
+        pass
+    return os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
 
 
 @dataclass
