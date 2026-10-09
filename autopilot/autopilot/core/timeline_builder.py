@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from autopilot.core.timeline import (
     CaptionPhrase,
     CaptionPosition,
+    CropFraming,
     MaterializedAudioPlan,
     MaterializedCaptionPlan,
     MaterializedNarration,
@@ -53,6 +54,15 @@ def _coerce_enum(enum_cls: Any, raw: Any, default: Any) -> Any:
         if str(member.value).lower() == text or member.name.lower() == text:
             return member
     return default
+
+
+def _coerce_fraction(raw: Any, default: float = 0.5) -> float:
+    """Coerce a stored saliency coordinate into the [0, 1] fraction range."""
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return default
+    return 0.0 if value < 0.0 else (1.0 if value > 1.0 else value)
 
 
 def scene_roles(count: int) -> List[NarrativeRole]:
@@ -230,6 +240,7 @@ def build_materialized_timeline(
 
     scenes: List[MaterializedScene] = []
     cursor = 0.0
+    beat_sync_engine = None
     for idx, sscene in enumerate(script_scenes):
         scene_id = str(sscene.scene_id)
         plan = plan_by_id.get(scene_id)
@@ -284,48 +295,73 @@ def build_materialized_timeline(
         )
 
         semantic_score = plan.get("semantic_score")
-        scenes.append(
-            MaterializedScene(
-                scene_id=scene_id,
-                order=idx + 1,
-                narrative_role=roles[idx],
-                timing=MaterializedTiming(
-                    start_time_sec=round(cursor, 3),
-                    end_time_sec=round(cursor + scene_duration, 3),
-                    duration_sec=round(scene_duration, 3),
-                ),
-                narration=MaterializedNarration(
-                    text=narration_text,
-                    audio_artifact_path=str(voice_path),
-                    word_timestamps=words,
-                ),
-                visual_requirements=VisualRequirements(
-                    visual_concept=sscene.visual_intent or narration_text[:60],
-                    b_roll_search_query=getattr(sscene, "asset_query", None),
-                ),
-                selected_assets=[
-                    SelectedAsset(
-                        asset_id=f"{scene_id}-primary",
-                        asset_path=str(asset_path),
-                        media_type=(plan.get("asset_type") or "video"),
-                        provenance={
-                            "provider": plan.get("asset_provider"),
-                            "selection_reason": plan.get("selection_reason"),
-                            "semantic_score": semantic_score,
-                        },
-                    )
-                ],
-                transition_plan=MaterializedTransitionPlan(
-                    type=(getattr(sscene, "transition_hint", None) or "cut")
-                ),
-                caption_plan=caption_plan,
-                audio_plan=MaterializedAudioPlan(
-                    voice_path=str(voice_path),
-                    voice_duration_sec=round(duration, 3),
-                ),
-                qa_expectations=QAExpectations(),
-            )
+        crop_raw = plan.get("crop_framing") or {}
+        scene = MaterializedScene(
+            scene_id=scene_id,
+            order=idx + 1,
+            narrative_role=roles[idx],
+            timing=MaterializedTiming(
+                start_time_sec=round(cursor, 3),
+                end_time_sec=round(cursor + scene_duration, 3),
+                duration_sec=round(scene_duration, 3),
+            ),
+            narration=MaterializedNarration(
+                text=narration_text,
+                audio_artifact_path=str(voice_path),
+                word_timestamps=words,
+            ),
+            visual_requirements=VisualRequirements(
+                visual_concept=sscene.visual_intent or narration_text[:60],
+                b_roll_search_query=getattr(sscene, "asset_query", None),
+            ),
+            selected_assets=[
+                SelectedAsset(
+                    asset_id=f"{scene_id}-primary",
+                    asset_path=str(asset_path),
+                    media_type=(plan.get("asset_type") or "video"),
+                    provenance={
+                        "provider": plan.get("asset_provider"),
+                        "selection_reason": plan.get("selection_reason"),
+                        "semantic_score": semantic_score,
+                    },
+                    crop_framing=CropFraming(
+                        saliency_x=_coerce_fraction(crop_raw.get("saliency_x")),
+                        saliency_y=_coerce_fraction(crop_raw.get("saliency_y")),
+                        caption_safe_zone=_coerce_enum(
+                            CaptionPosition,
+                            crop_raw.get("caption_safe_zone"),
+                            CaptionPosition.LOWER,
+                        ),
+                    ),
+                )
+            ],
+            transition_plan=MaterializedTransitionPlan(
+                type=(getattr(sscene, "transition_hint", None) or "cut")
+            ),
+            caption_plan=caption_plan,
+            audio_plan=MaterializedAudioPlan(
+                voice_path=str(voice_path),
+                voice_duration_sec=round(duration, 3),
+            ),
+            qa_expectations=QAExpectations(),
         )
+        # Beat sync (plan 4): re-segment captions into 2-4 word beats and
+        # stamp the narrative-role SFX cue that the audio graph honours. Only
+        # scenes with real word timestamps are synced so synthetic timelines
+        # without measured speech keep their plain caption block.
+        if words:
+            if beat_sync_engine is None:
+                from autopilot.core.beat_sync import BeatSyncEngine
+
+                beat_sync_engine = BeatSyncEngine()
+            scene = beat_sync_engine.synchronize_scene(scene)
+        # Dynamic safe zone (plan 3.5): where the render plan carries a real
+        # saliency framing, align the caption plan (and thus the renderer) with
+        # its safe zone so captions avoid the subject instead of assuming the
+        # bottom is always clear. Plans without framing keep their caption plan.
+        if crop_raw and scene.caption_plan is not None and scene.selected_assets:
+            scene.caption_plan.position = scene.selected_assets[0].crop_framing.caption_safe_zone
+        scenes.append(scene)
         cursor += scene_duration
 
     return MaterializedTimeline(

@@ -126,6 +126,159 @@ def _resolve_scene_transition_hint(explicit_hint, channel_profile=None) -> str:
     return preference or DEFAULT_TRANSITION_PREFERENCE
 
 
+def _role_sfx_for_scene(role, first_word_start=0.0):
+    """Beat-synced role SFX cue stamped on a render scene.
+
+    Uses the same narrative-role → cue mapping as ``core.beat_sync`` so the
+    mixed audio, the QA timeline, and the moneyprinter handoff all agree on
+    which cue lands on which beat.
+    """
+    from autopilot.core.beat_sync import ROLE_SFX_MAPPINGS
+
+    cue = ROLE_SFX_MAPPINGS.get(role, "whoosh_fast")
+    try:
+        start = max(0.0, float(first_word_start or 0.0))
+    except Exception:
+        start = 0.0
+    return [{"cue": cue, "time_sec": round(start, 3), "volume_db": -6.0}]
+
+
+def _route_regen_invalidation(target_stage):
+    """Map a QA defect's target stage to its routed chain and artifact groups to unlink.
+
+    The dormant ``targeted_regeneration`` controller owns the dependency graph
+    (a defect re-runs only its own chain, never the whole pipeline). The pipeline
+    expands that routed chain into the concrete artifact groups whose files must
+    be deleted before the resumed run rebuilds them bottom-up, keeping exactly the
+    invalidation semantics the QA stage always used.
+    """
+    from autopilot.core.targeted_regeneration import TargetedRegenerationController
+
+    normalized = {
+        "GENERAL": "SCRIPT",
+        "VOICE": "VOICE_AUDIO",
+        "RENDER": "CROP_FRAMING",
+    }.get(str(target_stage), str(target_stage))
+    routed = TargetedRegenerationController().route_defect(normalized)
+    groups = set()
+    for stage in routed:
+        if stage == "SCRIPT":
+            groups.update({"SCRIPT", "VOICE", "ASSETS", "RENDER"})
+        elif stage in ("VOICE_AUDIO", "VOICE", "CAPTIONS"):
+            groups.update({"VOICE", "RENDER"})
+        elif stage in ("VISUAL_ASSET", "ASSETS"):
+            groups.update({"ASSETS", "RENDER"})
+        elif stage in ("AUDIO_MIX", "CROP_FRAMING", "CAPTION_LAYOUT", "FULL_TIMELINE", "RENDER", "QA"):
+            groups.add("RENDER")
+    return routed, groups
+
+
+def _compute_scene_crop_framing(asset_artifacts):
+    """Compute saliency-based dynamic caption safe zones for image assets.
+
+    Production wire for the dormant ``visual_intelligence`` saliency analyser:
+    every consumer that reads ``crop_framing`` (renderer placement, QA
+    caption-placement gate) receives the same real subject location instead of
+    the neutral 0.5/0.5/LOWER default. Videos and unreadable files keep the
+    neutral default so nothing regresses.
+    """
+    from autopilot.core.visual_intelligence import compute_saliency_and_safe_zone
+
+    framing: Dict[str, Dict[str, Any]] = {}
+    for art in asset_artifacts or []:
+        scene_id = str(getattr(art, "scene_id", "") or "")
+        if not scene_id:
+            continue
+        cx, cy, safe = 0.5, 0.5, "LOWER"
+        try:
+            norm_path = Path(getattr(art, "normalized_path", "") or "")
+            is_image = (getattr(art, "asset_type", None) or "image") == "image"
+            if is_image and norm_path.exists() and norm_path.stat().st_size > 0:
+                _cx, _cy, _safe = compute_saliency_and_safe_zone(norm_path)
+                cx, cy, safe = float(_cx), float(_cy), _safe.value
+        except Exception:
+            cx, cy, safe = 0.5, 0.5, "LOWER"
+        framing[scene_id] = {
+            "saliency_x": round(cx, 3),
+            "saliency_y": round(cy, 3),
+            "caption_safe_zone": safe,
+        }
+    return framing
+
+
+def _attach_claim_verification(script, research_report, logger=None):
+    """Run the dormant ClaimVerifier over per-scene narration against the job's research evidence.
+
+    Fail-open by design: never raises and never blocks the pipeline. The result
+    is recorded in ``script.generation_metadata["claim_verification"]`` so QA
+    and operator review can see which scenes were grounded in evidence and
+    which ones still need qualification wording.
+    """
+    try:
+        if script is None:
+            return script
+        evidence = (research_report or {}).get("evidence") or []
+        if not evidence:
+            return script
+        from autopilot.core.claim_verification import ClaimVerifier, ClaimVerificationStatus
+
+        sources = []
+        for ev in evidence:
+            if isinstance(ev, dict):
+                sources.append({
+                    "source_id": ev.get("source_id") or "source",
+                    "text": ev.get("snippet") or ev.get("text") or ev.get("content") or ev.get("excerpt") or "",
+                })
+            else:
+                sources.append({
+                    "source_id": getattr(ev, "source_id", "source") or "source",
+                    "text": getattr(ev, "snippet", "") or getattr(ev, "excerpt", "") or "",
+                })
+
+        verifier = ClaimVerifier()
+        scene_results = []
+        flagged_scene_ids = []
+        verified = 0
+        for scene in getattr(script, "scenes", []) or []:
+            claim_text = (getattr(scene, "narration", None) or "").strip()
+            if not claim_text:
+                continue
+            result = verifier.verify_claim(claim_text, sources)
+            record = {
+                "scene_id": getattr(scene, "scene_id", ""),
+                "status": result.verification.value,
+                "confidence": result.confidence,
+                "claim_strength": result.claim_strength.value,
+                "source": result.source,
+                "qualification_required": result.qualification_required,
+            }
+            scene_results.append(record)
+            if result.verification == ClaimVerificationStatus.VERIFIED:
+                verified += 1
+            else:
+                flagged_scene_ids.append(record["scene_id"])
+
+        meta = dict(getattr(script, "generation_metadata", None) or {})
+        meta["claim_verification"] = {
+            "scenes_checked": len(scene_results),
+            "verified": verified,
+            "flagged": len(flagged_scene_ids),
+            "scenes": scene_results,
+        }
+        script.generation_metadata = meta
+        if logger is not None and flagged_scene_ids:
+            logger.warning(
+                "claim_verification_flags",
+                details={
+                    "flagged": len(flagged_scene_ids),
+                    "scenes": flagged_scene_ids,
+                },
+            )
+        return script
+    except Exception:
+        return script
+
+
 class PipelineOrchestrator:
     """Executes the full pipeline for a job, resuming cleanly from the last valid stage."""
 
@@ -390,6 +543,11 @@ class PipelineOrchestrator:
                             category="BLOCKED",
                             stage="SCRIPT",
                         )
+
+                # Factual grounding pass (plan 4.2): wire the dormant ClaimVerifier
+                # to this job's research evidence. Fail-open and recorded in the
+                # persisted script metadata so QA sees grounding evidence.
+                script = _attach_claim_verification(script, research_report_obj, logger=logger)
 
                 sp_path.parent.mkdir(parents=True, exist_ok=True)
                 sp_path.write_text(script.model_dump_json(indent=2), encoding="utf-8")
@@ -737,6 +895,11 @@ class PipelineOrchestrator:
         render_checksum = None
 
         render_scenes = []
+        # Role-based beat sync (same assignment as the voice prosody stage and
+        # the QA timeline builder) so SFX cues land on the same narrative beats.
+        from autopilot.core.timeline_builder import scene_roles
+
+        render_roles = scene_roles(len(script.scenes))
         for idx, scene in enumerate(script.scenes):
             matched_art = next((a for a in asset_artifacts if a.scene_id == scene.scene_id), None)
             norm_path = matched_art.normalized_path if matched_art else None
@@ -760,6 +923,12 @@ class PipelineOrchestrator:
             _hint = _resolve_scene_transition_hint(
                 scene.transition_hint, channel_profile_obj
             )
+            _first_word_start = 0.0
+            if scene_words:
+                try:
+                    _first_word_start = float(scene_words[0].get("start", 0.0))
+                except Exception:
+                    _first_word_start = 0.0
             render_scenes.append({
                 "scene_id": scene.scene_id,
                 "duration_sec": dur,
@@ -770,6 +939,9 @@ class PipelineOrchestrator:
                 "emphasis_words": scene.emphasis_words or [],
                 "transition_hint": _hint,
                 "word_timestamps": scene_words,
+                "narrative_role": render_roles[idx] if idx < len(render_roles) else "CONTENT",
+                # Beat-synced role cue; the renderer honours it when present.
+                "sfx_events": _role_sfx_for_scene(render_roles[idx] if idx < len(render_roles) else None, _first_word_start),
                 "caption_plan": {
                     "position": "LOWER",
                     "platform_safe_zone": "YOUTUBE_SHORTS",
@@ -780,6 +952,18 @@ class PipelineOrchestrator:
                 "selection_reason": (matched_art.selection_reason if matched_art else None),
                 "semantic_score": (matched_art.semantic_score if matched_art else None),
             })
+
+        # Dynamic caption safe zones: the dormant visual_intelligence saliency
+        # analyser tells the render plan where the subject actually is, so the
+        # caption plan (and renderer) place text away from it instead of always
+        # assuming the bottom is clear.
+        crop_framing_map = _compute_scene_crop_framing(asset_artifacts)
+        for _s in render_scenes:
+            _cf = crop_framing_map.get(_s["scene_id"]) or {}
+            if _cf:
+                _s["crop_framing"] = _cf
+                if _cf.get("caption_safe_zone") in ("TOP", "LOWER"):
+                    _s["caption_plan"]["position"] = _cf["caption_safe_zone"]
 
         plan_expected_dur = sum(s.get("duration_sec", 0) for s in render_scenes)
 
@@ -1023,6 +1207,7 @@ class PipelineOrchestrator:
 
                     if attempt_number < max_regeneration_attempts:
                         self.db.update_job_status(job_id, WorkflowState.REGENERATING.value)
+                        routed_stages, invalidation_groups = _route_regen_invalidation(target_stage)
                         logger.warning(
                             "targeted_regeneration_triggered",
                             details={
@@ -1032,6 +1217,7 @@ class PipelineOrchestrator:
                                 "reason": defect_reason,
                                 "instruction": corrective_instruction,
                                 "target_stage": target_stage,
+                                "routed_stages": routed_stages,
                             },
                         )
                         regen_meta = {
@@ -1040,26 +1226,33 @@ class PipelineOrchestrator:
                             "reason": defect_reason,
                             "instruction": corrective_instruction,
                             "target_stage": target_stage,
+                            "routed_stages": routed_stages,
                             "timestamp": datetime.now(timezone.utc).isoformat(),
                         }
                         regen_file = art_dir / "quality" / f"regeneration_attempt_{attempt_number}.json"
                         regen_file.parent.mkdir(parents=True, exist_ok=True)
                         regen_file.write_text(json.dumps(regen_meta, indent=2), encoding="utf-8")
 
-                        # Invalidate affected artifacts based on target stage
+                        # Invalidate affected artifacts based on the routed
+                        # dependency chain. The dormant targeted_regeneration
+                        # controller is the single authoritative source for
+                        # which stages a defect re-runs.
                         qa_receipt_path.unlink(missing_ok=True)
                         report_file = art_dir / "quality" / "quality_report.json"
                         report_file.unlink(missing_ok=True)
-                        if target_stage in ("SCRIPT", "GENERAL"):
+                        if "SCRIPT" in invalidation_groups:
                             sp_path.unlink(missing_ok=True)
                             pkg_path.unlink(missing_ok=True)
                             final_mp4.unlink(missing_ok=True)
                             plan_path.unlink(missing_ok=True)
-                        elif target_stage == "VOICE":
+                        # Script-level defects rebuild the package from scratch,
+                        # so their voice files are re-synthesized anyway. Only a
+                        # pure VOICE defect needs the files explicitly cleared.
+                        if "VOICE" in invalidation_groups and "SCRIPT" not in invalidation_groups:
                             for v_art in voice_artifacts:
                                 Path(v_art).unlink(missing_ok=True)
                             final_mp4.unlink(missing_ok=True)
-                        elif target_stage == "RENDER":
+                        if "RENDER" in invalidation_groups and "SCRIPT" not in invalidation_groups:
                             final_mp4.unlink(missing_ok=True)
 
                         return self.run_pipeline(
