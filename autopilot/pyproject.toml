@@ -22,6 +22,25 @@ dependencies = [
     "crawl4ai>=0.4.0",
 ]
 
+# Optional Round-2 integrations (see requirements-optional.txt). Every feature
+# fails soft when its extra is not installed, so the base install stays lean
+# and the hermetic test suite keeps passing.
+[project.optional-dependencies]
+gemini = ["google-genai>=1.0"]                      # multimodal QA + generative thumbnails
+audio = ["demucs>=4.0"]                             # stem-based vocal-clarity QA
+seo = ["pytrends>=4.2"]                             # YouTube volume for KGR keyword scorer
+structured = ["instructor>=0.5"]                    # native structured LLM output (pydantic fallback works without)
+bgm-gen = ["transformers>=4.40", "torch", "scipy"]  # MusicGen generative BGM beds
+all = [
+    "google-genai>=1.0",
+    "demucs>=4.0",
+    "pytrends>=4.2",
+    "instructor>=0.5",
+    "transformers>=4.40",
+    "torch",
+    "scipy",
+]
+
 [project.scripts]
 autopilot = "autopilot.cli.main:main"
 

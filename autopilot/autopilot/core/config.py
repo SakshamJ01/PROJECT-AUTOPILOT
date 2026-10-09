@@ -38,11 +38,14 @@ class Config(BaseModel):
     moneyprinter_autostart: bool = True
     moneyprinter_startup_timeout_seconds: float = 60.0
     whisper_model_size: str = "base"
-    # Royalty-free BGM library (Phase 4 / plan 3.1): optional directory of
-    # music files (mp3/wav/m4a/aac/ogg/flac/opus). When populated, the audio
-    # graph resolves a deterministic mood-matched bed from it for each topic;
-    # when unset or empty, the procedural mood pad remains the fallback.
-    bgm_library_dir: Optional[Path] = None
+    # Royalty-free BGM library (Phase 4 / plan 3.1): directory of music files
+    # (mp3/wav/m4a/aac/ogg/flac/opus). Defaults to the project library that
+    # `autopilot bgm fill` populates; when populated the audio graph resolves a
+    # deterministic mood-matched bed per topic, and when missing/empty the
+    # procedural mood pad remains the fallback. Override with BGM_LIBRARY_DIR.
+    bgm_library_dir: Optional[Path] = Field(
+        default_factory=lambda: Path(__file__).resolve().parent.parent.parent / "artifacts" / "bgm_library"
+    )
 
     # Generative (Gemini) thumbnail backend (Round-2 upgrade #7). When enabled
     # and a Gemini key is configured, the thumbnail stage first tries a

@@ -1,0 +1,60 @@
+# Optional dependencies for PROJECT AUTOPILOT (Round-2 open-source integrations)
+# ---------------------------------------------------------------------------
+# The core pipeline runs fully offline with the base install in pyproject.toml.
+# Everything below is OPTIONAL: each feature fails soft (degrades to a safe
+# fallback or is skipped) when its dependency or credential is missing, so the
+# hermetic test suite and a bare install both keep working.
+#
+# Install individually, or use the matching pyproject extras:
+#     pip install ".[gemini]"   /  .[audio]  /  .[seo]  /  .[structured]  /  .[all]
+#
+# Group: gemini  ->  multimodal creative QA + generative thumbnails
+#   google-genai
+#     Unlocks: core/multimodal_qa.py scores rendered video relevance/dynamism/hook
+#              via Gemini (wired into creative_qa, item #6) and the generative
+#              thumbnail backend in core/thumbnail.py (item #7).
+#     Requires: GEMINI_API_KEY (or AUTOPILOT_GEMINI_API_KEY).
+#     Notes:   Video analysis (text model) works on the free tier. IMAGE
+#              generation (gemini-2.5-flash-image) can hit 429 RESOURCE_EXHAUSTED
+#              on free keys; the thumbnail then falls back to the PIL composite.
+#
+# Group: audio  ->  stem-based vocal-clarity QA
+#   demucs
+#     Unlocks: core/audio_intelligence.py separates vocals vs. background and
+#              measures whether voice is audible over BGM (wired into the
+#              creative_qa audio-balance check, item #2). Downloads the
+#              htdemucs model (~80 MB) on first use.
+#     Requires: torch + torchaudio (pulled in automatically).
+#
+# Group: seo  ->  YouTube search-volume for the KGR keyword scorer
+#   pytrends
+#     Unlocks: core/keyword_scorer.py pulls relative YouTube search interest
+#              (gprop="youtube") for real volume in the KGR opportunity score
+#              (item #5). Without it the scorer uses the offline heuristic
+#              (competition only, volume=None).
+#
+# Group: structured  ->  native structured LLM output
+#   instructor
+#     Unlocks: providers/structured_llm.py can use instructor's native
+#              structured-output mode. Not required: the module already
+#              enforces the Pydantic schema with corrective retry using only
+#              the base install (item #3).
+#
+# Group: bgm-gen  ->  original (generative) BGM beds
+#   transformers
+#   torch
+#   scipy
+#     Unlocks: core/bgm_generator.py MusicGen backend to synthesize original
+#              instrumental beds into the BGM library (item #1). Without these
+#              it uses the built-in procedural mood-pad synth, which is always
+#              available and royalty-free.
+#
+# Group: trends  ->  community trend signals for autonomy ideation
+#   (no extra package — uses stdlib urllib)
+#     Enable with: AUTOPILOT_AUTONOMY_TREND_PROVIDER=reddit
+#     Unlocks: providers/reddit_trend.py mines hot Reddit posts into TrendSignals
+#              (item #4). Note: Reddit often 403-blocks datacenter IPs, in which
+#              case the provider fail-softs to an empty signal list.
+#
+# Already verified live (private Short GkfUWjTunNs): BGM library bed used,
+# demucs vocal clarity 36.4 dB, Gemini multimodal rel/dyn/hook 75/90/85.
