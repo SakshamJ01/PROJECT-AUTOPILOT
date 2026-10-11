@@ -93,7 +93,7 @@ class Config(BaseModel):
     visual_semantic_max_video_frames: int = 3
 
     # P0 Asset type discipline: preferred provider cascade for B-roll
-    asset_provider_cascade: str = "pexels,pixabay,openverse,infographics"
+    asset_provider_cascade: str = "pexels,pixabay,openverse,archive_org,wikimedia_commons,infographics"
     asset_video_preferred: bool = True
     asset_cache_dir: Path = Field(default_factory=lambda: Path(__file__).resolve().parent.parent.parent / "artifacts" / "asset_cache")
     asset_target_width: int = 1080

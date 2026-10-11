@@ -55,6 +55,8 @@ from autopilot.providers.local_asset_provider import LocalAssetProvider
 from autopilot.providers.openverse_provider import OpenverseAssetProvider
 from autopilot.providers.pexels_provider import PexelsAssetProvider
 from autopilot.providers.pixabay_provider import PixabayAssetProvider
+from autopilot.providers.archive_org_provider import ArchiveOrgAssetProvider
+from autopilot.providers.wikimedia_commons_provider import WikimediaCommonsAssetProvider
 from autopilot.core.infographics_generator import InfographicsAssetProvider, InfographicsGenerator
 from autopilot.core.rights_gate import evaluate_rights_gate, RightsGateResult
 from autopilot.core.asset_cache import compute_file_sha256, compute_image_phash, AssetCache
@@ -475,6 +477,8 @@ class VisualIntelligenceEngine:
                 "pixabay": PixabayAssetProvider(),
                 "infographics": InfographicsAssetProvider(self.cache_dir / "infographics"),
                 "openverse": OpenverseAssetProvider(),
+                "archive_org": ArchiveOrgAssetProvider(),
+                "wikimedia_commons": WikimediaCommonsAssetProvider(),
                 "local": LocalAssetProvider(),
             }
 
@@ -485,9 +489,9 @@ class VisualIntelligenceEngine:
         shot_type = visual_reqs.required_shot_type
 
         if assertion == VisualAssertionLevel.SCHEMATIC or shot_type in (ShotType.DIAGRAM, ShotType.MAP):
-            cascade = ["infographics", "pexels", "pixabay", "openverse", "local"]
+            cascade = ["infographics", "pexels", "pixabay", "openverse", "archive_org", "wikimedia_commons", "local"]
         else:
-            cascade = ["pexels", "pixabay", "infographics", "openverse", "local"]
+            cascade = ["pexels", "pixabay", "infographics", "openverse", "archive_org", "wikimedia_commons", "local"]
 
         active: List[Tuple[str, AssetProvider]] = []
         for name in cascade:

@@ -84,12 +84,18 @@ def get_asset_provider(name: str = "local") -> AssetProvider:
         return PexelsAssetProvider()
     elif name_clean == "pixabay":
         return PixabayAssetProvider()
+    elif name_clean == "archive_org":
+        from autopilot.providers.archive_org_provider import ArchiveOrgAssetProvider
+        return ArchiveOrgAssetProvider()
+    elif name_clean == "wikimedia_commons":
+        from autopilot.providers.wikimedia_commons_provider import WikimediaCommonsAssetProvider
+        return WikimediaCommonsAssetProvider()
     elif name_clean == "infographics":
         return InfographicsAssetProvider()
     elif name_clean == "local":
         return LocalAssetProvider()
     else:
-        raise ValueError(f"Unknown asset provider: '{name}'. Available: 'local', 'openverse', 'pexels', 'pixabay', 'infographics'")
+        raise ValueError(f"Unknown asset provider: '{name}'. Available: 'local', 'openverse', 'pexels', 'pixabay', 'archive_org', 'wikimedia_commons', 'infographics'")
 
 
 def build_asset_cascade(primary_name: str = "pexels", allow_fallback: bool = True) -> List[AssetProvider]:
