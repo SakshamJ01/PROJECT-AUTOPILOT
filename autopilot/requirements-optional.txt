@@ -41,7 +41,8 @@
 #              the base install (item #3).
 #
 # Group: bgm-gen  ->  original (generative) BGM beds
-#   transformers
+#   transformers>=4.40,<5   (pinned to 4.x: MusicGen API is stable there;
+#                            5.x is unverified and may break generation)
 #   torch
 #   scipy
 #     Unlocks: core/bgm_generator.py MusicGen backend to synthesize original

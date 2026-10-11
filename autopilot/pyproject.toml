@@ -30,13 +30,13 @@ gemini = ["google-genai>=1.0"]                      # multimodal QA + generative
 audio = ["demucs>=4.0"]                             # stem-based vocal-clarity QA
 seo = ["pytrends>=4.2"]                             # YouTube volume for KGR keyword scorer
 structured = ["instructor>=0.5"]                    # native structured LLM output (pydantic fallback works without)
-bgm-gen = ["transformers>=4.40", "torch", "scipy"]  # MusicGen generative BGM beds
+bgm-gen = ["transformers>=4.40,<5", "torch", "scipy"]  # MusicGen generative BGM beds (4.x = stable API)
 all = [
     "google-genai>=1.0",
     "demucs>=4.0",
     "pytrends>=4.2",
     "instructor>=0.5",
-    "transformers>=4.40",
+    "transformers>=4.40,<5",
     "torch",
     "scipy",
 ]
