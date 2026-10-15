@@ -12,6 +12,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from autopilot.core.audio_truth_pass import VoiceQAReport
 from autopilot.core.timeline import NarrativeRole
 from autopilot.core.voice_studio import (
@@ -100,6 +102,7 @@ def _probe_duration(path: Path) -> float:
     return float(r.stdout.strip())
 
 
+@pytest.mark.live
 def test_rate_changes_generated_audio_duration(tmp_path: Path) -> None:
     """Real Edge TTS: +8% renders shorter, -5% renders longer than neutral."""
     from autopilot.providers.edge_tts_provider import EdgeTTSProvider

@@ -63,7 +63,7 @@ def test_run_produce_creates_and_passes_research(tmp_path, monkeypatch):
     mock_provider.generate_script.return_value = dummy_script
 
     with patch("autopilot.providers.mock_script.MockScriptProvider", return_value=mock_provider):
-        code = run_produce(topic="AI Research Breakthroughs", llm_provider="mock", policy="development")
+        code = run_produce(topic="AI Research Breakthroughs", llm_provider="mock", policy="development", tts_provider="mock")
         assert code == 0
 
     assert mock_provider.generate_script.called
@@ -100,7 +100,7 @@ def test_existing_research_is_reused_without_regeneration(tmp_path, monkeypatch)
         mock_provider.generate_script.return_value = MockScriptProvider().generate_script(topic, content_id="prod-reused-001")
 
         with patch("autopilot.providers.mock_script.MockScriptProvider", return_value=mock_provider):
-            code = run_produce(topic=topic, llm_provider="mock", policy="development")
+            code = run_produce(topic=topic, llm_provider="mock", policy="development", tts_provider="mock")
             assert code == 0
 
         # MockSearchProvider should NOT have been called because report existed
@@ -201,7 +201,7 @@ def test_mock_produce_backward_compatible(tmp_path, monkeypatch):
     db_path = tmp_path / "autopilot.db"
     monkeypatch.setattr("autopilot.cli.main.CONFIG.db_path", str(db_path))
 
-    code = run_produce(topic="Backward Compatibility Topic", llm_provider="mock", policy="development")
+    code = run_produce(topic="Backward Compatibility Topic", llm_provider="mock", policy="development", tts_provider="mock")
     assert code == 0
 
     db = DBManager(str(db_path))

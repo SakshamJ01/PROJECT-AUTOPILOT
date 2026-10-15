@@ -139,7 +139,7 @@ def resolve_providers_for_policy(
         raise ValueError(
             f"Policy '{policy}' forbids mock/no-op TTS providers. "
             f"Got --tts-provider={tts_provider!r}. "
-            f"Use --tts-provider kokoro or change policy."
+            f"Use --tts-provider kokoro/sapi or change policy."
         )
     if tts_provider in _MOCK_PROVIDER_VALUES:
         tts_provider = tier["tts"]
@@ -3288,7 +3288,7 @@ def build_parser():
     sub_parser.add_argument("--channel", default="default", help="Channel profile ID or path (e.g. science_shorts, history_shorts, tech_shorts)")
     sub_parser.add_argument("--policy", default="local_only", choices=["local_only", "cheap_first", "quality_first", "ollama", "gemini", "openrouter", "mock"], help="Production policy tier")
     sub_parser.add_argument("--profile", default="short_vertical", choices=["short_vertical"], help="Content profile")
-    sub_parser.add_argument("--tts-provider", default=CONFIG.provider_default_tts, choices=["none", "mock", "kokoro", "edge_tts"], help="TTS provider (default: configured production TTS = edge_tts; mock = synthetic audio)")
+    sub_parser.add_argument("--tts-provider", default=CONFIG.provider_default_tts, choices=["none", "mock", "kokoro", "edge_tts", "sapi", "windows_sapi"], help="TTS provider (default: configured production TTS = edge_tts; mock = synthetic audio)")
     sub_parser.add_argument("--llm-provider", default="atria", choices=["atria", "mock", "ollama", "gemini", "openrouter", "openai_compatible"], help="LLM provider (atria, mock, ollama, gemini, openrouter, openai_compatible)")
     sub_parser.add_argument("--research-provider", default="mock_search", choices=["local", "mock_search", "wikipedia", "crawl4ai", "combined"], help="Research provider")
     sub_parser.add_argument("--asset-provider", default="pexels", choices=["local", "openverse", "pexels", "pixabay", "archive_org", "wikimedia_commons"], help="Asset provider (default pexels; real stock video)")
@@ -3302,7 +3302,7 @@ def build_parser():
     sub_parser_run.add_argument("--channel", default="default", help="Channel profile ID or path")
     sub_parser_run.add_argument("--policy", default="local_only", choices=["local_only", "cheap_first", "quality_first", "ollama", "gemini", "openrouter", "mock"], help="Production policy tier")
     sub_parser_run.add_argument("--profile", default="short_vertical", choices=["short_vertical"], help="Content profile")
-    sub_parser_run.add_argument("--tts-provider", default=CONFIG.provider_default_tts, choices=["none", "mock", "kokoro", "edge_tts"], help="TTS provider")
+    sub_parser_run.add_argument("--tts-provider", default=CONFIG.provider_default_tts, choices=["none", "mock", "kokoro", "edge_tts", "sapi", "windows_sapi"], help="TTS provider")
     sub_parser_run.add_argument("--llm-provider", default="atria", choices=["atria", "mock", "ollama", "gemini", "openrouter", "openai_compatible"], help="LLM provider")
     sub_parser_run.add_argument("--research-provider", default="mock_search", choices=["local", "mock_search", "wikipedia", "crawl4ai", "combined"], help="Research provider")
     sub_parser_run.add_argument("--asset-provider", default="pexels", choices=["local", "openverse", "pexels", "pixabay", "archive_org", "wikimedia_commons"], help="Asset provider")

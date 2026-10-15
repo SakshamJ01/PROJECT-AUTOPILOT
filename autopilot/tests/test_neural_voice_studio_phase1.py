@@ -340,6 +340,61 @@ def test_neural_voice_studio_scene_processing(tmp_path):
     assert len(result.word_timestamps) > 0
 
 
+class _FailingTTSProvider:
+    provider_name = "failing_tts"
+
+    def synthesize(self, text, out_path, **kwargs):
+        raise RuntimeError("synthesis endpoint unavailable")
+
+
+def test_scene_narration_fails_closed_when_real_tts_fails(tmp_path, monkeypatch):
+    """A real TTS failure must raise (fail-closed), not silently emit mock audio.
+
+    Regression guard: the silent mock fallback once produced a video whose
+    every scene held byte-identical sine tones (no speech -> no captions ->
+    a downstream QA hard block after a full asset+render spend).
+    """
+    studio = NeuralVoiceStudio(
+        truth_pipeline=AudioTruthPipeline(
+            whisper_engine=_DeterministicStubWhisper("hello world".split(), duration_sec=2.0)
+        )
+    )
+    monkeypatch.setattr(
+        "autopilot.core.voice_studio.get_tts_provider",
+        lambda name: _FailingTTSProvider(),
+    )
+
+    with pytest.raises(RuntimeError, match="fail-closed"):
+        studio.process_scene_narration(
+            scene_id="scene-01",
+            raw_text="Hello world",
+            provider_name="edge_tts",
+            out_dir=tmp_path,
+            allow_mock_fallback=False,
+        )
+
+
+def test_scene_narration_preserves_mock_fallback_by_default(tmp_path, monkeypatch):
+    """Default behavior keeps the mock fallback for non-production callers."""
+    studio = NeuralVoiceStudio(
+        truth_pipeline=AudioTruthPipeline(
+            whisper_engine=_DeterministicStubWhisper("hello world".split(), duration_sec=2.0)
+        )
+    )
+    monkeypatch.setattr(
+        "autopilot.core.voice_studio.get_tts_provider",
+        lambda name: _FailingTTSProvider(),
+    )
+
+    result = studio.process_scene_narration(
+        scene_id="scene-01",
+        raw_text="Hello world",
+        provider_name="edge_tts",
+        out_dir=tmp_path,
+    )
+    assert Path(result.mastered_audio_path).exists()
+
+
 def test_neural_voice_studio_materialized_timeline_integration(tmp_path):
     """Verify NeuralVoiceStudio populates MaterializedTimeline with authoritative stems and passes TimelineCompiler."""
     # 1. Create a dummy asset file

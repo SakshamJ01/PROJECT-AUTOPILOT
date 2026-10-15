@@ -114,13 +114,15 @@ class TestArchiveOrgSelect:
             provenance=AssetProvenance(provider="archive_org"),
         )
 
-    def test_selects_verified_candidate(self):
+    def test_selects_higher_scoring_candidate(self):
+        # select() re-scores via score_candidates(), so the winner must differ by
+        # attributes that affect the score (not by a manually-assigned .score).
         from autopilot.providers.archive_org_provider import ArchiveOrgAssetProvider
         prov = ArchiveOrgAssetProvider()
         c1 = self._cand("a")
-        c1.score = 0.9
+        c1.dimensions = AssetDimensions(width=1080, height=1920)  # vertical, high-res
         c2 = self._cand("b")
-        c2.score = 0.5
+        c2.dimensions = AssetDimensions(width=100, height=100)    # tiny thumbnail
         sel = prov.select([c1, c2], {})
         assert sel.status == "selected"
         assert sel.selected_id == "a"

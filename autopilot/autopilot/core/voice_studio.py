@@ -150,6 +150,7 @@ class NeuralVoiceStudio:
         provider_name: str = "kokoro",
         out_dir: Optional[Path] = None,
         target_duration_sec: Optional[float] = None,
+        allow_mock_fallback: bool = True,
     ) -> VoiceStudioSceneResult:
         """Process a single scene narration through the full Phase 1 voice pipeline."""
         out_directory = Path(out_dir or tempfile_get_dir()) / "voice_studio" / scene_id
@@ -184,6 +185,15 @@ class NeuralVoiceStudio:
                 **synth_kwargs,
             )
         except Exception as exc:
+            if not allow_mock_fallback:
+                # Fail closed: a real TTS provider was requested and failed.
+                # Silently substituting a sine-tone mock would produce a video
+                # with no speech and no captions, wasting the whole pipeline.
+                raise RuntimeError(
+                    f"TTS provider '{getattr(tts_provider, 'provider_name', provider_name)}' "
+                    f"failed for scene '{scene_id}' and mock fallback is disabled "
+                    f"(fail-closed): {exc}"
+                ) from exc
             # Fallback to mock synthesis if provider fails
             from autopilot.providers.mock_tts import MockTTSProvider
             mock = MockTTSProvider()
@@ -258,6 +268,7 @@ class NeuralVoiceStudio:
         channel_binding: Optional[ChannelVoiceBinding] = None,
         provider_name: Optional[str] = None,
         out_dir: Optional[Path] = None,
+        allow_mock_fallback: bool = True,
     ) -> MaterializedTimeline:
         """Process all scenes in a MaterializedTimeline and attach mastered audio & Whisper truth timestamps."""
         binding = channel_binding or ChannelVoiceBinding(channel_id=timeline.job_id)
@@ -283,6 +294,7 @@ class NeuralVoiceStudio:
                 provider_name=chosen_provider,
                 out_dir=out_dir,
                 target_duration_sec=scene.timing.duration_sec,
+                allow_mock_fallback=allow_mock_fallback,
             )
 
             # Shift word timestamps by scene start offset

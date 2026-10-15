@@ -652,6 +652,7 @@ class PipelineOrchestrator:
                                 prosody=prosody_for_narrative_role(roles[idx]),
                                 provider_name=tts_provider,
                                 out_dir=voice_dir,
+                                allow_mock_fallback=False,
                             )
                             final_path = scene_res.mastered_audio_path
                             measured = scene_res.duration_sec
