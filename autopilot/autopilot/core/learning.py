@@ -174,6 +174,9 @@ class LearningEngine:
                 continue
 
             snap = perf.latest_snapshot
+            if snap.is_synthetic:
+                excluded["synthetic_analytics"] = excluded.get("synthetic_analytics", 0) + 1
+                continue
             views = float(snap.metrics["views"].normalized_value) if "views" in snap.metrics else 0.0
             likes = float(snap.metrics["likes"].normalized_value) if "likes" in snap.metrics else 0.0
             comments = float(snap.metrics["comments"].normalized_value) if "comments" in snap.metrics else 0.0

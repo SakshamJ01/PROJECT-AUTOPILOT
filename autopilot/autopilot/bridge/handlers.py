@@ -267,6 +267,20 @@ class BridgeHandlers:
             return {"found": False, "job_id": job_id}
         # Fetch QA reports (most recent first, include checks/findings).
         qa_reports = self.db.get_qa_reports_for_job(job_id)
+        from autopilot.core.artifacts import job_artifact_dir
+        claim_verification = None
+        publish_readiness = None
+        try:
+            artifact_dir = job_artifact_dir(job_id)
+            script_file = artifact_dir / "script" / "script.json"
+            if script_file.exists():
+                script_payload = _json.loads(script_file.read_text(encoding="utf-8"))
+                claim_verification = (script_payload.get("generation_metadata") or {}).get("claim_verification")
+            readiness_file = artifact_dir / "qa" / "publish_readiness.json"
+            if readiness_file.exists():
+                publish_readiness = _json.loads(readiness_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            claim_verification = {"status": "INVALID", "error": "Unable to read factual verification report."}
         enriched_qa = []
         for report in qa_reports[:3]:
             report_id = report.get("report_id", "")
@@ -287,6 +301,8 @@ class BridgeHandlers:
             ),
             "publications": self.db.get_publications_for_job(job_id),
             "qa_reports": enriched_qa,
+            "claim_verification": claim_verification,
+            "publish_readiness": publish_readiness,
             "stage_order": _STAGE_ORDER,
         }
 
@@ -1299,8 +1315,27 @@ class BridgeHandlers:
             raise ProtocolError(INVALID_PARAMS, f"Job not found: {job_id}")
 
         engine = self._publishing_engine()
+        from autopilot.core.artifacts import job_artifact_dir
         media = engine._resolve_media_file(job_id)
         checksum = compute_file_sha256(media) if media else None
+        artifacts_dir = engine.config.get_artifacts_dir()
+        readiness_path = job_artifact_dir(job_id, artifacts_dir) / "qa" / "publish_readiness.json"
+        try:
+            readiness = _json.loads(readiness_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            # Preserve the legacy operator-approval operation for jobs that do
+            # not have a composite gate artifact; such approval cannot clear a
+            # factual review hold because that hold is defined by this artifact.
+            readiness = {}
+        factual_review_requested = bool(readiness.get("factual_review_required"))
+        creative_review_requested = bool(readiness.get("creative_review_required"))
+        human_review_requested = factual_review_requested or creative_review_requested
+        if factual_review_requested and params.get("claims_reviewed") is not True:
+            raise ProtocolError(INVALID_PARAMS, "Explicit factual-claims review is required before approval.")
+        if creative_review_requested and params.get("creative_reviewed") is not True:
+            raise ProtocolError(INVALID_PARAMS, "Explicit creative-QA review is required before approval.")
+        if human_review_requested and not checksum:
+            raise ProtocolError(INVALID_PARAMS, "Cannot approve human review without a current rendered video.")
 
         if self.db.get_publish_approval(job_id) is None:
             self.db.create_publish_approval(
@@ -1319,6 +1354,25 @@ class BridgeHandlers:
         approval = self.db.get_publish_approval(job_id)
         if not ok or not approval or approval.get("status") != "approved":
             raise ProtocolError(INTERNAL_ERROR, f"Failed to approve job {job_id}")
+        if human_review_requested:
+            from autopilot.core.publish_readiness import approve_factual_human_review
+            try:
+                approve_factual_human_review(
+                    job_id=job_id,
+                    media_checksum=checksum,
+                    reviewed_by=decided_by,
+                    artifacts_dir=artifacts_dir,
+                    creative_reviewed=params.get("creative_reviewed") is True,
+                )
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                raise ProtocolError(INVALID_PARAMS, str(exc)) from exc
+            self.db.update_job_status(job_id, "APPROVED")
+            self.db.log_event(
+                job_id,
+                "NEEDS_REVIEW",
+                "APPROVED",
+                reason=f"Factual review approved by {decided_by} for checksum {checksum}",
+            )
         return {
             "job_id": job_id,
             "status": "approved",
@@ -1326,6 +1380,8 @@ class BridgeHandlers:
             "decided_by": approval.get("decided_by"),
             "decided_at": approval.get("decided_at"),
             "media_checksum_sha256": checksum,
+            "claims_reviewed": bool(params.get("claims_reviewed")),
+            "creative_reviewed": bool(params.get("creative_reviewed")),
         }
 
     def on_publishing_reject(self, params: dict | None) -> dict[str, Any]:

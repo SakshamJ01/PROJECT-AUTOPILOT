@@ -177,6 +177,7 @@ export interface JobMetadata {
   render_duration_sec?: number | null;
   render_sec?: number | null;
   media_checksum_sha256?: string | null;
+  claims_reviewed?: boolean;
   checksum_manifest?: string | null;
   sha256?: string | null;
   sources_json?: string | null;
@@ -206,6 +207,34 @@ export interface JobInspect {
   queue_item?: QueueItem | null;
   publications?: PublicationEntry[];
   qa_reports?: QaReport[];
+  claim_verification?: {
+    schema_version?: number;
+    status?: string;
+    error?: string;
+    scenes_checked?: number;
+    verified?: number;
+    flagged?: number;
+    scenes?: Array<{
+      scene_id?: string;
+      claim?: string;
+      status?: string;
+      confidence?: number;
+      claim_strength?: string;
+      source?: string;
+      evidence?: string;
+      conflicts?: string[];
+      qualification_required?: boolean;
+    }>;
+  } | null;
+  publish_readiness?: {
+    is_ready_to_publish?: boolean;
+    human_review_approved?: boolean;
+    human_review_approved_by?: string;
+    human_review_approved_at?: string;
+    factual_review_required?: boolean;
+    creative_review_required?: boolean;
+    blocking_reasons?: string[];
+  } | null;
   stage_order?: string[];
 }
 
@@ -647,6 +676,8 @@ export interface ApprovalActionResult {
   decided_by: string | null;
   decided_at: string | null;
   media_checksum_sha256?: string | null;
+  claims_reviewed?: boolean;
+  creative_reviewed?: boolean;
 }
 
 // =====================================================================

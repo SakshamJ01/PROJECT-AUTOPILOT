@@ -129,6 +129,70 @@ def test_genuinely_publishable_job(env_setup):
     assert env["engine"].count_publishable_jobs() == 1
 
 
+def test_explicit_factual_review_clears_only_checksum_bound_review_hold(env_setup):
+    env = env_setup
+    job_id = "job-factual-review"
+    _, checksum = _seed_job_with_media(env, job_id=job_id, status="APPROVED")
+    art_dir = job_artifact_dir(job_id, base_dir=env["artifacts_dir"])
+    qa_dir = art_dir / "qa"
+    qa_dir.mkdir(parents=True, exist_ok=True)
+    (qa_dir / "publish_readiness.json").write_text(json.dumps({
+        "is_ready_to_publish": False,
+        "status": "PENDING_HUMAN_REVIEW",
+        "human_review_required": True,
+        "factual_review_required": True,
+        "blocking_reasons": [],
+        "media_checksum_sha256": checksum,
+    }), encoding="utf-8")
+    (qa_dir / "factual_verification.json").write_text(json.dumps({
+        "status": "REVIEW_REQUIRED",
+        "scenes": [{"scene_id": "s1", "status": "UNVERIFIED"}],
+    }), encoding="utf-8")
+    receipt_path = art_dir / "quality" / "receipt.json"
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    receipt_path.write_text(json.dumps({
+        "status": "PASS", "publish_allowed": False,
+        "media_checksum_sha256": checksum,
+    }), encoding="utf-8")
+
+    result = env["handlers"].dispatch("publishing.approve", {
+        "job_id": job_id, "claims_reviewed": True,
+    })
+    assert result["status"] == "approved"
+    assert result["claims_reviewed"] is True
+    decision = json.loads((qa_dir / "publish_readiness.json").read_text(encoding="utf-8"))
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert decision["is_ready_to_publish"] is True
+    assert decision["human_review_approved_media_checksum_sha256"] == checksum
+    assert receipt["publish_allowed"] is True
+    assert receipt["human_review_approved_by"] == "operator"
+
+
+def test_factual_review_cannot_override_conflict_or_stale_render(env_setup):
+    env = env_setup
+    job_id = "job-factual-block"
+    _, checksum = _seed_job_with_media(env, job_id=job_id, status="APPROVED")
+    art_dir = job_artifact_dir(job_id, base_dir=env["artifacts_dir"])
+    qa_dir = art_dir / "qa"
+    qa_dir.mkdir(parents=True, exist_ok=True)
+    (qa_dir / "publish_readiness.json").write_text(json.dumps({
+        "is_ready_to_publish": False,
+        "human_review_required": True,
+        "factual_review_required": True,
+        "blocking_reasons": ["Factual claim s1 is conflicting and must be corrected."],
+        "media_checksum_sha256": checksum,
+    }), encoding="utf-8")
+    (qa_dir / "factual_verification.json").write_text(json.dumps({
+        "status": "REVIEW_REQUIRED",
+        "scenes": [{"scene_id": "s1", "status": "CONFLICTING"}],
+    }), encoding="utf-8")
+
+    with pytest.raises(Exception, match="Hard QA or factual blockers"):
+        env["handlers"].dispatch("publishing.approve", {
+            "job_id": job_id, "claims_reviewed": True,
+        })
+
+
 def test_already_published_job_is_not_publishable(env_setup):
     """Job has already been published to the target platform."""
     env = env_setup

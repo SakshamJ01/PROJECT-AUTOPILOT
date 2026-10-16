@@ -820,24 +820,25 @@ def test_unresolved_buckets_general(cfg, db):
 
 # 30. Synthetic analytics is visible in learning runs ---------------------------------------------------
 
-def test_synthetic_input_flagged(cfg, db):
+def test_synthetic_analytics_excluded_from_learning(cfg, db):
     seed_standard(db, synthetic=True)
     eng = make_engine(cfg, db)
     summary = eng.update_strategy(channel_id="default")
 
-    assert summary.is_synthetic_input is True
-    assert summary.status == LearningRunStatus.APPLIED.value
-    tech_sig = summary.category_signals["technology"]
-    assert tech_sig["synthetic_count"] == tech_sig["sample_size"]
-    assert db.find_applied_learning_run("default", summary.input_fingerprint)["is_synthetic_input"] == 1
+    assert summary.is_synthetic_input is False
+    assert summary.status == LearningRunStatus.INSUFFICIENT.value
+    assert summary.observations_used == 0
+    assert summary.excluded_reasons["synthetic_analytics"] == 6
 
 
-def test_mixed_synthetic_flag(cfg, db):
+def test_mixed_synthetic_analytics_is_excluded(cfg, db):
     seed_standard(db)  # measured by default
     seed_published(db, "job-mixed", "Quantum AI Advancements", 6500, is_synthetic=True)
     eng = make_engine(cfg, db)
     summary = eng.update_strategy(channel_id="default")
-    assert summary.is_synthetic_input is True
+    assert summary.is_synthetic_input is False
+    assert summary.observations_used == 6
+    assert summary.excluded_reasons["synthetic_analytics"] == 1
 
 
 # 31. Recency weighting property ---------------------------------------------------------------------------

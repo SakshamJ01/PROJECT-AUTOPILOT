@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import {
   useJobInspectQuery,
+  usePublishApproveMutation,
   useProductionCancelMutation,
   useProductionEngineEnsureMutation,
   useProductionEngineStatusQuery,
@@ -342,21 +343,26 @@ type DetailTab = "overview" | "inspector" | "qa" | "preview" | "publish" | "meta
 
 function ProductionDetail({ item }: { item: QueueItem }) {
   const { data, isLoading, isError } = useJobInspectQuery(item.job_id);
+  const publishApprove = usePublishApproveMutation();
   const artifacts = data?.artifacts ?? [];
   const errors = data?.errors ?? [];
   const [tab, setTab] = useState<DetailTab>("overview");
-  const [isApproving, setIsApproving] = useState(false);
   const [isRegenerating, setIsRegenerating] = useState(false);
 
   const qaReports = data?.qa_reports ?? [];
   const latestQa = qaReports[qaReports.length - 1] ?? null;
-  const isComplete = ["succeeded", "READY_TO_PUBLISH", "COMPLETE"].includes(item.status) ||
+  const isComplete = ["succeeded", "READY_TO_PUBLISH", "COMPLETE", "NEEDS_REVIEW", "needs_review"].includes(item.status) ||
     ["QA", "READY_TO_PUBLISH", "PUBLISH", "COMPLETE"].includes(item.stage);
 
-  const handleApprove = () => {
-    setIsApproving(true);
-    useUiStore.getState().addNotification("Approved", "Video approved for publishing. Publish pipeline will run.", "info");
-    setTimeout(() => setIsApproving(false), 1500);
+  const handleApprove = (claimsReviewed: boolean, creativeReviewed: boolean) => {
+    publishApprove.mutate({
+      job_id: item.job_id,
+      claims_reviewed: claimsReviewed,
+      creative_reviewed: creativeReviewed,
+      notes: claimsReviewed
+        ? "Approved after explicit factual claim review via Before Publish screen"
+        : "Approved via Before Publish screen",
+    });
   };
 
   const handleRegenerate = (code: string) => {
@@ -468,7 +474,7 @@ function ProductionDetail({ item }: { item: QueueItem }) {
           inspect={data}
           onApprove={handleApprove}
           onRegenerate={handleRegenerate}
-          isApproving={isApproving}
+          isApproving={publishApprove.isPending}
           isRegenerating={isRegenerating}
         />
       )}

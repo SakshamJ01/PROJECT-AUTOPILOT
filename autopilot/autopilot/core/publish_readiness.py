@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -40,6 +41,8 @@ class PublishReadinessDecision(BaseModel):
     warning_reasons: List[str] = Field(default_factory=list)
     human_review_required: bool = False
     human_review_approved: bool = False
+    factual_review_required: bool = False
+    creative_review_required: bool = False
     rights_verified: bool = True
     invariants_verified: bool = True
     can_override_with_human_approval: bool = True
@@ -74,6 +77,7 @@ class PublishReadinessGate:
         rights_verified: bool = True,
         invariants_verified: bool = True,
         human_review_approved: bool = False,
+        claim_verification: Optional[Dict[str, Any]] = None,
     ) -> PublishReadinessDecision:
         """Compute the composite publish readiness decision."""
         blocking_reasons: List[str] = []
@@ -84,6 +88,22 @@ class PublishReadinessGate:
             blocking_reasons.append("Commercial rights or asset license verification failed.")
         if not invariants_verified:
             blocking_reasons.append("Hard render timeline invariants failed validation.")
+
+        factual_review_required = False
+        if claim_verification is not None:
+            scenes = claim_verification.get("scenes") or []
+            if claim_verification.get("error"):
+                blocking_reasons.append("Factual claim verification failed to run.")
+            for claim in scenes:
+                status = str(claim.get("status", "UNVERIFIED")).upper()
+                if status in {"CONFLICTING", "REJECTED"}:
+                    blocking_reasons.append(
+                        f"Factual claim {claim.get('scene_id', '?')} is {status.lower()} and must be corrected."
+                    )
+                elif status != "VERIFIED":
+                    factual_review_required = True
+            if claim_verification.get("status") not in {"VERIFIED", "REVIEW_REQUIRED"}:
+                blocking_reasons.append("Factual claim verification report is invalid or incomplete.")
 
         # 2. Technical QA Checks
         tech_passed = True
@@ -118,11 +138,12 @@ class PublishReadinessGate:
                 warning_reasons.append(f"Warning [{d.code}]: {d.evidence}")
 
         # 5. Human Review Escalation
-        human_review_required = (
+        creative_review_required = (
             creative_report.human_review_required
             or creative_report.overall_status == CreativeQAStatus.HUMAN_REVIEW
             or any(d.code == "LOW_CONFIDENCE_CREATIVE_QA" for d in defects)
         )
+        human_review_required = creative_review_required or factual_review_required
 
         # Non-overridable boundary: If hard invariants or rights failed, human approval cannot override
         can_override = rights_verified and invariants_verified and tech_passed
@@ -154,6 +175,8 @@ class PublishReadinessGate:
             warning_reasons=warning_reasons,
             human_review_required=human_review_required,
             human_review_approved=human_review_approved,
+            factual_review_required=factual_review_required,
+            creative_review_required=creative_review_required,
             rights_verified=rights_verified,
             invariants_verified=invariants_verified,
             can_override_with_human_approval=can_override,
@@ -328,6 +351,70 @@ def publish_readiness_allows(
     return True, "ok"
 
 
+def approve_factual_human_review(
+    job_id: str,
+    media_checksum: str,
+    reviewed_by: str,
+    artifacts_dir: str | Path | None = None,
+    creative_reviewed: bool = False,
+) -> Dict[str, Any]:
+    """Record explicit factual review, bound to current render and report.
+
+    Only clears a review-only hold. Any factual conflict, QA hard blocker,
+    missing report, or stale media checksum remains non-overridable.
+    """
+    from autopilot.core.artifacts import job_artifact_dir
+
+    base_dir = Path(artifacts_dir) if artifacts_dir is not None else CONFIG.get_artifacts_dir()
+    job_dir = job_artifact_dir(job_id, base_dir)
+    decision_path = job_dir / "qa" / "publish_readiness.json"
+    factual_path = job_dir / "qa" / "factual_verification.json"
+    receipt_path = job_dir / "quality" / "receipt.json"
+    decision = json.loads(decision_path.read_text(encoding="utf-8"))
+    if decision.get("media_checksum_sha256") != media_checksum:
+        raise ValueError("The render changed after QA. Re-run QA before approving factual review.")
+    if decision.get("blocking_reasons"):
+        raise ValueError("Hard QA or factual blockers cannot be cleared by human review.")
+    if not decision.get("human_review_required"):
+        raise ValueError("This job has no factual review hold to approve.")
+    if decision.get("factual_review_required"):
+        if not factual_path.exists():
+            raise ValueError("Factual verification report is missing.")
+        factual = json.loads(factual_path.read_text(encoding="utf-8"))
+        if factual.get("error") or factual.get("status") != "REVIEW_REQUIRED":
+            raise ValueError("Factual verification report is invalid or not reviewable.")
+        if any(str(c.get("status", "UNVERIFIED")).upper() in {"CONFLICTING", "REJECTED"}
+               for c in factual.get("scenes", [])):
+            raise ValueError("Conflicting or rejected claims must be corrected before publishing.")
+    if decision.get("creative_review_required") and not creative_reviewed:
+        raise ValueError("Explicit creative-QA review is required before approval.")
+
+    now = datetime.now(timezone.utc).isoformat()
+    decision.update({
+        "is_ready_to_publish": True,
+        "status": PublishReadinessStatus.READY.value,
+        "human_review_approved": True,
+        "human_review_approved_by": reviewed_by,
+        "human_review_approved_at": now,
+        "human_review_approved_media_checksum_sha256": media_checksum,
+        "summary": "Factual review approved; all hard QA, rights, invariant, and checksum gates passed.",
+    })
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    if receipt.get("media_checksum_sha256") != media_checksum:
+        raise ValueError("The QA receipt is stale for the current render. Re-run QA before approval.")
+    receipt["publish_allowed"] = True
+    receipt["human_review_approved_by"] = reviewed_by
+    receipt["human_review_approved_at"] = now
+    receipt["human_review_approved_media_checksum_sha256"] = media_checksum
+
+    # Write temp files and replace each artifact atomically to avoid partial JSON.
+    for path, payload in ((decision_path, decision), (receipt_path, receipt)):
+        temp_path = path.with_suffix(path.suffix + ".tmp")
+        temp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        temp_path.replace(path)
+    return decision
+
+
 def run_composite_gate(
     job_id: str,
     media_path: str | Path,
@@ -369,6 +456,22 @@ def run_composite_gate(
         rights_verified, invariants_verified, gate_evidence = _derive_rights_and_invariants(
             technical_report, job_id, base_dir
         )
+        from autopilot.core.artifacts import script_path
+        factual_path = script_path(job_id, "script.json", base_dir=base_dir)
+        claim_verification = None
+        if factual_path.exists():
+            try:
+                script_payload = json.loads(factual_path.read_text(encoding="utf-8"))
+                claim_verification = (script_payload.get("generation_metadata") or {}).get("claim_verification")
+            except Exception:
+                claim_verification = {"status": "INVALID", "error": "Unable to read factual verification report."}
+        else:
+            claim_verification = {"status": "INVALID", "error": "Factual verification report is missing."}
+        (qa_dir / "factual_verification.json").write_text(
+            json.dumps(claim_verification, indent=2), encoding="utf-8"
+        )
+        if hasattr(db, "record_artifact"):
+            db.record_artifact(job_id, str(qa_dir / "factual_verification.json"), "quality")
         (qa_dir / "gate_evidence.json").write_text(json.dumps(gate_evidence, indent=2), encoding="utf-8")
         if hasattr(db, "record_artifact"):
             db.record_artifact(job_id, str(qa_dir / "gate_evidence.json"), "quality")
@@ -381,6 +484,7 @@ def run_composite_gate(
             rights_verified=rights_verified,
             invariants_verified=invariants_verified,
             human_review_approved=False,
+            claim_verification=claim_verification,
         )
         decision.media_checksum_sha256 = compute_file_sha256(media)
 
@@ -389,6 +493,10 @@ def run_composite_gate(
             db.record_artifact(job_id, str(qa_dir / "publish_readiness.json"), "quality")
 
         _propagate_gate_verdict_to_receipt(technical_report, decision)
+        receipt = getattr(technical_report, "receipt", None)
+        if receipt is not None:
+            receipt_path = job_artifact_dir(job_id, base_dir) / "quality" / "receipt.json"
+            receipt_path.write_text(receipt.model_dump_json(indent=2), encoding="utf-8")
         return decision
 
     except Exception as exc:

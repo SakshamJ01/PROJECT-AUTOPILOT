@@ -140,17 +140,18 @@ def test_attach_claim_verification_records_grounded_scenes() -> None:
     assert by_id["scene_2"]["status"] == "UNVERIFIED"
 
 
-def test_attach_claim_verification_fail_open_and_idempotent() -> None:
-    # Missing research evidence: unchanged script, no crash.
+def test_attach_claim_verification_marks_missing_evidence_unverified() -> None:
     script = _claimable_script([("scene_1", "Some narration")])
     out = _attach_claim_verification(script, None)
     assert out is script
-    assert "claim_verification" not in (script.generation_metadata or {})
+    report = script.generation_metadata["claim_verification"]
+    assert report["status"] == "REVIEW_REQUIRED"
+    assert report["scenes"][0]["status"] == "UNVERIFIED"
 
-    # Malformed evidence: helper swallows and returns the script untouched.
     script2 = _claimable_script([("scene_1", "Some narration")])
     out2 = _attach_claim_verification(script2, {"evidence": [None, 42]})
     assert out2 is script2
+    assert script2.generation_metadata["claim_verification"]["scenes"][0]["status"] == "UNVERIFIED"
 
 
 def test_attach_claim_verification_warns_on_flags() -> None:

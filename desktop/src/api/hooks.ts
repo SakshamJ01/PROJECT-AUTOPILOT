@@ -573,12 +573,17 @@ export function usePublishApproveMutation() {
       platform?: string;
       decided_by?: string;
       notes?: string;
+      claims_reviewed?: boolean;
+      creative_reviewed?: boolean;
     }) => engineCall<ApprovalActionResult>("publishing.approve", params),
     onSuccess: (_data, variables) => {
       void queryClient.invalidateQueries({ queryKey: ["engine", "publishing.list_ready"] });
       void queryClient.invalidateQueries({ queryKey: ["engine", "publishing.status"] });
       void queryClient.invalidateQueries({
         queryKey: ["engine", "publishing.inspect", variables.job_id],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["engine", "job.inspect", variables.job_id],
       });
       notify("Job Approved", `Job ${variables.job_id} approved for publishing`, "info");
     },

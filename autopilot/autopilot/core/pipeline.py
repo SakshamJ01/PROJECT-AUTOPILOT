@@ -209,17 +209,15 @@ def _compute_scene_crop_framing(asset_artifacts):
 def _attach_claim_verification(script, research_report, logger=None):
     """Run the dormant ClaimVerifier over per-scene narration against the job's research evidence.
 
-    Fail-open by design: never raises and never blocks the pipeline. The result
-    is recorded in ``script.generation_metadata["claim_verification"]`` so QA
-    and operator review can see which scenes were grounded in evidence and
-    which ones still need qualification wording.
+    Verification is advisory at generation time, but always emits an explicit
+    report. Missing evidence and verifier failures are represented as
+    UNVERIFIED so downstream QA can fail closed instead of mistaking absence
+    of a report for successful verification.
     """
     try:
         if script is None:
             return script
         evidence = (research_report or {}).get("evidence") or []
-        if not evidence:
-            return script
         from autopilot.core.claim_verification import ClaimVerifier, ClaimVerificationStatus
 
         sources = []
@@ -246,10 +244,13 @@ def _attach_claim_verification(script, research_report, logger=None):
             result = verifier.verify_claim(claim_text, sources)
             record = {
                 "scene_id": getattr(scene, "scene_id", ""),
+                "claim": claim_text,
                 "status": result.verification.value,
                 "confidence": result.confidence,
                 "claim_strength": result.claim_strength.value,
                 "source": result.source,
+                "evidence": result.evidence,
+                "conflicts": result.conflicts,
                 "qualification_required": result.qualification_required,
             }
             scene_results.append(record)
@@ -260,6 +261,8 @@ def _attach_claim_verification(script, research_report, logger=None):
 
         meta = dict(getattr(script, "generation_metadata", None) or {})
         meta["claim_verification"] = {
+            "schema_version": 1,
+            "status": "VERIFIED" if scene_results and verified == len(scene_results) else "REVIEW_REQUIRED",
             "scenes_checked": len(scene_results),
             "verified": verified,
             "flagged": len(flagged_scene_ids),
@@ -275,7 +278,24 @@ def _attach_claim_verification(script, research_report, logger=None):
                 },
             )
         return script
-    except Exception:
+    except Exception as exc:
+        if script is not None:
+            scenes = [
+                {"scene_id": getattr(scene, "scene_id", ""),
+                 "claim": (getattr(scene, "narration", None) or "").strip(),
+                 "status": "UNVERIFIED", "confidence": 0.0,
+                 "source": "NONE", "evidence": "Verification failed.",
+                 "conflicts": [], "qualification_required": True}
+                for scene in (getattr(script, "scenes", []) or [])
+                if (getattr(scene, "narration", None) or "").strip()
+            ]
+            meta = dict(getattr(script, "generation_metadata", None) or {})
+            meta["claim_verification"] = {
+                "schema_version": 1, "status": "REVIEW_REQUIRED",
+                "error": str(exc), "scenes_checked": len(scenes),
+                "verified": 0, "flagged": len(scenes), "scenes": scenes,
+            }
+            script.generation_metadata = meta
         return script
 
 
@@ -1159,6 +1179,7 @@ class PipelineOrchestrator:
 
         qa_receipt_path = art_dir / "quality" / "receipt.json"
         qa_report: Optional[QAReport] = None
+        human_review_pending = False
 
         if qa_receipt_path.exists():
             try:
@@ -1301,15 +1322,26 @@ class PipelineOrchestrator:
                 qa_report.publish_allowed = gate_decision.is_ready_to_publish
                 if not gate_decision.is_ready_to_publish:
                     gate_reason = "; ".join(gate_decision.blocking_reasons) or "composite gate blocked"
-                    self.db.update_job_status(job_id, WorkflowState.FAILED_QA.value)
-                    self.db.record_error(job_id, "QA", "composite_gate_blocked", gate_reason)
-                    raise PipelineError(
-                        f"Composite publish gate blocked: {gate_reason}",
-                        category="NON_RETRYABLE",
-                        stage="QA",
-                    )
+                    if gate_decision.status.value == "PENDING_HUMAN_REVIEW":
+                        human_review_pending = True
+                        self.db.update_job_status(job_id, WorkflowState.NEEDS_REVIEW.value)
+                        self.db.log_event(
+                            job_id,
+                            WorkflowState.QA.value,
+                            WorkflowState.NEEDS_REVIEW.value,
+                            reason="Composite quality gate requires explicit human review",
+                        )
+                    else:
+                        self.db.update_job_status(job_id, WorkflowState.FAILED_QA.value)
+                        self.db.record_error(job_id, "QA", "composite_gate_blocked", gate_reason)
+                        raise PipelineError(
+                            f"Composite publish gate blocked: {gate_reason}",
+                            category="NON_RETRYABLE",
+                            stage="QA",
+                        )
 
-                self.db.update_job_status(job_id, WorkflowState.APPROVED.value)
+                if not human_review_pending:
+                    self.db.update_job_status(job_id, WorkflowState.APPROVED.value)
                 logger.info("stage_completed", details={"stage": "QA", "status": qa_report.status.value, "allowed": qa_report.publish_allowed})
             except PipelineError:
                 raise
@@ -1322,7 +1354,7 @@ class PipelineOrchestrator:
         # 7. OPTIONAL PUBLISH STAGE
         # --------------------------------------------------------------
         publish_result = None
-        if auto_publish:
+        if auto_publish and not human_review_pending:
             if on_stage_progress:
                 on_stage_progress("PUBLISH")
             try:
@@ -1359,7 +1391,7 @@ class PipelineOrchestrator:
 
         return {
             "job_id": job_id,
-            "status": "success",
+            "status": "needs_review" if human_review_pending else "success",
             "media_path": str(final_mp4),
             "media_checksum": render_checksum,
             "qa_status": qa_report.status.value if qa_report else "UNKNOWN",

@@ -40,20 +40,14 @@ function VideoPreview({ artifact }: { artifact: ArtifactEntry | null }) {
 }
 
 function ClaimsVerificationPanel({ inspect }: { inspect: JobInspect }) {
-  const manifest = (inspect.manifest ?? inspect.job ?? {}) as Record<string, unknown>;
-  const claims = (() => {
-    try {
-      const raw = manifest.verified_claims_json ?? manifest.claims_json;
-      if (typeof raw === 'string') return JSON.parse(raw) as { claim: string; verified: boolean }[];
-    } catch { /* ignore */ }
-    return null;
-  })();
+  const report = inspect.claim_verification;
+  const claims = report?.scenes ?? [];
 
-  if (!claims || claims.length === 0) {
+  if (!report || claims.length === 0) {
     return (
       <div className='card'>
         <div className='card-header'><span>Verified Claims</span></div>
-        <div className='card-body muted'>Claim verification data not available for this job.</div>
+        <div className='card-body muted'>Factual verification is unavailable. Publishing remains blocked until QA produces a verification report.</div>
       </div>
     );
   }
@@ -61,14 +55,20 @@ function ClaimsVerificationPanel({ inspect }: { inspect: JobInspect }) {
   return (
     <div className='card'>
       <div className='card-header'>
-        <span>Verified Claims</span>
-        <span className='muted small'>{claims.filter(c => c.verified).length}/{claims.length} verified</span>
+        <span>Factual Verification</span>
+        <span className='muted small'>{report.verified ?? 0}/{claims.length} verified · {report.status ?? 'REVIEW_REQUIRED'}</span>
       </div>
       <ul className='plain-list' style={{ padding: '12px 16px' }}>
         {claims.map((c, i) => (
           <li key={i} style={{ padding: '4px 0', display: 'flex', gap: '8px', alignItems: 'flex-start' }}>
-            <span style={{ color: c.verified ? '#2ec27e' : '#e5484d', flexShrink: 0 }}>{c.verified ? '\u2713' : '\u2717'}</span>
-            <span>{c.claim}</span>
+            <span style={{ color: c.status === 'VERIFIED' ? '#2ec27e' : '#e5484d', flexShrink: 0 }}>{c.status === 'VERIFIED' ? '\u2713' : '\u26A0'}</span>
+            <span>
+              <strong>{c.status ?? 'UNVERIFIED'}</strong> · {c.claim ?? c.scene_id ?? 'Narration claim'}
+              {c.source && c.source !== 'NONE' && <div className='muted small'>Source: {c.source}</div>}
+              {c.evidence && <div className='muted small'>Evidence: {c.evidence}</div>}
+              {!!c.conflicts?.length && <div className='err-type small'>Conflict: {c.conflicts.join('; ')}</div>}
+              {c.qualification_required && <div className='muted small'>Needs qualified wording</div>}
+            </span>
           </li>
         ))}
       </ul>
@@ -93,16 +93,24 @@ export default function BeforePublishReviewScreen({
   isRegenerating,
 }: {
   inspect: JobInspect;
-  onApprove: () => void;
+  onApprove: (claimsReviewed: boolean, creativeReviewed: boolean) => void;
   onRegenerate: (code: string) => void;
   isApproving: boolean;
   isRegenerating: boolean;
 }) {
   const [regenConfirm, setRegenConfirm] = useState<string | null>(null);
+  const [claimsReviewed, setClaimsReviewed] = useState(false);
+  const [creativeReviewed, setCreativeReviewed] = useState(false);
   const artifacts = inspect.artifacts ?? [];
   const mediaArtifact = artifacts.find(a => a.artifact_type === 'media' || String(a.artifact_path ?? a.file_path ?? '').endsWith('.mp4')) ?? null;
   const qaReports = inspect.qa_reports ?? [];
   const latestQa = qaReports[qaReports.length - 1] ?? null;
+  const humanReviewApproved = inspect.publish_readiness?.human_review_approved === true;
+  const claimsNeedReview = inspect.claim_verification?.status === 'REVIEW_REQUIRED' && !humanReviewApproved;
+  const creativeNeedsReview = inspect.publish_readiness?.creative_review_required === true && !humanReviewApproved;
+  const claimsHaveHardConflict = (inspect.claim_verification?.scenes ?? []).some(
+    claim => claim.status === 'CONFLICTING' || claim.status === 'REJECTED',
+  );
 
   const handleRegen = (code: string) => {
     if (regenConfirm !== code) { setRegenConfirm(code); setTimeout(() => setRegenConfirm(null), 3500); return; }
@@ -116,7 +124,7 @@ export default function BeforePublishReviewScreen({
         <div>
           <h2 className='page-title' id='before-publish-title'>Before Publish Review</h2>
           <p className='muted small'>
-            Review the rendered video, QA scorecard, and verified claims before publishing.
+            Review the rendered video, QA scorecard, and factual evidence before publishing.
             This is a mandatory gate — approvals cannot be undone.
           </p>
         </div>
@@ -124,10 +132,10 @@ export default function BeforePublishReviewScreen({
           <button
             id='btn-approve-publish'
             className='primary-btn'
-            onClick={onApprove}
-            disabled={isApproving || isRegenerating}
+            onClick={() => onApprove(claimsReviewed, creativeReviewed)}
+            disabled={isApproving || isRegenerating || humanReviewApproved || claimsHaveHardConflict || (claimsNeedReview && !claimsReviewed) || (creativeNeedsReview && !creativeReviewed)}
           >
-            {isApproving ? 'Approving\u2026' : '\u2713 Approve & Publish'}
+            {isApproving ? 'Approving\u2026' : '\u2713 Approve for Publish'}
           </button>
         </div>
       </div>
@@ -136,6 +144,20 @@ export default function BeforePublishReviewScreen({
         <div className='before-publish-left'>
           <VideoPreview artifact={mediaArtifact} />
           <ClaimsVerificationPanel inspect={inspect} />
+          {claimsNeedReview && !claimsHaveHardConflict && (
+            <label className='card-body' style={{ display: 'flex', gap: '8px', alignItems: 'flex-start', marginTop: '10px' }}>
+              <input type='checkbox' checked={claimsReviewed} onChange={event => setClaimsReviewed(event.target.checked)} />
+              <span>I reviewed the unverified claims and supporting evidence for this video.</span>
+            </label>
+          )}
+          {creativeNeedsReview && (
+            <label className='card-body' style={{ display: 'flex', gap: '8px', alignItems: 'flex-start', marginTop: '10px' }}>
+              <input type='checkbox' checked={creativeReviewed} onChange={event => setCreativeReviewed(event.target.checked)} />
+              <span>I reviewed the rendered video and creative QA findings.</span>
+            </label>
+          )}
+          {humanReviewApproved && <p className='muted small'>Review approved by {inspect.publish_readiness?.human_review_approved_by ?? 'operator'}.</p>}
+          {claimsHaveHardConflict && <p className='err-type small'>Resolve conflicting or rejected claims before approval. Human review cannot override this block.</p>}
         </div>
         <div className='before-publish-right'>
           {latestQa ? (
