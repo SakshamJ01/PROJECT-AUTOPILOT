@@ -1492,8 +1492,11 @@ def run_publish_approve(
     decided_by: str = "operator",
     notes: str = "",
     output_json: bool = False,
+    claims_reviewed: bool = False,
+    creative_reviewed: bool = False,
 ) -> int:
     import json
+    from autopilot.core.artifacts import job_artifact_dir
     from autopilot.db.manager import DBManager
 
     if not job_id:
@@ -1507,6 +1510,41 @@ def run_publish_approve(
         return 1
 
     checksum = _publish_media_checksum(job_id)
+
+    # The composite publish-readiness gate can hold a job for explicit human
+    # review. Such a hold is only cleared by a checksum-bound operator review,
+    # so mirror the desktop contract here rather than silently recording a DB
+    # approval that the publisher's gate would still block.
+    artifacts_dir = CONFIG.get_artifacts_dir()
+    try:
+        readiness_path = job_artifact_dir(job_id, artifacts_dir) / "qa" / "publish_readiness.json"
+        readiness = json.loads(readiness_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        readiness = {}
+    factual_review_requested = bool(readiness.get("factual_review_required"))
+    creative_review_requested = bool(readiness.get("creative_review_required"))
+    human_review_requested = factual_review_requested or creative_review_requested
+    if factual_review_requested and not claims_reviewed:
+        print(
+            "Error: This job has a factual review hold. Re-run with --claims-reviewed "
+            "to confirm the factual claims were reviewed.",
+            file=sys.stderr,
+        )
+        return 1
+    if creative_review_requested and not creative_reviewed:
+        print(
+            "Error: This job has a creative review hold. Re-run with --creative-reviewed "
+            "to confirm creative QA was reviewed.",
+            file=sys.stderr,
+        )
+        return 1
+    if human_review_requested and not checksum:
+        print(
+            "Error: Cannot approve human review without a current rendered video.",
+            file=sys.stderr,
+        )
+        return 1
+
     if db.get_publish_approval(job_id) is None:
         db.create_publish_approval(
             job_id=job_id,
@@ -1526,6 +1564,31 @@ def run_publish_approve(
         print(f"Error: Failed to approve publication for job '{job_id}'.", file=sys.stderr)
         return 1
 
+    if human_review_requested:
+        from autopilot.core.publish_readiness import approve_factual_human_review
+
+        try:
+            approve_factual_human_review(
+                job_id=job_id,
+                media_checksum=checksum,
+                reviewed_by=decided_by or "operator",
+                artifacts_dir=artifacts_dir,
+                creative_reviewed=creative_reviewed,
+            )
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        db.update_job_status(job_id, "APPROVED")
+        db.log_event(
+            job_id,
+            "NEEDS_REVIEW",
+            "APPROVED",
+            reason=(
+                f"Factual review approved by {decided_by or 'operator'} "
+                f"for checksum {checksum}"
+            ),
+        )
+
     if output_json:
         print(json.dumps({
             "job_id": job_id,
@@ -1534,6 +1597,8 @@ def run_publish_approve(
             "decided_by": approval.get("decided_by"),
             "decided_at": approval.get("decided_at"),
             "media_checksum_sha256": checksum,
+            "claims_reviewed": bool(claims_reviewed),
+            "creative_reviewed": bool(creative_reviewed),
         }, indent=2, default=str))
     else:
         print(f"JOB:                 {job_id}")
@@ -3351,6 +3416,16 @@ def build_parser():
                                     help=argparse.SUPPRESS)
     sub_parser_publish.add_argument("--by", default=None, help=argparse.SUPPRESS)
     sub_parser_publish.add_argument("--notes", default=None, help=argparse.SUPPRESS)
+    sub_parser_publish.add_argument(
+        "--claims-reviewed",
+        action="store_true",
+        help="Confirm factual claims were reviewed (required to clear a factual review hold)",
+    )
+    sub_parser_publish.add_argument(
+        "--creative-reviewed",
+        action="store_true",
+        help="Confirm creative QA was reviewed (required to clear a creative review hold)",
+    )
 
     sub_parser_ytauth = sub.add_parser("youtube-auth", help="Perform interactive Google OAuth authorization for YouTube publishing")
     sub_parser_ytauth.add_argument("--secrets", default=None, help="Path to client_secret.json (optional override)")
@@ -3728,6 +3803,8 @@ def main() -> int:
                     decided_by=args.by or "operator",
                     notes=args.notes or "",
                     output_json=args.json,
+                    claims_reviewed=getattr(args, "claims_reviewed", False),
+                    creative_reviewed=getattr(args, "creative_reviewed", False),
                 )
             if action == "reject":
                 return run_publish_reject(
