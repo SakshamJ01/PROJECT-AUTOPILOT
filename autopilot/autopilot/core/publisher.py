@@ -716,10 +716,12 @@ class PublishingEngine:
         # Verify media checksum matches QA receipt
         qa_checksum = qa_receipt.get("media_checksum_sha256")
         if qa_checksum is None:
-            # P1-01 fix: DB-loaded receipt may lack checksum. Warn instead of silently bypassing.
+            # Deferred hard block (see step 7.4 below): warn here, but the publish
+            # itself is refused later for non-dry-runs so that an idempotent
+            # retry of an already-published video can still short-circuit.
             _logger = StructuredLogger(job_id=job_id, stage="publish")
             _logger.warning("qa_receipt_missing_checksum", {
-                "note": "QA receipt loaded from DB fallback has no checksum; gate is advisory only.",
+                "note": "QA receipt has no checksum; a non-dry-run publish will be refused.",
             })
         if qa_checksum and media_checksum != qa_checksum:
             err = PublishError(
@@ -1020,6 +1022,33 @@ class PublishingEngine:
                         attempts=[],
                     )
 
+        # 7.4 Mandatory checksum binding for real publishes. Placed after the
+        # idempotency short-circuit so a genuine retry of an already-published
+        # job still succeeds, while a fresh upload with an unverifiable receipt
+        # is refused. Previously this only warned (advisory-only gate).
+        if qa_checksum is None and not is_dry_run:
+            err = PublishError(
+                error_code="CHECKSUM_MISSING",
+                message=(
+                    "QA receipt contains no media checksum; refusing to publish "
+                    "unverifiable media. Re-run QA to regenerate a checksum-bound receipt."
+                ),
+                retryable=False,
+            )
+            db.update_job_status(job_id, WorkflowState.FAILED_PUBLISH.value)
+            db.log_event(
+                job_id,
+                WorkflowState.APPROVED.value,
+                WorkflowState.FAILED_PUBLISH.value,
+                reason="QA receipt missing media checksum",
+            )
+            return PublishResult(
+                success=False,
+                status=PublishStatus.BLOCKED_QA,
+                error=err,
+                attempts=[],
+            )
+
         # 7.5 Protected publishing: enforcement of the operator approval gate.
         # Dry runs and CC-autonomous pre-authorized publishes with an existing
         # approved approval bypass nothing — dry runs only, since they never touch
@@ -1106,11 +1135,34 @@ class PublishingEngine:
         if active_provider is None:
             active_provider = REGISTRY.get(platform)
             if active_provider is None:
-                if str(platform).lower().startswith("postiz"):
+                platform_l = str(platform).lower()
+                if platform_l.startswith("postiz"):
                     from autopilot.providers.postiz_publisher import PostizPublisher
                     active_provider = PostizPublisher(config=self.config)
-                else:
+                elif platform_l == "youtube":
                     active_provider = YouTubePublisher(config=self.config)
+                else:
+                    # Previously any unknown platform silently became YouTube.
+                    err = PublishError(
+                        error_code="UNKNOWN_PLATFORM",
+                        message=(
+                            f"Unknown publish platform {platform!r}. Supported: youtube, postiz*. "
+                            "Refusing to silently fall back to YouTube."
+                        ),
+                        retryable=False,
+                    )
+                    db.update_job_status(job_id, WorkflowState.FAILED_PUBLISH.value)
+                    db.log_event(
+                        job_id,
+                        WorkflowState.PUBLISHING.value,
+                        WorkflowState.FAILED_PUBLISH.value,
+                        reason=f"Unknown platform {platform!r}",
+                    )
+                    return PublishResult(
+                        success=False,
+                        status=PublishStatus.FAILED,
+                        error=err,
+                    )
 
         if hasattr(active_provider, "publish"):
             result = active_provider.publish(request)

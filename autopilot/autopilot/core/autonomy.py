@@ -974,19 +974,25 @@ class AutonomyEngine:
             max_regeneration_attempts=active_policy.max_regeneration_attempts,
         )
 
-        qa_status = pipe_res.get("status", "UNKNOWN")
-        reported_qa = pipe_res.get("qa_status", "UNKNOWN")
+        qa_status = str(pipe_res.get("status") or "UNKNOWN")
+        reported_qa = str(pipe_res.get("qa_status") or "UNKNOWN")
         qa_report = pipe_res.get("qa_report")
 
         # 3. Approval / Publishing Boundary
         pub_result = None
         approval_status = "none"
-        is_success = (
-            qa_status.upper() in ("READY", "APPROVED", "SUCCESS", "PASS", "WARN")
-            or reported_qa.upper() in ("PASS", "WARN", "APPROVED", "READY")
-            or pipe_res.get("publish_allowed", False)
+        pipeline_status = qa_status.strip().upper()
+        reported_qa_u = reported_qa.strip().upper()
+        # A run that explicitly asked for human review must never be treated as
+        # an auto-success just because QA happened to report PASS.
+        needs_review = pipeline_status in ("NEEDS_REVIEW", "REVIEW_REQUIRED")
+        publish_allowed = bool(pipe_res.get("publish_allowed", False))
+        is_success = publish_allowed or (
+            not needs_review
+            and pipeline_status in ("SUCCESS", "READY", "APPROVED", "PASS", "WARN")
+            and reported_qa_u in ("PASS", "WARN", "APPROVED", "READY")
         )
-        if is_success:
+        if is_success or needs_review:
             if mode == "assisted":
                 # Require human approval
                 approval_id = self.db.create_publish_approval(
@@ -1003,7 +1009,13 @@ class AutonomyEngine:
                 # record already exists (i.e. this run merely executes it).
                 pre_auth = self.db.get_publish_approval(job_id)
                 switch_on = effective_auto_publish(self.config, self.db)
-                if switch_on and pre_auth and pre_auth.get("status") == "approved":
+                if (
+                    switch_on
+                    and is_success
+                    and not needs_review
+                    and pre_auth
+                    and pre_auth.get("status") == "approved"
+                ):
                     from autopilot.core.publisher import PublishingEngine
                     pe = PublishingEngine(self.config, self.db)
                     pub_result = pe.publish_job(

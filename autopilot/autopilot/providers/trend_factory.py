@@ -22,6 +22,12 @@ def get_trend_provider(name: Optional[str] = None) -> TrendProvider:
         from autopilot.providers.reddit_trend import RedditTrendProvider
 
         return RedditTrendProvider()
-    from autopilot.providers.mock_trend import MockTrendProvider
+    if name_clean in ("mock", "mock_trend", "none", ""):
+        from autopilot.providers.mock_trend import MockTrendProvider
 
-    return MockTrendProvider()
+        return MockTrendProvider()
+    # Fail loud: an unknown trend provider name used to silently resolve to the
+    # mock provider, hiding misconfiguration from the operator.
+    raise ValueError(
+        f"Unknown trend provider {name!r}. Known providers: 'mock' (default), 'reddit'."
+    )

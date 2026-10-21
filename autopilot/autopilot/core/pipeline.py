@@ -446,11 +446,23 @@ class PipelineOrchestrator:
             try:
                 script = ScriptDocument.model_validate_json(sp_path.read_text(encoding="utf-8"))
                 package = ContentPackage.model_validate_json(pkg_path.read_text(encoding="utf-8"))
-                # Invalidate if requested LLM provider is incompatible with existing artifact
-                if llm_provider == "openai_compatible" and getattr(package.provenance, "provider", "") != "openai_compatible":
-                    script = None
-                    package = None
-                elif llm_provider == "mock" and getattr(package.provenance, "provider", "") != "mock_script":
+                # Invalidate when the recorded LLM provider is incompatible with
+                # the requested one. This used to special-case only
+                # openai_compatible/mock, so a mock script resumed under a real
+                # provider (gemini/atria/openrouter) and could be published as if
+                # it were genuine. Now any mock<->real transition, or a mismatch
+                # between two named real providers, forces regeneration.
+                _mock_llm_names = {"mock", "mock_script", "none", ""}
+                recorded_provider = str(getattr(package.provenance, "provider", "") or "").strip().lower()
+                requested_provider = str(llm_provider or "").strip().lower()
+                requested_mock = requested_provider in _mock_llm_names
+                recorded_mock = recorded_provider in _mock_llm_names
+                provider_mismatch = requested_mock != recorded_mock or (
+                    not requested_mock
+                    and bool(recorded_provider)
+                    and recorded_provider != requested_provider
+                )
+                if provider_mismatch:
                     script = None
                     package = None
                 elif channel_id != "default" and script.generation_metadata and script.generation_metadata.get("channel_id") and script.generation_metadata.get("channel_id") != channel_id:
@@ -528,6 +540,13 @@ class PipelineOrchestrator:
 
                         sp_path.unlink(missing_ok=True)
                         pkg_path.unlink(missing_ok=True)
+                        # The regenerated script invalidates any prior render.
+                        # Deleting only the script artefacts let the RENDER
+                        # resume logic reuse the old final.mp4 (duration match)
+                        # so the published video kept the stale narration.
+                        stale_render_dir = art_dir / "render"
+                        (stale_render_dir / "final.mp4").unlink(missing_ok=True)
+                        (stale_render_dir / "render_plan.json").unlink(missing_ok=True)
 
                         return self.run_pipeline(
                             job_id=job_id,
@@ -633,13 +652,21 @@ class PipelineOrchestrator:
                 if not p.exists() or p.stat().st_size == 0:
                     voice_valid = False
                     break
-                # Provider resume validation: ensure mock audio is not resumed when Kokoro is requested
-                if tts_provider == "kokoro":
+                # Provider resume validation: never resume audio synthesized by a
+                # different provider than the one requested (e.g. mock audio
+                # resumed under kokoro). Previously only kokoro was checked.
+                if str(tts_provider or "").strip().lower() not in ("", "mock", "none"):
                     prov_p = p.with_suffix(p.suffix + ".provenance.json")
                     if prov_p.exists():
                         try:
                             p_info = json.loads(prov_p.read_text(encoding="utf-8"))
-                            if p_info.get("provider") != "kokoro":
+                            recorded_tts = str(p_info.get("provider") or "").strip().lower()
+                            requested_tts = str(tts_provider).strip().lower()
+                            same_provider = recorded_tts == requested_tts or {
+                                recorded_tts,
+                                requested_tts,
+                            } <= {"sapi", "windows_sapi"}
+                            if recorded_tts and not same_provider:
                                 voice_valid = False
                                 break
                         except Exception:
@@ -773,6 +800,11 @@ class PipelineOrchestrator:
                 pkg_path.unlink(missing_ok=True)
                 for v_art in voice_artifacts:
                     Path(v_art).unlink(missing_ok=True)
+                # Regenerated narration makes any existing render stale; drop it
+                # so the RENDER stage cannot resume onto the old final.mp4.
+                stale_render_dir = art_dir / "render"
+                (stale_render_dir / "final.mp4").unlink(missing_ok=True)
+                (stale_render_dir / "render_plan.json").unlink(missing_ok=True)
 
                 regen_meta = {
                     "attempt": attempt_number,
@@ -841,11 +873,22 @@ class PipelineOrchestrator:
                 if not p.exists() or p.stat().st_size == 0:
                     all_exist = False
                     break
-                if asset_provider == "openverse":
+                # Invalidate when the recorded asset provider differs from the
+                # requested one (e.g. switching pexels -> pixabay). Fallback
+                # providers (infographics/local/generated) are always allowed so
+                # a resume never re-fetches assets that only exist because a
+                # primary provider failed.
+                requested_asset_provider = str(asset_provider or "").strip().lower()
+                if requested_asset_provider not in ("", "mock", "local", "none"):
                     prov_raw = da.get("provenance_json") or "{}"
                     try:
                         p_data = json.loads(prov_raw)
-                        if p_data.get("provider") != "openverse":
+                        recorded_asset_provider = str(p_data.get("provider") or "").strip().lower()
+                        if (
+                            recorded_asset_provider
+                            and recorded_asset_provider not in ("infographics", "local", "generated")
+                            and recorded_asset_provider != requested_asset_provider
+                        ):
                             all_exist = False
                             break
                     except Exception:

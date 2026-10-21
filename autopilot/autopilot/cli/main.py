@@ -3288,9 +3288,11 @@ def build_parser():
     sub_parser.add_argument("--channel", default="default", help="Channel profile ID or path (e.g. science_shorts, history_shorts, tech_shorts)")
     sub_parser.add_argument("--policy", default="local_only", choices=["local_only", "cheap_first", "quality_first", "ollama", "gemini", "openrouter", "mock"], help="Production policy tier")
     sub_parser.add_argument("--profile", default="short_vertical", choices=["short_vertical"], help="Content profile")
-    sub_parser.add_argument("--tts-provider", default=CONFIG.provider_default_tts, choices=["none", "mock", "kokoro", "edge_tts", "sapi", "windows_sapi"], help="TTS provider (default: configured production TTS = edge_tts; mock = synthetic audio)")
-    sub_parser.add_argument("--llm-provider", default="atria", choices=["atria", "mock", "ollama", "gemini", "openrouter", "openai_compatible"], help="LLM provider (atria, mock, ollama, gemini, openrouter, openai_compatible)")
-    sub_parser.add_argument("--research-provider", default="mock_search", choices=["local", "mock_search", "wikipedia", "crawl4ai", "combined"], help="Research provider")
+    # default=None so the dispatcher can tell "user passed this flag" apart
+    # from "argparse default". The real default is applied in the dispatcher.
+    sub_parser.add_argument("--tts-provider", default=None, choices=["none", "mock", "kokoro", "edge_tts", "sapi", "windows_sapi"], help="TTS provider (default: configured production TTS = edge_tts; mock = synthetic audio)")
+    sub_parser.add_argument("--llm-provider", default=None, choices=["atria", "mock", "ollama", "gemini", "openrouter", "openai_compatible"], help="LLM provider (atria, mock, ollama, gemini, openrouter, openai_compatible)")
+    sub_parser.add_argument("--research-provider", default=None, choices=["local", "mock_search", "wikipedia", "crawl4ai", "combined"], help="Research provider")
     sub_parser.add_argument("--asset-provider", default="pexels", choices=["local", "openverse", "pexels", "pixabay", "archive_org", "wikimedia_commons"], help="Asset provider (default pexels; real stock video)")
     sub_parser.add_argument("--production-engine", default="ffmpeg", choices=["moneyprinterturbo", "ffmpeg"], help="Production engine (default: ffmpeg = verified assets + real TTS + word-synced kinetic captions; moneyprinterturbo = opt-in, re-fetches its own footage/voice)")
     sub_parser.add_argument("--render", action="store_true", help="Continue through asset acquisition and rendering immediately")
@@ -3302,9 +3304,9 @@ def build_parser():
     sub_parser_run.add_argument("--channel", default="default", help="Channel profile ID or path")
     sub_parser_run.add_argument("--policy", default="local_only", choices=["local_only", "cheap_first", "quality_first", "ollama", "gemini", "openrouter", "mock"], help="Production policy tier")
     sub_parser_run.add_argument("--profile", default="short_vertical", choices=["short_vertical"], help="Content profile")
-    sub_parser_run.add_argument("--tts-provider", default=CONFIG.provider_default_tts, choices=["none", "mock", "kokoro", "edge_tts", "sapi", "windows_sapi"], help="TTS provider")
-    sub_parser_run.add_argument("--llm-provider", default="atria", choices=["atria", "mock", "ollama", "gemini", "openrouter", "openai_compatible"], help="LLM provider")
-    sub_parser_run.add_argument("--research-provider", default="mock_search", choices=["local", "mock_search", "wikipedia", "crawl4ai", "combined"], help="Research provider")
+    sub_parser_run.add_argument("--tts-provider", default=None, choices=["none", "mock", "kokoro", "edge_tts", "sapi", "windows_sapi"], help="TTS provider")
+    sub_parser_run.add_argument("--llm-provider", default=None, choices=["atria", "mock", "ollama", "gemini", "openrouter", "openai_compatible"], help="LLM provider")
+    sub_parser_run.add_argument("--research-provider", default=None, choices=["local", "mock_search", "wikipedia", "crawl4ai", "combined"], help="Research provider")
     sub_parser_run.add_argument("--asset-provider", default="pexels", choices=["local", "openverse", "pexels", "pixabay", "archive_org", "wikimedia_commons"], help="Asset provider")
     sub_parser_run.add_argument("--production-engine", default="ffmpeg", choices=["moneyprinterturbo", "ffmpeg"], help="Production engine")
     sub_parser_run.add_argument("--render", action="store_true", help="Continue through asset acquisition and rendering immediately")
@@ -3612,19 +3614,23 @@ def main() -> int:
         return run_bgm(args)
     elif args.command in ("produce", "run"):
         policy = getattr(args, "policy", "local_only")
-        raw_llm = args.llm_provider
-        raw_research = args.research_provider
-        raw_tts = args.tts_provider
+        raw_llm = getattr(args, "llm_provider", None)
+        raw_research = getattr(args, "research_provider", None)
+        raw_tts = getattr(args, "tts_provider", None)
 
-        # Determine which flags the user set explicitly (vs. argparse defaults).
-        # argparse doesn't expose this directly, so we compare against the
-        # hardcoded defaults for the subparser.
-        _DEFAULT_LLM = "mock"
-        _DEFAULT_RESEARCH = "mock_search"
-        _DEFAULT_TTS = "none"
-        llm_explicit = (raw_llm != _DEFAULT_LLM)
-        research_explicit = (raw_research != _DEFAULT_RESEARCH)
-        tts_explicit = (raw_tts != _DEFAULT_TTS)
+        # argparse defaults are None, so presence == the user passed the flag.
+        # (The old hardcoded-default comparison made llm_explicit always True
+        # and research_explicit always False, so explicit mock requests were
+        # silently accepted instead of failing closed under strict policies.)
+        llm_explicit = raw_llm is not None
+        research_explicit = raw_research is not None
+        tts_explicit = raw_tts is not None
+        if raw_llm is None:
+            raw_llm = "atria"
+        if raw_research is None:
+            raw_research = "mock_search"
+        if raw_tts is None:
+            raw_tts = CONFIG.provider_default_tts
 
         try:
             resolved_llm, resolved_research, resolved_tts, resolved_engine = resolve_providers_for_policy(

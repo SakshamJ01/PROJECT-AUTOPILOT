@@ -134,11 +134,24 @@ class BatchProcessor:
                     policy=policy,
                     **call_kwargs,
                 )
-                job_summary["status"] = "succeeded"
+                # Only count the job as succeeded when the pipeline actually
+                # reports success. Previously any return from run_pipeline was
+                # recorded as "succeeded", masking BLOCK/needs-review outcomes.
                 job_summary["media_path"] = res.get("media_path")
                 job_summary["media_checksum"] = res.get("media_checksum")
                 job_summary["qa_status"] = res.get("qa_status")
-                succeeded += 1
+                res_status = str(res.get("status") or "").strip().lower()
+                if res_status in ("success", "approved", "ready", "pass", "warn"):
+                    job_summary["status"] = "succeeded"
+                    succeeded += 1
+                elif res_status in ("needs_review", "review_required", "blocked", "qa_blocked"):
+                    job_summary["status"] = "needs_review"
+                    job_summary["error"] = job_summary.get("error") or f"Pipeline status: {res_status}"
+                    needs_review += 1
+                else:
+                    job_summary["status"] = "failed"
+                    job_summary["error"] = job_summary.get("error") or f"Pipeline status: {res_status or 'unknown'}"
+                    failed += 1
             except PipelineError as p_err:
                 job_summary["error"] = p_err.message
                 job_summary["error_category"] = p_err.category

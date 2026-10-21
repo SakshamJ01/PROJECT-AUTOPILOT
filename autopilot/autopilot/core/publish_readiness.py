@@ -56,7 +56,14 @@ class PublishReadinessDecision(BaseModel):
 def _iter_score_items(report: CreativeQAReport) -> List[Any]:
     """Return every CreativeQAScoreItem dimension carried by the report."""
     items: List[Any] = []
-    fields = report.model_fields.keys() if hasattr(report, "model_fields") else report.__fields__.keys()
+    # Access model_fields on the class, not the instance (Pydantic >=2.11 warns
+    # on instance access and removes it in V3).
+    model_cls = type(report)
+    fields = (
+        model_cls.model_fields.keys()
+        if hasattr(model_cls, "model_fields")
+        else report.__fields__.keys()
+    )
     for field in fields:
         value = getattr(report, field, None)
         if value is None or isinstance(value, (str, int, float, bool, list, dict)):

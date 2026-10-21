@@ -519,9 +519,30 @@ class CreativeQAEngine:
                         sem = getattr(prov, "semantic_score", None)
             if sem is None:
                 # No recorded semantic evidence: this is only acceptable when
-                # a deliberate generated visual was used.
-                a_type = str(getattr(asset, "asset_type", "image") or "image").lower()
-                if "infograph" in a_type or "generat" in a_type:
+                # a deliberate generated visual was used. SelectedAsset has no
+                # ``asset_type`` field, so read the provider/type from
+                # provenance (and fall back to media_type) instead of a
+                # getattr() that always returned "image" and killed the hatch.
+                prov_raw = getattr(asset, "provenance", None) if asset is not None else None
+                prov_map = prov_raw if isinstance(prov_raw, dict) else {}
+                provider_name = str(
+                    prov_map.get("provider")
+                    or getattr(prov_raw, "provider", "")
+                    or ""
+                ).lower()
+                asset_type = str(
+                    prov_map.get("asset_type")
+                    or getattr(prov_raw, "asset_type", "")
+                    or getattr(asset, "asset_type", "")
+                    or getattr(asset, "media_type", "")
+                    or ""
+                ).lower()
+                if (
+                    "infograph" in asset_type
+                    or "generat" in asset_type
+                    or "infograph" in provider_name
+                    or "generat" in provider_name
+                ):
                     scores.append(80.0)
                 else:
                     scores.append(35.0)
@@ -647,6 +668,7 @@ class CreativeQAEngine:
         score = 100.0
         deductions = []
         breakdown = {}
+        framing_evaluated = 0
 
         for s in timeline.scenes:
             s_id = getattr(s, "scene_id", f"scene_{getattr(s, 'scene_index', 0)}")
@@ -656,6 +678,7 @@ class CreativeQAEngine:
 
             collision = False
             if cf and cplan:
+                framing_evaluated += 1
                 saliency_y = getattr(cf, "saliency_y", 0.5)
                 pos = str(getattr(cplan, "position", "LOWER")).upper()
                 # Check collision: if subject is centered/lower and caption is also centered/lower
@@ -673,6 +696,14 @@ class CreativeQAEngine:
                 "saliency_y": getattr(cf, "saliency_y", None) if cf else None,
                 "collision": collision,
             }
+
+        if timeline.scenes and framing_evaluated == 0:
+            # No crop-framing evidence for any scene: we cannot verify caption
+            # collision, so do not report a false 100/PASS.
+            score = min(score, 70.0)
+            deductions.append(
+                "No crop-framing data available; caption safe-zone placement could not be verified"
+            )
 
         score = max(0.0, min(100.0, score))
         status = self._status_from_score(score, target=90.0, warn=75.0, block=60.0)
@@ -692,11 +723,36 @@ class CreativeQAEngine:
 
     def _evaluate_narrative_coherence(self, timeline: MaterializedTimeline) -> CreativeQAScoreItem:
         """Evaluate narrative arc progression (HOOK -> REVEAL/EXPLANATION -> CTA)."""
-        score = 95.0
-        evidence = "Coherent narrative structure aligned with template intent."
-        if not timeline.scenes or len(timeline.scenes) < 2:
+        scenes = list(timeline.scenes or [])
+        if len(scenes) < 2:
             score = 60.0
             evidence = "Timeline has fewer than 2 scenes, limiting narrative progression."
+        else:
+            # Evidence-based scoring instead of a hardcoded 95: deduct for a
+            # missing hook, a missing closing/CTA, empty narration, and a too
+            # short arc. A clean HOOK->BODY->CLOSE timeline still scores 95.
+            score = 95.0
+            notes = []
+            narrations = [str(getattr(s, "narration", "") or "").strip() for s in scenes]
+            empty_scenes = sum(1 for n in narrations if not n)
+            if not narrations[0]:
+                score -= 20.0
+                notes.append("opening scene carries no hook narration")
+            if not narrations[-1]:
+                score -= 15.0
+                notes.append("closing scene carries no CTA narration")
+            if empty_scenes:
+                score -= min(30.0, empty_scenes * 8.0)
+                notes.append(f"{empty_scenes} scene(s) missing narration")
+            if len(scenes) < 3:
+                score -= 10.0
+                notes.append("fewer than 3 scenes limits the HOOK->BODY->CLOSE arc")
+            score = max(0.0, min(100.0, score))
+            evidence = (
+                "; ".join(notes)
+                if notes
+                else "Coherent HOOK -> BODY -> CLOSE arc with narration in every scene."
+            )
 
         status = self._status_from_score(score, target=85.0, warn=70.0, block=55.0)
         return CreativeQAScoreItem(

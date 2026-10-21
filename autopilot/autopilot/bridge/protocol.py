@@ -37,6 +37,12 @@ _SENSITIVE_KEY_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _BEARER_PATTERN = re.compile(r"Bearer\s+[A-Za-z0-9_\-\.~+/]+=*", re.IGNORECASE)
+# Redact inline ``api_key=...`` / ``token: ...`` / ``secret=...`` assignments that
+# are embedded in free-form strings (not only the Authorization: Bearer form).
+_SECRET_ASSIGNMENT_PATTERN = re.compile(
+    r"(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password)"
+    r"(\s*[=:]\s*)(?:Bearer\s+)?[^\s,;\"'}]+"
+)
 
 
 # Keys that explicitly describe presence or boolean state and never contain secrets
@@ -71,7 +77,9 @@ def redact_sensitive(data: Any) -> Any:
     elif isinstance(data, set):
         return {redact_sensitive(item) for item in data}
     elif isinstance(data, str):
-        return _BEARER_PATTERN.sub("Bearer [REDACTED]", data)
+        redacted = _BEARER_PATTERN.sub("Bearer [REDACTED]", data)
+        redacted = _SECRET_ASSIGNMENT_PATTERN.sub(r"\1\2[REDACTED]", redacted)
+        return redacted
     return data
 
 

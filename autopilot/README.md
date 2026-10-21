@@ -81,7 +81,7 @@ Failure states: `FAILED_RESEARCH`, `FAILED_SCRIPT`, `FAILED_ASSETS`, `FAILED_TTS
 
 ### Persistence
 
-SQLite (`artifacts/autopilot.db`, schema v7+): jobs, workflow_events, artifacts, errors, research, voice, assets, qa_runs/checks/findings/metrics, publish_records/attempts/approvals, queue_items, batch_manifests, analytics snapshots, autonomy runs/signals/proposals/strategies, channel profiles/versions/quotas.
+SQLite (`artifacts/autopilot.db`, schema v11): jobs, workflow_events, artifacts, errors, research, voice, assets, qa_runs/checks/findings/metrics, publish_records/attempts/approvals, queue_items, batch_manifests, analytics snapshots, autonomy runs/signals/proposals/strategies, channel profiles/versions/quotas.
 
 ---
 
@@ -101,7 +101,7 @@ Default cascade (`ASSET_PROVIDER_CASCADE`): `pexels,pixabay,openverse,archive_or
 
 **Pipeline per scene:** cascade search → deterministic scoring (keyword relevance, aspect, resolution, rights, duplicate avoidance) → rights gate → safe download (size limits, timeout, SHA-256, disk cache) → normalize to 1080×1920 9:16 → CLIP semantic verification (ViT-B-32, floor 0.21) → DB persistence.
 
-**Rights gate:** `VERIFIED` / `PARTIALLY_VERIFIED` pass; `UNKNOWN` / `REJECTED` block.
+**Rights gate:** `VERIFIED` passes. `PARTIALLY_VERIFIED` passes only when `RIGHTS_POLICY_ALLOW_PARTIAL=1` (default off, so it blocks). `UNKNOWN` / `REJECTED` always block.
 
 ---
 
@@ -116,7 +116,7 @@ Default cascade (`ASSET_PROVIDER_CASCADE`): `pexels,pixabay,openverse,archive_or
 | OpenAI-compatible | `--llm-provider openai_compatible` | `OPENAI_BASE_URL`, `OPENAI_MODEL`, key as needed |
 | Mock | `--llm-provider mock` | none (deterministic fixtures) |
 
-All providers parse into the canonical `ScriptDocument` (typed scenes, visual queries, narration, grounding provenance). `providers/structured_llm.py` enforces pydantic schemas with corrective retry; instructor (`.[structured]`) unlocks native structured mode but is not required. Secrets are redacted in logs and error traces. No silent provider/model fallback.
+All providers parse into the canonical `ScriptDocument` (typed scenes, visual queries, narration, grounding provenance). `providers/structured_llm.py` enforces pydantic schemas with corrective retry; instructor (`.[structured]`) unlocks native structured mode but is not required. Secrets are redacted in logs and error traces; an unknown provider/model name fails loudly instead of silently resolving to a mock.
 
 **Claim verification** cross-checks generated narration against research evidence; flagged claims are recorded and fail-soft (script continues with warnings).
 
@@ -348,7 +348,7 @@ No secrets are hardcoded, logged, or stored in JSON artifacts.
 ## Testing
 
 ```powershell
-# Full hermetic suite (1188 tests, 100% offline; live tests deselected by default)
+# Full hermetic suite (~1190 tests, 100% offline; live tests deselected by default)
 .venv\Scripts\python.exe -m pytest
 
 # Opt-in live network tests

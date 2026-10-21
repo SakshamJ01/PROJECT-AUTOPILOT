@@ -179,7 +179,25 @@ class LocalWorker:
             "attempt": item_dict.get("attempt_count", 1),
         })
 
-        # 3. Stage progress callback with lease renewal
+        # 3. Stage progress callback + independent lease heartbeat. A single long
+        # stage (e.g. RENDER) can outlast the lease, so renew on a timer too and
+        # stop a second worker from re-claiming the job mid-production.
+        import threading
+
+        stop_heartbeat = threading.Event()
+
+        def _lease_heartbeat() -> None:
+            interval = max(5.0, float(self.config.queue_lease_duration_seconds) / 3.0)
+            while not stop_heartbeat.wait(interval):
+                try:
+                    self.db.renew_lease(
+                        queue_id=queue_id,
+                        worker_id=self.worker_id,
+                        lease_duration_sec=self.config.queue_lease_duration_seconds,
+                    )
+                except Exception:
+                    pass
+
         def on_stage_progress(stage: str):
             self.db.update_queue_stage(queue_id=queue_id, stage=stage, status="running")
             self.db.renew_lease(
@@ -187,6 +205,13 @@ class LocalWorker:
                 worker_id=self.worker_id,
                 lease_duration_sec=self.config.queue_lease_duration_seconds,
             )
+
+        heartbeat = threading.Thread(
+            target=_lease_heartbeat,
+            name=f"lease-heartbeat-{queue_id}",
+            daemon=True,
+        )
+        heartbeat.start()
 
         # 4. Execute Pipeline
         try:
@@ -254,6 +279,9 @@ class LocalWorker:
                 backoff_base_sec=self.config.queue_retry_backoff_base_seconds,
             )
             return {"queue_id": queue_id, "job_id": job_id, "status": outcome, "error": str(exc)}
+
+        finally:
+            stop_heartbeat.set()
 
     def run(
         self,

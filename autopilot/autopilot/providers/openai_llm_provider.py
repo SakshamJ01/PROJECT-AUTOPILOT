@@ -88,6 +88,13 @@ def redact_api_key(text: str) -> str:
     text = re.sub(r"(Bearer\s+)[a-zA-Z0-9_\-\.]{6,}", r"\1[REDACTED]", text, flags=re.IGNORECASE)
     # Redact common API key prefixes (Google AI, OpenRouter, OpenAI)
     text = re.sub(r"(AIzaSy|sk-or-v1-|sk-)[a-zA-Z0-9_\-\.]{10,}", r"[REDACTED_KEY]", text)
+    # Redact inline secret assignments (api_key=..., token: ..., password=...)
+    text = re.sub(
+        r"(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password)"
+        r"(\s*[=:]\s*)(?:Bearer\s+)?[^\s,;\"'}]+",
+        r"\1\2[REDACTED]",
+        text,
+    )
     return text
 
 
@@ -775,12 +782,10 @@ class OpenAICompatibleLLMProvider(LLMProvider):
         """
         if explicit_api_key is not None:
             return explicit_api_key
-        return (
-            os.getenv("OPENAI_API_KEY")
-            or os.getenv("OPENROUTER_API_KEY")
-            or os.getenv("OPENROUTER_KEY")
-            or ""
-        )
+        # Only the OpenAI-compatible key is borrowed here. Never inherit the
+        # OpenRouter credential: a misconfigured base provider must not silently
+        # authenticate with a different service's key.
+        return os.getenv("OPENAI_API_KEY") or ""
 
     def _discover_available_models(self) -> list[str]:
         """Fetch list of available models from endpoint via /models or /api/tags."""

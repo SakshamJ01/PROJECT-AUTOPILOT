@@ -8,6 +8,8 @@ import re
 import json
 import shutil
 import hashlib
+import ipaddress
+import socket
 import tempfile
 import time
 import urllib.request
@@ -71,8 +73,47 @@ def sanitize_filename(name: str) -> str:
     return stem
 
 
+def _is_blocked_network_host(host: Optional[str]) -> bool:
+    """True when *host* resolves only to non-public addresses (SSRF guard).
+
+    Blocks localhost, RFC1918, loopback, link-local (including the cloud
+    metadata endpoint 169.254.169.254), reserved, multicast and unspecified
+    ranges. Any DNS failure is treated as blocked (fail closed).
+    """
+    if not host:
+        return True
+    host = host.strip().strip("[]")
+    if not host:
+        return True
+    lowered = host.lower().rstrip(".")
+    if lowered in {"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"}:
+        return True
+    try:
+        infos = socket.getaddrinfo(lowered, None)
+    except (socket.gaierror, UnicodeError, OSError):
+        return True
+    if not infos:
+        return True
+    for info in infos:
+        addr = str(info[4][0]).split("%", 1)[0]
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            return True
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        ):
+            return True
+    return False
+
+
 class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Custom redirect handler that enforces max redirect limit."""
+    """Custom redirect handler that enforces max redirect limit and SSRF blocks."""
     def __init__(self, max_redirects: int = 5):
         super().__init__()
         self.max_redirects = max_redirects
@@ -83,6 +124,24 @@ class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
         if self.redirect_count > self.max_redirects:
             raise urllib.error.HTTPError(
                 req.full_url, code, f"Exceeded max redirects ({self.max_redirects})", headers, fp
+            )
+        # Validate the redirect target too: a public URL must not bounce us to
+        # localhost / a private range.
+        try:
+            parsed = urllib.parse.urlsplit(newurl)
+        except ValueError:
+            parsed = None
+        if (
+            parsed is None
+            or parsed.scheme not in ("http", "https")
+            or _is_blocked_network_host(parsed.hostname)
+        ):
+            raise urllib.error.HTTPError(
+                req.full_url,
+                code,
+                f"Refused redirect to disallowed target: {newurl!r}",
+                headers,
+                fp,
             )
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
@@ -180,8 +239,16 @@ def safe_download_media(
     expected_hash: Optional[str] = None,
     use_cache: bool = True,
     cache: Optional[AssetCache] = None,
+    allow_local: bool = False,
+    allow_private_network: bool = False,
 ) -> str:
-    """Download a media URL safely with streaming, limits, and caching.
+    """Download a media URL safely with streaming, limits, SSRF guards and caching.
+
+    Only ``http``/``https`` URLs are accepted by default. Local paths /
+    ``file://`` URLs require ``allow_local=True`` (trusted callers only), and
+    URLs resolving to private / loopback / link-local hosts require
+    ``allow_private_network=True``. Both default to fail-closed so provider
+    or LLM-supplied URLs cannot read local files or hit internal services.
 
     Returns:
         Absolute string path to destination file.
@@ -189,13 +256,28 @@ def safe_download_media(
     out_dest = Path(out_path)
     out_dest.parent.mkdir(parents=True, exist_ok=True)
 
-    # Local file URL or local path handling
+    # Local file URL or local path handling — opt-in only.
     if url.startswith("file://") or (not url.startswith("http://") and not url.startswith("https://")):
+        if not allow_local:
+            raise ValueError(
+                "Refusing non-http(s) media source (possible local-file read): "
+                f"{url!r}. Pass allow_local=True only for trusted local paths."
+            )
         local_src = Path(url.replace("file://", ""))
         if not local_src.exists():
             raise FileNotFoundError(f"Local source file not found: {url}")
         shutil.copy2(str(local_src), str(out_dest))
         return str(out_dest.resolve())
+
+    # SSRF guard: reject malformed URLs and private/loopback/link-local hosts.
+    parsed_url = urllib.parse.urlsplit(url)
+    if parsed_url.scheme not in ("http", "https") or not parsed_url.hostname:
+        raise ValueError(f"Unsupported or malformed media URL: {url!r}")
+    if not allow_private_network and _is_blocked_network_host(parsed_url.hostname):
+        raise ValueError(
+            "Refusing media URL pointing at a private/loopback/link-local host: "
+            f"{parsed_url.hostname!r}"
+        )
 
     max_bytes = max_bytes or CONFIG.asset_max_download_bytes
     timeout = timeout or CONFIG.openverse_timeout

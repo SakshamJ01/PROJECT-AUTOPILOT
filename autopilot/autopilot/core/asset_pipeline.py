@@ -31,7 +31,13 @@ from autopilot.core.visual_semantic import (
     visual_semantic_min_similarity,
     VisualSemanticUnavailable,
 )
-from autopilot.core.asset_cache import safe_download_media, compute_file_sha256, compute_image_phash, AssetCache
+from autopilot.core.asset_cache import (
+    safe_download_media,
+    compute_file_sha256,
+    compute_image_phash,
+    sanitize_filename,
+    AssetCache,
+)
 from autopilot.core.asset_normalizer import normalize_asset
 from autopilot.core.media_inspection import inspect_media
 from autopilot.core.artifacts import job_artifact_dir
@@ -530,7 +536,9 @@ def process_scene_assets(
                         break
 
                     # 5. Safe Download & Cache
-                    source_dest = job_asset_dir / f"src_{scene.scene_id}_{selected_candidate.candidate_id}{file_ext}"
+                    safe_scene_id = sanitize_filename(str(scene.scene_id))
+                    safe_candidate_id = sanitize_filename(str(selected_candidate.candidate_id))
+                    source_dest = job_asset_dir / f"src_{safe_scene_id}_{safe_candidate_id}{file_ext}"
                     try:
                         downloaded_path_str = active_prov.download(selected_candidate, str(source_dest))
                         downloaded_path = Path(downloaded_path_str)
@@ -576,7 +584,17 @@ def process_scene_assets(
                     # Real CLIP gate against scene narration + visual_intent + asset_query.
                     # Provider-generated tags are never used as semantic evidence.
                     # HARD FAILURE is preferable to an unrelated asset.
-                    gated_providers = ("pexels", "pixabay", "openverse")
+                    # Every real-asset provider must pass the same CLIP gate.
+                    # Omitting archive_org/wikimedia_commons here meant those
+                    # assets carried no semantic_score, so creative QA scored
+                    # them 35 and hard-blocked every job that used them.
+                    gated_providers = (
+                        "pexels",
+                        "pixabay",
+                        "openverse",
+                        "archive_org",
+                        "wikimedia_commons",
+                    )
                     if active_pname in gated_providers and visual_semantic_enabled():
                         try:
                             visual_evidence = visual_semantic_verify(
@@ -674,7 +692,7 @@ def process_scene_assets(
                 seen_checksums.add(source_sha256)
 
                 # 7. Normalization
-                normalized_dest = job_asset_dir / f"norm_{scene.scene_id}_{selected_candidate.candidate_id}{file_ext}"
+                normalized_dest = job_asset_dir / f"norm_{safe_scene_id}_{safe_candidate_id}{file_ext}"
                 try:
                     normalized_path_str = active_prov.normalize(
                         str(downloaded_path),

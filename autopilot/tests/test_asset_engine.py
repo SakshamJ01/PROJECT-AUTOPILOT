@@ -195,7 +195,7 @@ def test_safe_downloader_and_cache_cycle(tmp_path):
     img.save(src_file)
 
     out_dest = tmp_path / "downloaded.png"
-    downloaded = safe_download_media(str(src_file), out_dest, use_cache=True, cache=cache)
+    downloaded = safe_download_media(str(src_file), out_dest, use_cache=True, cache=cache, allow_local=True)
     assert Path(downloaded).exists()
     sha = compute_file_sha256(downloaded)
     assert len(sha) == 64

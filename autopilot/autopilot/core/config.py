@@ -9,7 +9,31 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 
+# Fields whose values must never be shown by repr()/str()/logs.
+_SECRET_CONFIG_FIELDS = frozenset(
+    {
+        "gemini_api_key",
+        "openrouter_api_key",
+        "pexels_api_key",
+        "pixabay_api_key",
+        "postiz_api_key",
+        "youtube_access_token",
+        "atria_api_key",
+    }
+)
+
+
 class Config(BaseModel):
+    def __repr__(self) -> str:
+        rendered = {}
+        for name in type(self).model_fields:
+            value = getattr(self, name, None)
+            rendered[name] = "[REDACTED]" if (name in _SECRET_CONFIG_FIELDS and value) else value
+        return f"Config({rendered!r})"
+
+    def __str__(self) -> str:
+        return self.__repr__()
+
     project_root: Path = Field(default_factory=lambda: Path(__file__).resolve().parent.parent.parent)
     artifacts_dir: Path = Field(default_factory=lambda: Path(__file__).resolve().parent.parent.parent / "artifacts")
     db_path: Path = Field(default_factory=lambda: Path(__file__).resolve().parent.parent.parent / "artifacts" / "autopilot.db")
@@ -73,6 +97,14 @@ class Config(BaseModel):
     openrouter_api_key: Optional[str] = None
     openrouter_model: Optional[str] = None
     openrouter_endpoint: str = "https://openrouter.ai/api/v1"
+
+    # Atria (OpenAI-compatible) LLM. The provider reads these via
+    # getattr(CONFIG, "atria_*"), which silently returned its own defaults while
+    # the fields did not exist — so `.env` config and the error message pointed
+    # at a setting that could not be set. Declared now.
+    atria_api_key: Optional[str] = None
+    atria_endpoint: str = "https://api.atria-asi.ai/v1"
+    atria_model: str = "Atria-Dawn-Preview"
 
     # Asset Engine & Openverse configurations
     openverse_enabled: bool = True
@@ -174,10 +206,11 @@ class Config(BaseModel):
 
     def __init__(self, **data):
         # Auto-load .env files if present
+        # Deliberately do NOT read Path.cwd()/.env: an attacker-controlled working
+        # directory could otherwise inject configuration/secrets silently.
         for env_path in (
             Path(__file__).resolve().parent.parent.parent / ".env",
             Path(__file__).resolve().parent.parent.parent.parent / ".env",
-            Path.cwd() / ".env",
         ):
             if env_path.exists():
                 try:
@@ -286,6 +319,12 @@ class Config(BaseModel):
             "OPENROUTER_API_KEY": "openrouter_api_key",
             "AUTOPILOT_OPENROUTER_API_KEY": "openrouter_api_key",
             "OPENROUTER_KEY": "openrouter_api_key",
+            "ATRIA_API_KEY": "atria_api_key",
+            "AUTOPILOT_ATRIA_API_KEY": "atria_api_key",
+            "ATRIA_ENDPOINT": "atria_endpoint",
+            "ATRIA_BASE_URL": "atria_endpoint",
+            "ATRIA_MODEL": "atria_model",
+            "AUTOPILOT_ATRIA_MODEL": "atria_model",
             "OPENROUTER_MODEL": "openrouter_model",
             "AUTOPILOT_OPENROUTER_MODEL": "openrouter_model",
             "OPENROUTER_BASE_URL": "openrouter_endpoint",
